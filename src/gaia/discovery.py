@@ -67,6 +67,7 @@ class JsonRegistryCollector(Collector):
         response.raise_for_status()
         payload = response.json()
         postings: list[Posting] = []
+        discovery_postings: list[Posting] = []
         for item in payload:
             if not item.get("active", True) or not item.get("is_visible", True):
                 continue
@@ -75,20 +76,26 @@ class JsonRegistryCollector(Collector):
             company = _clean_cell(str(item.get("company_name") or ""))
             if not url or not title or not company:
                 continue
-            posting = Posting(
-                company=company,
-                title=title,
-                apply_url=url,
-                source=self.name,
-                source_id=str(item.get("id") or url),
-                locations=[str(value) for value in item.get("locations") or []],
-                source_mode="registry",
-                posted_at=parse_date(item.get("date_posted")),
-                posted_raw=str(item.get("date_posted") or "") or None,
-                posted_precision="timestamp" if item.get("date_posted") else "unknown",
-                posted_confidence="registry-reported" if item.get("date_posted") else "unknown",
+            posting = classify(
+                Posting(
+                    company=company,
+                    title=title,
+                    apply_url=url,
+                    source=self.name,
+                    source_id=str(item.get("id") or url),
+                    locations=[str(value) for value in item.get("locations") or []],
+                    source_mode="registry",
+                    posted_at=parse_date(item.get("date_posted")),
+                    posted_raw=str(item.get("date_posted") or "") or None,
+                    posted_precision="timestamp" if item.get("date_posted") else "unknown",
+                    posted_confidence="registry-reported" if item.get("date_posted") else "unknown",
+                ),
+                source_confirms_2027=True,
             )
-            postings.append(classify(posting, source_confirms_2027=True))
+            if _is_known_board_landing(posting.apply_url):
+                discovery_postings.append(posting)
+            else:
+                postings.append(posting)
         return CollectorResult(
             self.name,
             postings,
@@ -97,6 +104,7 @@ class JsonRegistryCollector(Collector):
             len(payload),
             len(payload),
             status="loaded",
+            discovery_postings=discovery_postings,
         )
 
 
@@ -110,15 +118,20 @@ class MarkdownRegistryCollector(Collector):
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         response = await client.get(self.url)
         response.raise_for_status()
-        postings = _document_postings(response.text, source=self.name, registry=True)
+        parsed = _document_postings(response.text, source=self.name, registry=True)
+        postings = [posting for posting in parsed if not _is_known_board_landing(posting.apply_url)]
+        discovery_postings = [
+            posting for posting in parsed if _is_known_board_landing(posting.apply_url)
+        ]
         return CollectorResult(
             self.name,
             postings,
             True,
             self.mode,
-            len(postings),
+            len(parsed),
             None,
             status="loaded",
+            discovery_postings=discovery_postings,
         )
 
 
@@ -353,6 +366,28 @@ def _greenhouse_token(url: str) -> str | None:
         if token not in {"jobs", "job", "embed", "apply"} and not token.isdigit():
             return token
     return None
+
+
+def _is_known_board_landing(url: str) -> bool:
+    parts = urlsplit(url)
+    host = parts.netloc.lower()
+    path = parts.path.rstrip("/")
+    query = parse_qs(parts.query)
+    segments = [value for value in path.split("/") if value]
+
+    if "greenhouse.io" in host:
+        if query.get("gh_jid") or query.get("job_id") or query.get("token"):
+            return False
+        if re.search(r"/(?:jobs?|apply)/(?:\d+|[0-9a-f-]{20,})(?:/|$)", path, re.I):
+            return False
+        return _greenhouse_token(url) is not None
+    if host == "jobs.lever.co":
+        return len(segments) == 1
+    if host == "jobs.ashbyhq.com":
+        return len(segments) == 1
+    if ".myworkdayjobs.com" in host:
+        return "/job/" not in path.lower()
+    return False
 
 
 def _workday_site(segments: list[str]) -> str | None:
