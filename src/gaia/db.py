@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -29,7 +30,9 @@ SOURCE_RANK = {
     "universe-seed": 4,
 }
 EMPLOYER_DATE_MODES = {"direct", "verification"}
-UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+)
 
 
 def iso(value: datetime | None) -> str | None:
@@ -37,7 +40,7 @@ def iso(value: datetime | None) -> str | None:
 
 
 def application_identity(url: str, source: str, source_id: str) -> str:
-    """Collapse direct and fallback copies without merging distinct requisitions."""
+    """Collapse copies from different feeds without merging distinct requisitions."""
     parts = urlsplit(url)
     host = parts.netloc.lower()
     path = parts.path.rstrip("/")
@@ -60,8 +63,9 @@ def application_identity(url: str, source: str, source_id: str) -> str:
     if "smartrecruiters.com" in host:
         if match := re.search(r"/(\d{8,})(?:/|$)", path):
             return f"smartrecruiters:{match.group(1)}"
-    if source.startswith("workday:") and source_id:
-        return f"{source}:{source_id}"
+    if "myworkdayjobs.com" in host:
+        if match := re.search(r"_([A-Za-z]{0,6}\d[A-Za-z0-9-]*)$", path):
+            return f"workday:{host}:{match.group(1).lower()}"
 
     if path.endswith("/apply"):
         path = path[: -len("/apply")]
@@ -518,7 +522,7 @@ class Database:
     def coverage(self) -> dict[str, object]:
         with self.connect() as db:
             health = [dict(row) for row in db.execute("SELECT * FROM source_health ORDER BY source")]
-            counts = dict(
+            family_counts = dict(
                 db.execute(
                     """
                     SELECT
@@ -532,12 +536,89 @@ class Database:
                     """
                 ).fetchone()
             )
-        complete = sum(bool(row["complete"]) for row in health)
+            posting_rows = db.execute(
+                """
+                SELECT canonical_apply_url, source, source_id, source_mode, company
+                FROM postings
+                WHERE active=1
+                  AND target_match IN ('exact','year_confirmed','source_confirmed')
+                """
+            ).fetchall()
+
+        identities: dict[str, set[str]] = {
+            "registry": set(),
+            "direct": set(),
+            "verification": set(),
+            "external-index": set(),
+        }
+        companies_by_mode: dict[str, set[str]] = {
+            mode: set() for mode in identities
+        }
+        for row in posting_rows:
+            mode = str(row["source_mode"])
+            if mode not in identities:
+                continue
+            identity = application_identity(
+                str(row["canonical_apply_url"]),
+                str(row["source"]),
+                str(row["source_id"]),
+            )
+            identities[mode].add(identity)
+            companies_by_mode[mode].add(str(row["company"]))
+
+        independently_recovered = identities["direct"] | identities["verification"]
+        registry_floor = identities["registry"]
+        direct_matches = registry_floor & identities["direct"]
+        independent_matches = registry_floor & independently_recovered
+        registry_only = registry_floor - independently_recovered
+        direct_only = identities["direct"] - registry_floor
+        mode_counts = Counter(str(row["mode"]) for row in health)
+        complete_enumerators = sum(
+            bool(row["complete"]) and str(row["mode"]) == "board" for row in health
+        )
+        broken = sum(bool(row["last_error"]) for row in health)
+        zero_result_enumerators = sum(
+            bool(row["complete"])
+            and str(row["mode"]) == "board"
+            and int(row["rows_scanned"] or 0) == 0
+            for row in health
+        )
+        truncated = sum(
+            row["expected_rows"] is not None
+            and int(row["rows_scanned"] or 0) < int(row["expected_rows"])
+            for row in health
+        )
+        registry_recall = (
+            round(100 * len(independent_matches) / len(registry_floor), 1)
+            if registry_floor
+            else None
+        )
+
         return {
-            "summary": counts,
+            "summary": {
+                **family_counts,
+                "known_applications": len(set().union(*identities.values())),
+                "registry_floor": len(registry_floor),
+                "direct_applications": len(identities["direct"]),
+                "verified_applications": len(identities["verification"]),
+                "direct_matches": len(direct_matches),
+                "independent_matches": len(independent_matches),
+                "registry_only": len(registry_only),
+                "direct_only": len(direct_only),
+                "registry_recall_percent": registry_recall,
+            },
+            "contract": {
+                "configured_sources": len(health),
+                "complete_enumerators": complete_enumerators,
+                "broken_sources": broken,
+                "zero_result_enumerators": zero_result_enumerators,
+                "truncated_sources": truncated,
+                "modes": dict(mode_counts),
+                "companies_by_mode": {
+                    mode: len(companies) for mode, companies in companies_by_mode.items()
+                },
+            },
             "sources": health,
-            "healthy": complete,
-            "configured": len(health),
         }
 
     @staticmethod
