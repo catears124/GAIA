@@ -9,8 +9,13 @@ from typing import Any
 import httpx
 
 from .collectors import Collector, CollectorResult
+from .config import load_sources
 from .db import Database
-from .discovery import collectors_from_registry, registry_collectors
+from .discovery import (
+    collectors_from_registry,
+    load_universe_seed_postings,
+    registry_collectors,
+)
 from .models import Posting
 
 LOGGER = logging.getLogger("gaia")
@@ -21,9 +26,15 @@ class SyncSummary:
     sources: int = 0
     postings: int = 0
     failed: int = 0
+    universe_seeds: int = 0
 
     def as_dict(self) -> dict[str, int]:
-        return {"sources": self.sources, "postings": self.postings, "failed": self.failed}
+        return {
+            "sources": self.sources,
+            "postings": self.postings,
+            "failed": self.failed,
+            "universe_seeds": self.universe_seeds,
+        }
 
 
 class SyncService:
@@ -48,25 +59,36 @@ class SyncService:
         async with self._lock:
             run_id = self.db.start_run()
             summary = SyncSummary()
+            settings = load_sources()
             headers = {
                 "User-Agent": os.getenv(
-                    "GAIA_USER_AGENT", "GAIA/1.0 internship-research (+github.com/catears124/GAIA)"
+                    "GAIA_USER_AGENT",
+                    "GAIA/1.0 internship-research (+github.com/catears124/GAIA)",
                 ),
                 "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
             }
             timeout = httpx.Timeout(float(os.getenv("GAIA_HTTP_TIMEOUT", "30")))
             limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
             async with httpx.AsyncClient(
-                headers=headers, timeout=timeout, limits=limits, follow_redirects=True
+                headers=headers,
+                timeout=timeout,
+                limits=limits,
+                follow_redirects=True,
             ) as client:
-                registry_results = await self._run_collectors(registry_collectors(), client, summary)
+                registry_results = await self._run_collectors(
+                    registry_collectors(settings), client, summary
+                )
                 registry_postings: list[Posting] = [
                     posting
                     for result in registry_results
                     if result.error is None
                     for posting in result.postings
                 ]
-                direct_collectors = collectors_from_registry(registry_postings)
+                universe_seeds = await load_universe_seed_postings(client, settings)
+                summary.universe_seeds = len(universe_seeds)
+                direct_collectors = collectors_from_registry(
+                    [*registry_postings, *universe_seeds], settings
+                )
                 await self._run_collectors(direct_collectors, client, summary)
             self.db.finish_run(
                 run_id,
