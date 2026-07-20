@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from gaia.classify import classify
-from gaia.db import Database
+from gaia.db import Database, application_identity
 from gaia.grouping import family_key, normalize_title
 from gaia.models import CollectorResult, Posting
 
@@ -79,6 +79,13 @@ def test_title_normalization_is_conservative():
     )
 
 
+def test_workday_identity_matches_across_direct_and_registry_sources():
+    url = "https://example.wd5.myworkdayjobs.com/External/job/Austin/Intern_R123"
+    direct = application_identity(url, "workday:example:External", "R123")
+    registry = application_identity(url, "registry:test", "row-1")
+    assert direct == registry
+
+
 def test_database_materializes_family(tmp_path):
     db = Database(tmp_path / "gaia.db")
     one = posting(source_id="1", locations=["PA - Lansdale"])
@@ -93,3 +100,51 @@ def test_database_materializes_family(tmp_path):
     assert family["opening_count"] == 2
     assert family["location_count"] == 2
     assert family["posted_precision"] == "day"
+
+
+def test_direct_and_registry_copies_are_one_opening_and_registry_date_is_not_employer_date(
+    tmp_path,
+):
+    db = Database(tmp_path / "gaia.db")
+    direct = classify(
+        Posting(
+            company="Example",
+            title="Software Engineer Intern, Summer 2027",
+            apply_url="https://job-boards.greenhouse.io/example/jobs/123",
+            source="greenhouse:example",
+            source_id="123",
+            locations=["New York, NY"],
+            posted_at=datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+            posted_precision="timestamp",
+            posted_confidence="official",
+        )
+    )
+    registry = classify(
+        Posting(
+            company="Example",
+            title="Software Engineer Intern, Summer 2027",
+            apply_url="https://job-boards.greenhouse.io/example/jobs/123?utm_source=tracker",
+            source="registry:test",
+            source_id="row-1",
+            source_mode="registry",
+            locations=["New York, NY"],
+            posted_at=datetime(2026, 7, 19, 12, tzinfo=timezone.utc),
+            posted_precision="timestamp",
+            posted_confidence="registry-reported",
+        ),
+        source_confirms_2027=True,
+    )
+    db.apply_result(CollectorResult("registry:test", [registry], True, "registry", 1, 1))
+    db.apply_result(CollectorResult("greenhouse:example", [direct], True, "board", 1, 1))
+
+    family = db.list_families()["items"][0]
+    assert family["opening_count"] == 1
+    assert family["direct_openings"] == 1
+    assert family["backstop_openings"] == 0
+    assert family["latest_posted_at"] == "2026-07-20T12:00:00+00:00"
+
+    coverage = db.coverage()["summary"]
+    assert coverage["registry_floor"] == 1
+    assert coverage["direct_matches"] == 1
+    assert coverage["registry_only"] == 0
+    assert coverage["registry_recall_percent"] == 100.0
