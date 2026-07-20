@@ -16,6 +16,7 @@ from .discovery import (
     load_universe_seed_postings,
     registry_collectors,
 )
+from .embed_discovery import greenhouse_embed_collectors
 from .models import Posting
 
 LOGGER = logging.getLogger("gaia")
@@ -100,8 +101,13 @@ class SyncService:
                     )
                     summary.universe_seeds = len(universe_seeds)
                     self._record_seed_health(seed_health, summary, run_id)
-                    direct_collectors = collectors_from_registry(
-                        [*registry_postings, *universe_seeds], settings
+                    discovery_postings = [*registry_postings, *universe_seeds]
+                    direct_collectors = collectors_from_registry(discovery_postings, settings)
+                    known_names = {collector.name for collector in direct_collectors}
+                    direct_collectors.extend(
+                        collector
+                        for collector in greenhouse_embed_collectors(discovery_postings)
+                        if collector.name not in known_names
                     )
                     await self._run_collectors(
                         direct_collectors, client, summary, run_id
