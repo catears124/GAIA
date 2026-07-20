@@ -6,6 +6,7 @@ import pytest
 from gaia.discovery import (
     _choose_apply_url,
     _document_postings,
+    _greenhouse_token,
     _workday_site,
     collectors_from_registry,
     load_universe_seed_postings,
@@ -49,6 +50,22 @@ def test_markdown_company_link_is_cleaned_before_source_naming():
     """
     postings = _document_postings(body, source="registry:test", registry=True)
     assert postings[0].company == "Flipp"
+
+
+def test_greenhouse_embed_for_parameter_resolves_board_token():
+    url = "https://boards.greenhouse.io/embed/job_board?for=flipp"
+    assert _greenhouse_token(url) == "flipp"
+    posting = Posting(
+        company="Flipp",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url=url,
+        source="registry:test",
+        source_id="1",
+        source_mode="registry",
+    )
+    collectors = collectors_from_registry([posting], settings={"release_canaries": {}})
+    assert [collector.name for collector in collectors] == ["greenhouse:flipp"]
+    assert collectors[0].scope == "current"
 
 
 def test_historical_custom_pages_do_not_become_verification_obligations():
