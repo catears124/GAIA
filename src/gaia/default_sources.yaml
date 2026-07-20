@@ -1,0 +1,28 @@
+target_registries:
+  - kind: json
+    name: vansh-2027
+    url: https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json
+  - kind: markdown
+    name: zapply-2027
+    url: https://raw.githubusercontent.com/zapplyjobs/Internships-2027/main/README.md
+  - kind: markdown
+    name: speedy-swe-2027-us
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md
+  - kind: markdown
+    name: speedy-swe-2027-intl
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
+
+# These feeds seed employer/ATS discovery only. Their old roles never enter the 2027 feed.
+universe_seeds:
+  - https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/.github/scripts/listings.json
+  - https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md
+  - https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/INTERN_INTL.md
+  - https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md
+
+release_canaries:
+  google:
+    enabled: true
+    mode: direct
+  databricks:
+    enabled: true
+    mode: external-index
