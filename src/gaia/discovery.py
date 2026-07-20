@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from collections import defaultdict
 from typing import Any
@@ -21,17 +20,8 @@ from .collectors import (
     WorkdayCollector,
     parse_date,
 )
+from .config import load_sources
 from .models import Posting
-
-VANSH_JSON = (
-    "https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/"
-    "dev/.github/scripts/listings.json"
-)
-ZAPPLY_README = "https://raw.githubusercontent.com/zapplyjobs/Internships-2027/main/README.md"
-SPEEDY_READMES = [
-    "https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md",
-    "https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md",
-]
 
 MARKDOWN_LINK_RE = re.compile(r"\[.*?\]\((https?://[^)]+)\)")
 HTML_LINK_RE = re.compile(r'href=["\'](https?://[^"\']+)["\']', re.I)
@@ -40,7 +30,7 @@ HTML_LINK_RE = re.compile(r'href=["\'](https?://[^"\']+)["\']', re.I)
 class JsonRegistryCollector(Collector):
     mode = "registry"
 
-    def __init__(self, name: str, url: str = VANSH_JSON) -> None:
+    def __init__(self, name: str, url: str) -> None:
         self.name = f"registry:{name}"
         self.url = url
 
@@ -84,53 +74,107 @@ class MarkdownRegistryCollector(Collector):
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         response = await client.get(self.url)
         response.raise_for_status()
-        postings: list[Posting] = []
-        for index, line in enumerate(response.text.splitlines()):
-            if not line.lstrip().startswith("|") or "intern" not in line.lower():
-                continue
-            columns = [re.sub(r"<[^>]+>", "", value).strip(" *") for value in line.split("|")[1:-1]]
-            urls = MARKDOWN_LINK_RE.findall(line) + HTML_LINK_RE.findall(line)
-            if len(columns) < 2 or not urls:
-                continue
-            company = columns[0] or "Unknown"
-            title = columns[1]
-            location = columns[2] if len(columns) > 2 else ""
-            posting = Posting(
-                company=company,
-                title=title,
-                apply_url=urls[-1],
-                source=self.name,
-                source_id=f"{index}:{urls[-1]}",
-                locations=[location] if location else [],
-                source_mode="registry",
-            )
-            classified = classify(posting, source_confirms_2027=True)
-            if classified.target_match != "not_internship":
-                postings.append(classified)
+        postings = _markdown_postings(response.text, source=self.name, registry=True)
         return CollectorResult(self.name, postings, True, self.mode, len(postings), None)
 
 
-def registry_collectors() -> list[Collector]:
-    return [
-        JsonRegistryCollector("vansh"),
-        MarkdownRegistryCollector("zapply", ZAPPLY_README),
-        *(MarkdownRegistryCollector(f"speedy-{index}", url) for index, url in enumerate(SPEEDY_READMES)),
-    ]
+def _markdown_postings(body: str, *, source: str, registry: bool) -> list[Posting]:
+    postings: list[Posting] = []
+    for index, line in enumerate(body.splitlines()):
+        if not line.lstrip().startswith("|") or "intern" not in line.lower():
+            continue
+        columns = [re.sub(r"<[^>]+>", "", value).strip(" *") for value in line.split("|")[1:-1]]
+        urls = MARKDOWN_LINK_RE.findall(line) + HTML_LINK_RE.findall(line)
+        if len(columns) < 2 or not urls:
+            continue
+        company = columns[0] or "Unknown"
+        title = columns[1]
+        location = columns[2] if len(columns) > 2 else ""
+        posting = Posting(
+            company=company,
+            title=title,
+            apply_url=urls[-1],
+            source=source,
+            source_id=f"{index}:{urls[-1]}",
+            locations=[location] if location else [],
+            source_mode="registry" if registry else "universe-seed",
+        )
+        classified = classify(posting, source_confirms_2027=registry)
+        if classified.target_match != "not_internship":
+            postings.append(classified)
+    return postings
+
+
+def registry_collectors(settings: dict[str, Any] | None = None) -> list[Collector]:
+    settings = settings or load_sources()
+    collectors: list[Collector] = []
+    for item in settings.get("target_registries", []):
+        kind = item.get("kind")
+        if kind == "json":
+            collectors.append(JsonRegistryCollector(str(item["name"]), str(item["url"])))
+        elif kind == "markdown":
+            collectors.append(MarkdownRegistryCollector(str(item["name"]), str(item["url"])))
+    return collectors
+
+
+async def load_universe_seed_postings(
+    client: httpx.AsyncClient, settings: dict[str, Any] | None = None
+) -> list[Posting]:
+    settings = settings or load_sources()
+    output: list[Posting] = []
+    for source_index, url in enumerate(settings.get("universe_seeds", [])):
+        try:
+            response = await client.get(str(url))
+            response.raise_for_status()
+            if str(url).endswith(".json"):
+                for item in response.json():
+                    company = str(item.get("company_name") or "").strip()
+                    title = str(item.get("title") or "").strip()
+                    apply_url = str(item.get("url") or "").strip()
+                    if company and title and apply_url:
+                        output.append(
+                            Posting(
+                                company=company,
+                                title=title,
+                                apply_url=apply_url,
+                                source=f"universe-seed:{source_index}",
+                                source_id=str(item.get("id") or apply_url),
+                                source_mode="universe-seed",
+                            )
+                        )
+            else:
+                output.extend(
+                    _markdown_postings(
+                        response.text,
+                        source=f"universe-seed:{source_index}",
+                        registry=False,
+                    )
+                )
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Seed failures reduce discovery breadth but never invalidate current target rows.
+            continue
+    return output
 
 
 def _greenhouse_token(url: str) -> str | None:
     parts = urlsplit(url)
     segments = [value for value in parts.path.split("/") if value]
-    if parts.netloc in {"boards.greenhouse.io", "job-boards.greenhouse.io", "job-boards.eu.greenhouse.io"}:
-        if not segments:
-            return None
+    greenhouse_hosts = {
+        "boards.greenhouse.io",
+        "job-boards.greenhouse.io",
+        "job-boards.eu.greenhouse.io",
+    }
+    if parts.netloc in greenhouse_hosts and segments:
         token = segments[0]
         if token not in {"jobs", "job", "embed", "apply"} and not token.isdigit():
             return token
     return None
 
 
-def collectors_from_registry(postings: list[Posting]) -> list[Collector]:
+def collectors_from_registry(
+    postings: list[Posting], settings: dict[str, Any] | None = None
+) -> list[Collector]:
+    settings = settings or load_sources()
     greenhouse: dict[str, str] = {}
     lever: dict[str, str] = {}
     ashby: dict[str, str] = {}
@@ -153,7 +197,7 @@ def collectors_from_registry(postings: list[Posting]) -> list[Collector]:
         elif host == "jobs.ashbyhq.com" and segments:
             ashby[segments[0]] = posting.company
         elif ".myworkdayjobs.com" in host and segments:
-            tenant = host.split(".", 1)[0].split(".wd", 1)[0]
+            tenant = host.split(".", 1)[0]
             site = segments[0]
             root = f"{parts.scheme}://{host}"
             workday[(root, tenant, site)] = posting.company
@@ -163,7 +207,6 @@ def collectors_from_registry(postings: list[Posting]) -> list[Collector]:
             include_databricks = True
             schema_pages[(posting.company, host)].add(url)
         else:
-            # Verification-only pages never count as complete employer enumeration.
             schema_pages[(posting.company, host)].add(url)
 
     collectors: list[Collector] = []
@@ -179,9 +222,11 @@ def collectors_from_registry(postings: list[Posting]) -> list[Collector]:
         for (company, host), urls in schema_pages.items()
         if host and len(urls) <= 50
     )
-    if include_google or True:  # release canary; not the definition of the company universe
+
+    canaries = settings.get("release_canaries", {})
+    if include_google or canaries.get("google", {}).get("enabled", False):
         collectors.append(GoogleCareersCollector())
-    if include_databricks or True:
+    if include_databricks or canaries.get("databricks", {}).get("enabled", False):
         collectors.append(DatabricksIndexCollector())
 
     unique: dict[str, Collector] = {}
@@ -193,6 +238,6 @@ def collectors_from_registry(postings: list[Posting]) -> list[Collector]:
 def dump_discovery(postings: list[Posting]) -> dict[str, Any]:
     collectors = collectors_from_registry(postings)
     return {
-        "registry_postings": len(postings),
+        "seed_postings": len(postings),
         "collectors": [{"name": item.name, "mode": item.mode} for item in collectors],
     }
