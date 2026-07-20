@@ -22,8 +22,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if os.getenv("GAIA_INITIAL_SYNC", "1") == "1":
         service.start_background()
     yield
-    if service.running and service._task is not None:
-        service._task.cancel()
+    await service.stop()
 
 
 app = FastAPI(title="GAIA", version="1.0.0", lifespan=lifespan)
