@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="GAIA — Great, Another Internship Aggregator">
   <title>GAIA</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=1.0.0">
+  <link rel="stylesheet" href="/assets/styles.css?v=1.0.1">
 </head>
 <body>
   <header class="topbar">
@@ -21,10 +21,10 @@
 
   <main>
     <section id="metrics" class="metrics">
-      <article><span>Role families</span><strong id="metric-families">—</strong><small>conservative grouping</small></article>
-      <article><span>Companies</span><strong id="metric-companies">—</strong><small>configured source universe</small></article>
-      <article><span>Directly recovered</span><strong id="metric-direct">—</strong><small>not registry-only</small></article>
-      <article><span>Source health</span><strong id="metric-health">—</strong><small>complete enumerations</small></article>
+      <article><span>Role families</span><strong id="metric-families">—</strong><small>applications grouped conservatively</small></article>
+      <article><span>Companies</span><strong id="metric-companies">—</strong><small>with confirmed target roles</small></article>
+      <article><span>Registry recall</span><strong id="metric-direct">—</strong><small>independently recovered applications</small></article>
+      <article><span>Enumerators</span><strong id="metric-health">—</strong><small>complete board traversals</small></article>
     </section>
 
     <nav class="tabs" aria-label="Views">
@@ -36,7 +36,7 @@
       <div class="toolbar">
         <label class="search"><span>Search</span><input id="search" type="search" placeholder="company, role, location" autocomplete="off"></label>
         <label><span>Category</span><select id="category"><option value="">All categories</option><option>software</option><option>ml-ai</option><option>quant</option><option>data</option><option>security</option><option>hardware</option><option>product</option><option>other</option></select></label>
-        <label><span>Evidence</span><select id="target"><option value="default">Confirmed 2027</option><option value="exact">Explicit Summer 2027</option><option value="year_confirmed">Explicit 2027</option><option value="source_confirmed">Registry-confirmed</option><option value="">All internships</option></select></label>
+        <label><span>Evidence</span><select id="target"><option value="default">Confirmed 2027</option><option value="exact">Explicit Summer 2027</option><option value="year_confirmed">Explicit 2027</option><option value="source_confirmed">Summer + 2027 registry</option><option value="">All internships</option></select></label>
         <label><span>Rows</span><select id="page-size"><option>50</option><option selected>100</option><option>250</option></select></label>
       </div>
 
@@ -50,9 +50,9 @@
     </section>
 
     <section id="coverage-view" hidden>
-      <div class="coverage-contract">
-        <h2>Coverage contract</h2>
-        <p>GAIA reports completeness only inside the generated source universe. A successful HTTP request is not enough: enumerating sources must complete pagination, while verification-only and external-index sources remain visibly non-complete.</p>
+      <div id="coverage-contract" class="coverage-contract">
+        <div class="contract-title"><h2>Coverage contract</h2><span id="coverage-grade" class="status warn">measuring</span></div>
+        <p id="coverage-contract-text">GAIA reports completeness only inside the generated source universe. Board sources must finish pagination; known-page verification, registries, and external indexes never become completeness claims.</p>
       </div>
       <div id="coverage-summary" class="coverage-grid"></div>
       <div class="table-shell coverage-table">
@@ -62,6 +62,6 @@
   </main>
 
   <dialog id="drawer"><button id="drawer-close" class="drawer-close" aria-label="Close">×</button><div id="drawer-content"></div></dialog>
-  <script src="/assets/app.js?v=1.0.0" defer></script>
+  <script src="/assets/app.js?v=1.0.1" defer></script>
 </body>
 </html>
