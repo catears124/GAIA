@@ -82,7 +82,9 @@ def json_ld_jobs(html: str) -> list[dict[str, Any]]:
     return jobs
 
 
-def posting_from_schema(job: dict[str, Any], *, source: str, source_mode: str = "direct") -> Posting | None:
+def posting_from_schema(
+    job: dict[str, Any], *, source: str, source_mode: str = "direct"
+) -> Posting | None:
     title = text(job.get("title"))
     url = text(job.get("url") or job.get("sameAs"))
     identifier = job.get("identifier")
@@ -152,20 +154,21 @@ class GoogleCareersCollector(Collector):
     mode = "board"
     base = "https://www.google.com/about/careers/applications/jobs/results/"
 
-    def __init__(self, pages: int = 8) -> None:
+    def __init__(self, pages: int = 50) -> None:
         self.pages = pages
 
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         discovered: dict[str, Posting] = {}
-        scanned = 0
+        exhausted = False
         for page in range(1, self.pages + 1):
             response = await client.get(
                 self.base,
-                params={"q": "intern 2027", "employment_type": "INTERN", "page": page},
+                params={"employment_type": "INTERN", "page": page},
             )
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
             page_ids: set[str] = set()
+            before = len(discovered)
             for anchor in soup.find_all("a", href=True):
                 href = str(anchor["href"])
                 match = JOB_URL_RE.search(href)
@@ -177,29 +180,27 @@ class GoogleCareersCollector(Collector):
                 if not title or title.lower() in {"learn more", "apply", "share"}:
                     slug = href.split("/results/", 1)[-1].split("?", 1)[0]
                     title = slug.split("-", 1)[-1].replace("-", " ").title()
-                url = urljoin(self.base, href)
-                candidate = classify(
-                    Posting(
-                        company="Google",
-                        title=title,
-                        apply_url=url,
-                        source=self.name,
-                        source_id=source_id,
-                        locations=[],
-                    )
+                discovered[source_id] = Posting(
+                    company="Google",
+                    title=title,
+                    apply_url=urljoin(self.base, href),
+                    source=self.name,
+                    source_id=source_id,
+                    locations=[],
                 )
-                if candidate.target_match != "not_internship":
-                    discovered[source_id] = candidate
-            scanned += len(page_ids)
-            if page > 1 and not page_ids:
+            if not page_ids or len(discovered) == before:
+                exhausted = True
                 break
 
         semaphore = asyncio.Semaphore(8)
 
         async def enrich(posting: Posting) -> Posting:
             async with semaphore:
-                response = await client.get(posting.apply_url)
-                response.raise_for_status()
+                try:
+                    response = await client.get(posting.apply_url)
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    return classify(posting)
                 schema = json_ld_jobs(response.text)
                 if schema:
                     parsed = posting_from_schema(schema[0], source=self.name)
@@ -218,9 +219,10 @@ class GoogleCareersCollector(Collector):
         return CollectorResult(
             source=self.name,
             postings=[item for item in postings if item.target_match != "not_internship"],
-            complete=True,
+            complete=exhausted,
             mode=self.mode,
-            rows_scanned=scanned,
+            rows_scanned=len(discovered),
+            expected_rows=len(discovered) if exhausted else None,
         )
 
 
@@ -272,7 +274,9 @@ class LeverCollector(Collector):
         self.name = f"lever:{site}"
 
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
-        response = await client.get(f"https://api.lever.co/v0/postings/{self.site}", params={"mode": "json"})
+        response = await client.get(
+            f"https://api.lever.co/v0/postings/{self.site}", params={"mode": "json"}
+        )
         response.raise_for_status()
         payload = response.json()
         postings = [
@@ -319,7 +323,8 @@ class AshbyCollector(Collector):
                         apply_url=text(job.get("jobUrl") or job.get("applyUrl")),
                         source=self.name,
                         source_id=text(job.get("id") or job.get("jobUrl")),
-                        locations=locations_from(job.get("location")) + locations_from(job.get("secondaryLocations")),
+                        locations=locations_from(job.get("location"))
+                        + locations_from(job.get("secondaryLocations")),
                         description=text(job.get("descriptionPlain") or job.get("descriptionHtml")),
                         employment_type=text(job.get("employmentType")),
                         posted_at=posted,
@@ -348,31 +353,34 @@ class WorkdayCollector(Collector):
         postings: list[Posting] = []
         offset = 0
         total: int | None = None
+        complete = False
         while total is None or offset < total:
             response = await client.post(
                 endpoint,
-                json={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": "intern"},
+                json={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": ""},
                 headers={"Origin": self.host, "Referer": f"{self.host}/{self.site}"},
             )
-            if response.status_code == 400 and offset == 0:
-                response = await client.post(
-                    endpoint,
-                    json={"appliedFacets": {}, "limit": 20, "offset": 0, "searchText": ""},
-                    headers={"Origin": self.host, "Referer": f"{self.host}/{self.site}"},
-                )
             response.raise_for_status()
             payload = response.json()
             total = int(payload.get("total") or len(payload.get("jobPostings", [])))
             page = payload.get("jobPostings", [])
             if not page:
+                complete = offset >= total
                 break
             for job in page:
                 raw_posted = text(job.get("postedOn"))
                 posted = None
-                if match := re.search(r"(\d+)\s+Day", raw_posted, re.I):
+                if re.search(r"\bToday\b", raw_posted, re.I):
+                    posted = datetime.now(timezone.utc)
+                elif match := re.search(r"(\d+)\+?\s+Day", raw_posted, re.I):
                     posted = datetime.now(timezone.utc) - timedelta(days=int(match.group(1)))
-                source_id = text(job.get("bulletFields", [""])[0] if job.get("bulletFields") else job.get("externalPath"))
-                url = urljoin(f"{self.host}/{self.site}/", text(job.get("externalPath")))
+                external_path = text(job.get("externalPath"))
+                source_id = text(
+                    job.get("bulletFields", [""])[0]
+                    if job.get("bulletFields")
+                    else external_path
+                )
+                url = f"{self.host}/{self.site}/{external_path.lstrip('/')}"
                 postings.append(
                     classify(
                         Posting(
@@ -391,9 +399,10 @@ class WorkdayCollector(Collector):
                     )
                 )
             offset += len(page)
-            if len(page) < 20:
+            if offset >= total:
+                complete = True
                 break
-        return CollectorResult(self.name, postings, True, self.mode, offset, total)
+        return CollectorResult(self.name, postings, complete, self.mode, offset, total)
 
 
 class SchemaPageCollector(Collector):
@@ -410,7 +419,11 @@ class SchemaPageCollector(Collector):
             response = await client.get(url)
             response.raise_for_status()
             for job in json_ld_jobs(response.text):
-                parsed = posting_from_schema(job, source=self.name)
+                parsed = posting_from_schema(
+                    job,
+                    source=self.name,
+                    source_mode="verification",
+                )
                 if parsed:
                     parsed.company = self.company
                     postings.append(classify(parsed))
