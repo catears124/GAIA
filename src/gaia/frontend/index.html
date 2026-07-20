@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="GAIA — Great, Another Internship Aggregator">
   <title>GAIA</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=1.0.1">
+  <link rel="stylesheet" href="/assets/styles.css?v=1.0.2">
 </head>
 <body>
   <header class="topbar">
@@ -24,7 +24,7 @@
       <article><span>Role families</span><strong id="metric-families">—</strong><small>applications grouped conservatively</small></article>
       <article><span>Companies</span><strong id="metric-companies">—</strong><small>with confirmed target roles</small></article>
       <article><span>Registry recall</span><strong id="metric-direct">—</strong><small>independently recovered applications</small></article>
-      <article><span>Enumerators</span><strong id="metric-health">—</strong><small>complete board traversals</small></article>
+      <article><span>Actionable gaps</span><strong id="metric-health">—</strong><small>current sources requiring engineering</small></article>
     </section>
 
     <nav class="tabs" aria-label="Views">
@@ -52,16 +52,20 @@
     <section id="coverage-view" hidden>
       <div id="coverage-contract" class="coverage-contract">
         <div class="contract-title"><h2>Coverage contract</h2><span id="coverage-grade" class="status warn">measuring</span></div>
-        <p id="coverage-contract-text">GAIA reports completeness only inside the generated source universe. Board sources must finish pagination; known-page verification, registries, and external indexes never become completeness claims.</p>
+        <p id="coverage-contract-text">GAIA reports benchmark recall and source limitations separately. Historical watch boards, closed benchmark pages, and anti-bot blocks do not inflate the actionable failure count.</p>
       </div>
       <div id="coverage-summary" class="coverage-grid"></div>
+      <div class="coverage-controls">
+        <label><span>Source queue</span><select id="coverage-filter"><option value="actionable">Actionable current gaps</option><option value="access">Access limited</option><option value="stale">Stale benchmark pages</option><option value="historical">Historical watches</option><option value="all">All sources in latest run</option></select></label>
+        <span id="coverage-source-count" class="muted"></span>
+      </div>
       <div class="table-shell coverage-table">
-        <table><thead><tr><th>Source</th><th>Mode</th><th>Status</th><th>Scanned</th><th>Targets</th><th>Expected</th><th>Last success</th><th>Error</th></tr></thead><tbody id="coverage-body"></tbody></table>
+        <table><thead><tr><th>Source</th><th>Scope</th><th>Mode</th><th>Status</th><th>Scanned</th><th>Targets</th><th>Expected</th><th>Last check</th><th>Detail</th></tr></thead><tbody id="coverage-body"></tbody></table>
       </div>
     </section>
   </main>
 
   <dialog id="drawer"><button id="drawer-close" class="drawer-close" aria-label="Close">×</button><div id="drawer-content"></div></dialog>
-  <script src="/assets/app.js?v=1.0.1" defer></script>
+  <script src="/assets/app.js?v=1.0.2" defer></script>
 </body>
 </html>
