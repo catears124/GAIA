@@ -90,12 +90,12 @@ class SyncService:
                         registry_collectors(settings), client, summary, run_id
                     )
                     self.db.rebuild_families()
-                    registry_postings: list[Posting] = [
-                        posting
-                        for result in registry_results
-                        if result.error is None
-                        for posting in result.postings
-                    ]
+                    registry_postings: list[Posting] = []
+                    for result in registry_results:
+                        if result.error is not None:
+                            continue
+                        registry_postings.extend(result.postings)
+                        registry_postings.extend(result.discovery_postings)
                     universe_seeds, seed_health = await load_universe_seed_postings(
                         client, settings
                     )
