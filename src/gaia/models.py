@@ -80,3 +80,4 @@ class CollectorResult:
     scope: str = "current"
     note: str | None = None
     closed_urls: list[str] = field(default_factory=list)
+    discovery_postings: list[Posting] = field(default_factory=list)
