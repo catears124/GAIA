@@ -39,6 +39,10 @@ def test_distinct_program_not_overgrouped():
     assert family_key(normal) != family_key(international)
 
 
+def test_seasonless_registry_role_is_not_promoted_to_summer_2027():
+    assert posting().target_match == "unknown"
+
+
 def test_fellowship_does_not_enter_internship_feed():
     item = classify(
         Posting(
@@ -83,7 +87,7 @@ def test_database_materializes_family(tmp_path):
     one.posted_precision = "day"
     result = CollectorResult("workday:cvs:jobs", [one, two], True, "board", 2, 2)
     db.apply_result(result)
-    page = db.list_families(target="source_confirmed")
+    page = db.list_families(target="")
     assert page["total"] == 1
     family = page["items"][0]
     assert family["opening_count"] == 2
