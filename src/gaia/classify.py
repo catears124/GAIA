@@ -6,14 +6,29 @@ from dataclasses import replace
 from .models import Posting
 
 INTERN_RE = re.compile(r"\b(intern(ship)?|co[- ]?op|industrial placement)\b", re.I)
-NEGATIVE_RE = re.compile(r"\b(fellow(ship)?|residen(cy|t)|apprentice(ship)?|new grad|graduate program)\b", re.I)
+NEGATIVE_RE = re.compile(
+    r"\b(fellow(ship)?|residen(cy|t)|apprentice(ship)?|new grad|graduate program)\b", re.I
+)
 YEAR_RE = re.compile(r"\b20(?:2[5-9]|3[0-5])\b")
 SUMMER_RE = re.compile(r"\bsummer\b", re.I)
 
 CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("quant", re.compile(r"\b(quant|trading|trader|systematic|research analyst)\b", re.I)),
-    ("ml-ai", re.compile(r"\b(machine learning|artificial intelligence|\bai\b|deep learning|computer vision|nlp)\b", re.I)),
-    ("software", re.compile(r"\b(software|developer|frontend|backend|full[- ]?stack|mobile|ios|android|site reliability|sre|devops|platform engineer)\b", re.I)),
+    (
+        "ml-ai",
+        re.compile(
+            r"\b(machine learning|artificial intelligence|\bai\b|deep learning|computer vision|nlp)\b",
+            re.I,
+        ),
+    ),
+    (
+        "software",
+        re.compile(
+            r"\b(software|developer|frontend|backend|full[- ]?stack|mobile|ios|android|"
+            r"site reliability|sre|devops|platform engineer)\b",
+            re.I,
+        ),
+    ),
     ("data", re.compile(r"\b(data scientist|data engineer|analytics|business intelligence)\b", re.I)),
     ("security", re.compile(r"\b(security|cyber|penetration|vulnerability)\b", re.I)),
     ("hardware", re.compile(r"\b(hardware|silicon|firmware|embedded|electrical|fpga|asic|robotics)\b", re.I)),
@@ -41,8 +56,8 @@ def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting
     elif year == 2027:
         target_match = "year_confirmed"
     elif source_confirms_2027 and season == "summer":
-        target_match = "source_confirmed"
-    elif source_confirms_2027:
+        # A target-specific registry may confirm an omitted year, but it cannot turn a
+        # seasonless posting into Summer 2027 merely because the registry contains it.
         target_match = "source_confirmed"
     else:
         target_match = "unknown"
