@@ -4,7 +4,7 @@ import re
 from collections import defaultdict
 from pathlib import PurePosixPath
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -334,13 +334,21 @@ async def load_universe_seed_postings(
 
 def _greenhouse_token(url: str) -> str | None:
     parts = urlsplit(url)
+    host = parts.netloc.lower()
     segments = [value for value in parts.path.split("/") if value]
     greenhouse_hosts = {
         "boards.greenhouse.io",
         "job-boards.greenhouse.io",
         "job-boards.eu.greenhouse.io",
     }
-    if parts.netloc in greenhouse_hosts and segments:
+    if host not in greenhouse_hosts:
+        return None
+    embed_token = (parse_qs(parts.query).get("for") or [None])[0]
+    if embed_token:
+        token = str(embed_token).strip()
+        if token and token.lower() not in {"jobs", "job", "embed", "apply"}:
+            return token
+    if segments:
         token = segments[0]
         if token not in {"jobs", "job", "embed", "apply"} and not token.isdigit():
             return token
@@ -356,6 +364,7 @@ def _workday_site(segments: list[str]) -> str | None:
         if not LOCALE_RE.fullmatch(candidate) and candidate.lower() not in {"search", "jobs"}:
             return candidate
     return None
+
 
 T = TypeVar("T")
 
@@ -408,8 +417,6 @@ def collectors_from_registry(
             root = f"{parts.scheme}://{host}"
             _register(workday, (root, tenant, site), posting.company, scope)
         elif scope == "historical":
-            # Historical archives seed enumerable ATS boards only. Polling every old custom
-            # application page creates stale-link noise without discovering unseen jobs.
             continue
         elif host in {"www.google.com", "google.com"} and "/about/careers/" in parts.path:
             include_google = True
