@@ -20,6 +20,7 @@ from .embed_discovery import greenhouse_embed_collectors
 from .models import Posting
 
 LOGGER = logging.getLogger("gaia")
+TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 
 
 @dataclass(slots=True)
@@ -146,12 +147,13 @@ class SyncService:
 
     @staticmethod
     def _normalize_result(collector: Collector, result: CollectorResult) -> CollectorResult:
-        result.scope = collector.scope
+        has_current_target = any(posting.target_match in TARGET_MATCHES for posting in result.postings)
+        result.scope = "current" if has_current_target else collector.scope
         if result.mode == "board":
             if not result.complete:
                 result.status = "truncated"
             elif result.rows_scanned == 0:
-                if collector.scope == "historical":
+                if result.scope == "historical":
                     result.status = "dormant"
                     result.note = result.note or "historical watch board currently exposes zero jobs"
                 else:
