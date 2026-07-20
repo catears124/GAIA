@@ -10,7 +10,13 @@ NEGATIVE_RE = re.compile(
     r"\b(fellow(ship)?|residen(cy|t)|apprentice(ship)?|new grad|graduate program)\b", re.I
 )
 YEAR_RE = re.compile(r"\b20(?:2[5-9]|3[0-5])\b")
-SUMMER_RE = re.compile(r"\bsummer\b", re.I)
+SUMMER_2027_RE = re.compile(r"\b(?:summer\W{0,12}2027|2027\W{0,12}summer)\b", re.I)
+SEASON_RULES = {
+    "summer": re.compile(r"\bsummer\b", re.I),
+    "fall": re.compile(r"\b(fall|autumn)\b", re.I),
+    "spring": re.compile(r"\bspring\b", re.I),
+    "winter": re.compile(r"\bwinter\b", re.I),
+}
 
 CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("quant", re.compile(r"\b(quant|trading|trader|systematic|research analyst)\b", re.I)),
@@ -38,27 +44,30 @@ CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
 
 def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting:
     title = posting.title.strip()
-    supporting = " ".join(
-        part for part in [posting.employment_type, posting.description[:5000]] if part
-    )
     title_is_intern = bool(INTERN_RE.search(title))
     type_is_intern = bool(INTERN_RE.search(posting.employment_type or ""))
     excluded = bool(NEGATIVE_RE.search(title)) and not title_is_intern
 
-    years = {int(value) for value in YEAR_RE.findall(f"{title} {supporting}")}
-    year = 2027 if 2027 in years else (next(iter(years)) if len(years) == 1 else None)
-    season = "summer" if SUMMER_RE.search(f"{title} {supporting}") else None
+    title_years = {int(value) for value in YEAR_RE.findall(title)}
+    season = next((name for name, pattern in SEASON_RULES.items() if pattern.search(title)), None)
+    year = 2027 if 2027 in title_years else (
+        next(iter(title_years)) if len(title_years) == 1 else None
+    )
 
     if excluded or not (title_is_intern or type_is_intern):
         target_match = "not_internship"
-    elif year == 2027 and season == "summer":
+    elif SUMMER_2027_RE.search(title):
         target_match = "exact"
-    elif year == 2027:
+    elif title_years and 2027 not in title_years:
+        target_match = "wrong_year"
+    elif 2027 in title_years and season and season != "summer":
+        target_match = "wrong_season"
+    elif title_years == {2027} and season is None:
         target_match = "year_confirmed"
-    elif source_confirms_2027 and season == "summer":
-        # A target-specific registry may confirm an omitted year, but it cannot turn a
-        # seasonless posting into Summer 2027 merely because the registry contains it.
+    elif source_confirms_2027 and not title_years and season == "summer":
+        # Registry provenance can fill an omitted year, never override a stated one.
         target_match = "source_confirmed"
+        year = 2027
     else:
         target_match = "unknown"
 
