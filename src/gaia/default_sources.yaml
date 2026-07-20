@@ -12,12 +12,12 @@ target_registries:
     name: speedy-swe-2027-intl
     url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
 
-# These feeds seed employer/ATS discovery only. Their old roles never enter the 2027 feed.
+# Historical feeds seed employer/ATS discovery only. Their roles never enter the 2027 feed.
 universe_seeds:
-  - https://raw.githubusercontent.com/vanshb03/Summer2026-Internships/dev/.github/scripts/listings.json
-  - https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/README.md
-  - https://raw.githubusercontent.com/speedyapply/2026-SWE-College-Jobs/main/INTERN_INTL.md
-  - https://raw.githubusercontent.com/speedyapply/2026-AI-College-Jobs/main/README.md
+  - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md
+  - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README-Inactive.md
+  - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README-Off-Season.md
+  - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/archived/README-2025.md
 
 release_canaries:
   google:
