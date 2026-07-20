@@ -17,6 +17,8 @@ from .models import CollectorResult, Posting
 TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 TARGET_RANK = {
     "not_internship": -1,
+    "wrong_year": -1,
+    "wrong_season": -1,
     "unknown": 0,
     "source_confirmed": 1,
     "year_confirmed": 2,
@@ -71,6 +73,22 @@ def application_identity(url: str, source: str, source_id: str) -> str:
         path = path[: -len("/apply")]
     normalized = urlunsplit((parts.scheme.lower(), host, path or "/", parts.query, ""))
     return normalized or f"{source}:{source_id}"
+
+
+def _source_sort(row: sqlite3.Row) -> tuple[int, bool, int, str]:
+    return (
+        SOURCE_RANK.get(str(row["source_mode"]), 99),
+        row["posted_at"] is None,
+        len(str(row["title"])),
+        str(row["title"]),
+    )
+
+
+def _target_sort(row: sqlite3.Row) -> tuple[int, int]:
+    return (
+        TARGET_RANK.get(str(row["target_match"]), -2),
+        -SOURCE_RANK.get(str(row["source_mode"]), 99),
+    )
 
 
 class Database:
@@ -192,22 +210,18 @@ class Database:
                 (iso(datetime.now(timezone.utc)), status, sources, postings, failed, run_id),
             )
 
-    def apply_result(self, result: CollectorResult) -> None:
+    def apply_result(self, result: CollectorResult, *, rebuild: bool = True) -> None:
         observed = iso(datetime.now(timezone.utc))
         current_keys = {posting.posting_key for posting in result.postings}
-        impacted: set[str] = set()
         with self.connect() as db:
-            old_rows = db.execute(
-                "SELECT posting_key, family_key FROM postings WHERE source=? AND active=1",
-                (result.source,),
-            ).fetchall()
-            old_keys = {str(row["posting_key"]): str(row["family_key"]) for row in old_rows}
-
+            old_keys = {
+                str(row["posting_key"])
+                for row in db.execute(
+                    "SELECT posting_key FROM postings WHERE source=? AND active=1",
+                    (result.source,),
+                )
+            }
             for posting in result.postings:
-                key = family_key(posting)
-                impacted.add(key)
-                if old_family := old_keys.get(posting.posting_key):
-                    impacted.add(old_family)
                 db.execute(
                     """
                     INSERT INTO postings(
@@ -246,7 +260,7 @@ class Database:
                     """,
                     (
                         posting.posting_key,
-                        key,
+                        family_key(posting),
                         posting.company,
                         posting.title,
                         normalize_title(posting.title),
@@ -273,14 +287,13 @@ class Database:
                 )
 
             if result.complete:
-                missing = set(old_keys) - current_keys
+                missing = old_keys - current_keys
                 if missing:
                     placeholders = ",".join("?" for _ in missing)
                     db.execute(
                         f"UPDATE postings SET active=0 WHERE posting_key IN ({placeholders})",
                         tuple(sorted(missing)),
                     )
-                    impacted.update(old_keys[key] for key in missing)
 
             target_rows = sum(posting.target_match in TARGET_MATCHES for posting in result.postings)
             db.execute(
@@ -310,7 +323,8 @@ class Database:
                     result.error,
                 ),
             )
-        self.rebuild_families(impacted)
+        if rebuild:
+            self.rebuild_families()
 
     def record_failure(self, result: CollectorResult) -> None:
         now = iso(datetime.now(timezone.utc))
@@ -339,121 +353,107 @@ class Database:
                 ),
             )
 
-    def rebuild_families(self, keys: set[str] | None = None) -> None:
+    def rebuild_families(self) -> None:
         with self.connect() as db:
-            if keys is None:
-                rows = db.execute("SELECT * FROM postings WHERE active=1").fetchall()
-                db.execute("DELETE FROM families")
-            elif not keys:
-                return
-            else:
-                placeholders = ",".join("?" for _ in keys)
-                rows = db.execute(
-                    f"SELECT * FROM postings WHERE active=1 "
-                    f"AND family_key IN ({placeholders})",
-                    tuple(sorted(keys)),
-                ).fetchall()
-                db.execute(
-                    f"DELETE FROM families WHERE family_key IN ({placeholders})",
-                    tuple(sorted(keys)),
-                )
+            rows = db.execute("SELECT * FROM postings WHERE active=1").fetchall()
+            db.execute("DELETE FROM families")
 
-            grouped: dict[str, list[sqlite3.Row]] = {}
+            variants_by_application: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
-                grouped.setdefault(str(row["family_key"]), []).append(row)
+                identity = application_identity(
+                    str(row["canonical_apply_url"]),
+                    str(row["source"]),
+                    str(row["source_id"]),
+                )
+                variants_by_application.setdefault(identity, []).append(row)
 
-            for key, family_rows in grouped.items():
-                application_rows: dict[str, list[sqlite3.Row]] = {}
-                for row in family_rows:
-                    identity = application_identity(
-                        str(row["canonical_apply_url"]),
-                        str(row["source"]),
-                        str(row["source_id"]),
-                    )
-                    application_rows.setdefault(identity, []).append(row)
-
-                openings: list[dict[str, object]] = []
-                locations: set[str] = set()
-                employer_dates: list[str] = []
-                employer_precisions: list[str] = []
-                direct_openings = 0
-                backstop_openings = 0
-
-                for identity, variants in application_rows.items():
-                    selected = min(
-                        variants,
-                        key=lambda row: (
-                            SOURCE_RANK.get(str(row["source_mode"]), 99),
-                            row["posted_at"] is None,
-                            len(str(row["title"])),
-                        ),
-                    )
-                    opening_locations = sorted(
-                        {
-                            location
-                            for row in variants
-                            for location in json.loads(str(row["locations_json"]))
-                            if location
-                        }
-                    )
-                    locations.update(opening_locations)
-                    has_direct = any(str(row["source_mode"]) == "direct" for row in variants)
-                    direct_openings += int(has_direct)
-                    backstop_openings += int(not has_direct)
-                    dates = sorted(
-                        str(row["posted_at"])
+            applications_by_family: dict[str, list[dict[str, object]]] = {}
+            for identity, variants in variants_by_application.items():
+                selected = min(variants, key=_source_sort)
+                target_anchor = max(variants, key=_target_sort)
+                canonical_family = str(target_anchor["family_key"])
+                locations = sorted(
+                    {
+                        location
                         for row in variants
-                        if row["posted_at"]
-                        and str(row["source_mode"]) in EMPLOYER_DATE_MODES
-                    )
-                    if dates:
-                        employer_dates.extend(dates)
-                        employer_precisions.extend(
-                            str(row["posted_precision"])
-                            for row in variants
-                            if row["posted_at"]
-                            and str(row["source_mode"]) in EMPLOYER_DATE_MODES
-                        )
-                    openings.append(
-                        {
-                            "application_identity": identity,
-                            "posting_key": selected["posting_key"],
-                            "location": opening_locations,
-                            "apply_url": selected["apply_url"],
-                            "source": selected["source"],
-                            "source_mode": selected["source_mode"],
-                            "posted_at": dates[0] if dates else None,
-                            "source_variants": sorted(
-                                {
-                                    f"{row['source_mode']}:{row['source']}"
-                                    for row in variants
-                                }
-                            ),
-                        }
-                    )
+                        for location in json.loads(str(row["locations_json"]))
+                        if location
+                    }
+                )
+                employer_date_rows = [
+                    row
+                    for row in variants
+                    if row["posted_at"]
+                    and str(row["source_mode"]) in EMPLOYER_DATE_MODES
+                ]
+                employer_dates = sorted(str(row["posted_at"]) for row in employer_date_rows)
+                has_direct = any(str(row["source_mode"]) == "direct" for row in variants)
+                application = {
+                    "identity": identity,
+                    "selected": selected,
+                    "target_anchor": target_anchor,
+                    "variants": variants,
+                    "locations": locations,
+                    "employer_dates": employer_dates,
+                    "employer_precisions": [
+                        str(row["posted_precision"]) for row in employer_date_rows
+                    ],
+                    "has_direct": has_direct,
+                    "opening": {
+                        "application_identity": identity,
+                        "posting_key": selected["posting_key"],
+                        "location": locations,
+                        "apply_url": selected["apply_url"],
+                        "source": selected["source"],
+                        "source_mode": selected["source_mode"],
+                        "posted_at": employer_dates[0] if employer_dates else None,
+                        "source_variants": sorted(
+                            {
+                                f"{row['source_mode']}:{row['source']}"
+                                for row in variants
+                            }
+                        ),
+                    },
+                }
+                applications_by_family.setdefault(canonical_family, []).append(application)
 
-                preferred_pool = [
-                    row for row in family_rows if str(row["source_mode"]) == "direct"
-                ] or [
-                    row for row in family_rows if str(row["source_mode"]) == "verification"
-                ] or family_rows
-                preferred = min(
-                    preferred_pool,
-                    key=lambda row: (len(str(row["title"])), str(row["title"])),
+            for key, applications in applications_by_family.items():
+                selected_rows = [app["selected"] for app in applications]
+                preferred = min(selected_rows, key=_source_sort)
+                anchors = [app["target_anchor"] for app in applications]
+                target_anchor = max(anchors, key=_target_sort)
+                target = str(target_anchor["target_match"])
+                locations = sorted(
+                    {
+                        location
+                        for application in applications
+                        for location in application["locations"]
+                    }
                 )
-                target = max(
-                    (str(row["target_match"]) for row in family_rows),
-                    key=lambda value: TARGET_RANK.get(value, -2),
-                )
-                precision = "unknown"
-                if "timestamp" in employer_precisions:
-                    precision = "timestamp"
-                elif "day" in employer_precisions:
-                    precision = "day"
-                first_seen = min(str(row["first_seen_at"]) for row in family_rows)
-                last_seen = max(str(row["last_seen_at"]) for row in family_rows)
-                employer_dates.sort()
+                openings = [application["opening"] for application in applications]
                 openings.sort(key=lambda item: (item["location"], item["apply_url"]))
+                employer_dates = sorted(
+                    date
+                    for application in applications
+                    for date in application["employer_dates"]
+                )
+                precisions = [
+                    precision
+                    for application in applications
+                    for precision in application["employer_precisions"]
+                ]
+                precision = "timestamp" if "timestamp" in precisions else (
+                    "day" if "day" in precisions else "unknown"
+                )
+                variant_rows = [
+                    row
+                    for application in applications
+                    for row in application["variants"]
+                ]
+                first_seen = min(str(row["first_seen_at"]) for row in variant_rows)
+                last_seen = max(str(row["last_seen_at"]) for row in variant_rows)
+                direct_openings = sum(bool(app["has_direct"]) for app in applications)
+                backstop_openings = len(applications) - direct_openings
 
                 db.execute(
                     "INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -462,12 +462,12 @@ class Database:
                         preferred["company"],
                         preferred["title"],
                         preferred["category"],
-                        preferred["season"],
-                        preferred["year"],
+                        target_anchor["season"],
+                        target_anchor["year"],
                         target,
                         len(openings),
                         len(locations),
-                        json.dumps(sorted(locations)),
+                        json.dumps(locations),
                         json.dumps(openings),
                         employer_dates[0] if employer_dates else None,
                         employer_dates[-1] if employer_dates else None,
@@ -551,9 +551,7 @@ class Database:
             "verification": set(),
             "external-index": set(),
         }
-        companies_by_mode: dict[str, set[str]] = {
-            mode: set() for mode in identities
-        }
+        companies_by_mode = {mode: set() for mode in identities}
         for row in posting_rows:
             mode = str(row["source_mode"])
             if mode not in identities:
