@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from pathlib import PurePosixPath
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, TypeVar
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -67,29 +67,45 @@ class JsonRegistryCollector(Collector):
         response.raise_for_status()
         payload = response.json()
         postings: list[Posting] = []
+        discovery_postings: list[Posting] = []
         for item in payload:
             if not item.get("active", True) or not item.get("is_visible", True):
                 continue
             url = str(item.get("url") or "").strip()
             title = str(item.get("title") or "").strip()
-            company = str(item.get("company_name") or "").strip()
+            company = _clean_cell(str(item.get("company_name") or ""))
             if not url or not title or not company:
                 continue
-            posting = Posting(
-                company=company,
-                title=title,
-                apply_url=url,
-                source=self.name,
-                source_id=str(item.get("id") or url),
-                locations=[str(value) for value in item.get("locations") or []],
-                source_mode="registry",
-                posted_at=parse_date(item.get("date_posted")),
-                posted_raw=str(item.get("date_posted") or "") or None,
-                posted_precision="timestamp" if item.get("date_posted") else "unknown",
-                posted_confidence="registry-reported" if item.get("date_posted") else "unknown",
+            posting = classify(
+                Posting(
+                    company=company,
+                    title=title,
+                    apply_url=url,
+                    source=self.name,
+                    source_id=str(item.get("id") or url),
+                    locations=[str(value) for value in item.get("locations") or []],
+                    source_mode="registry",
+                    posted_at=parse_date(item.get("date_posted")),
+                    posted_raw=str(item.get("date_posted") or "") or None,
+                    posted_precision="timestamp" if item.get("date_posted") else "unknown",
+                    posted_confidence="registry-reported" if item.get("date_posted") else "unknown",
+                ),
+                source_confirms_2027=True,
             )
-            postings.append(classify(posting, source_confirms_2027=True))
-        return CollectorResult(self.name, postings, True, self.mode, len(payload), len(payload))
+            if _is_known_board_landing(posting.apply_url):
+                discovery_postings.append(posting)
+            else:
+                postings.append(posting)
+        return CollectorResult(
+            self.name,
+            postings,
+            True,
+            self.mode,
+            len(payload),
+            len(payload),
+            status="loaded",
+            discovery_postings=discovery_postings,
+        )
 
 
 class MarkdownRegistryCollector(Collector):
@@ -102,8 +118,21 @@ class MarkdownRegistryCollector(Collector):
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         response = await client.get(self.url)
         response.raise_for_status()
-        postings = _document_postings(response.text, source=self.name, registry=True)
-        return CollectorResult(self.name, postings, True, self.mode, len(postings), None)
+        parsed = _document_postings(response.text, source=self.name, registry=True)
+        postings = [posting for posting in parsed if not _is_known_board_landing(posting.apply_url)]
+        discovery_postings = [
+            posting for posting in parsed if _is_known_board_landing(posting.apply_url)
+        ]
+        return CollectorResult(
+            self.name,
+            postings,
+            True,
+            self.mode,
+            len(parsed),
+            None,
+            status="loaded",
+            discovery_postings=discovery_postings,
+        )
 
 
 def _application_score(url: str) -> int:
@@ -147,12 +176,14 @@ def _choose_apply_url(urls: list[str]) -> str | None:
     candidates = [item for item in candidates if item[0] > -9_000]
     if not candidates:
         return None
-    # Later links commonly contain the actual application after a company homepage link.
     return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
 def _clean_cell(value: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", value)).strip(" *\t")
+    value = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r"\s+", " ", value).strip(" *\t")
 
 
 def _pipe_rows(body: str) -> list[tuple[str, str, str, list[str]]]:
@@ -185,16 +216,16 @@ def _html_rows(body: str) -> list[tuple[str, str, str, list[str]]]:
         cells = row.find_all(["td", "th"])
         if len(cells) < 2:
             continue
-        values = [" ".join(cell.get_text(" ", strip=True).split()) for cell in cells]
+        values = [_clean_cell(cell.get_text(" ", strip=True)) for cell in cells]
         if "intern" not in " ".join(values).lower():
             continue
-        company = values[0].strip(" *")
+        company = values[0]
         if company in {"", "↳", "—", "-"}:
             company = previous_company
         elif company.lower() not in {"company", "employer"}:
             previous_company = company
-        title = values[1].strip()
-        location = values[2].strip() if len(values) > 2 else ""
+        title = values[1]
+        location = values[2] if len(values) > 2 else ""
         urls = [str(anchor.get("href")) for anchor in row.find_all("a", href=True)]
         if company and title:
             rows.append((company, title, location, urls))
@@ -206,6 +237,9 @@ def _document_postings(body: str, *, source: str, registry: bool) -> list[Postin
     seen: set[tuple[str, str, str]] = set()
     rows = [*_pipe_rows(body), *_html_rows(body)]
     for index, (company, title, location, urls) in enumerate(rows):
+        company = _clean_cell(company)
+        title = _clean_cell(title)
+        location = _clean_cell(location)
         apply_url = _choose_apply_url(urls)
         if not apply_url:
             continue
@@ -262,7 +296,7 @@ async def load_universe_seed_postings(
             if url.endswith(".json"):
                 seed_postings: list[Posting] = []
                 for item in response.json():
-                    company = str(item.get("company_name") or "").strip()
+                    company = _clean_cell(str(item.get("company_name") or ""))
                     title = str(item.get("title") or "").strip()
                     apply_url = str(item.get("url") or "").strip()
                     if company and title and apply_url:
@@ -291,6 +325,8 @@ async def load_universe_seed_postings(
                     mode="universe-seed",
                     rows_scanned=len(seed_postings),
                     expected_rows=len(seed_postings),
+                    status="loaded",
+                    scope="historical",
                 )
             )
         except (httpx.HTTPError, ValueError, TypeError) as exc:
@@ -302,6 +338,8 @@ async def load_universe_seed_postings(
                     mode="universe-seed",
                     rows_scanned=0,
                     error=repr(exc),
+                    status="broken",
+                    scope="historical",
                 )
             )
     return output, health
@@ -309,17 +347,47 @@ async def load_universe_seed_postings(
 
 def _greenhouse_token(url: str) -> str | None:
     parts = urlsplit(url)
+    host = parts.netloc.lower()
     segments = [value for value in parts.path.split("/") if value]
     greenhouse_hosts = {
         "boards.greenhouse.io",
         "job-boards.greenhouse.io",
         "job-boards.eu.greenhouse.io",
     }
-    if parts.netloc in greenhouse_hosts and segments:
+    if host not in greenhouse_hosts:
+        return None
+    embed_token = (parse_qs(parts.query).get("for") or [None])[0]
+    if embed_token:
+        token = str(embed_token).strip()
+        if token and token.lower() not in {"jobs", "job", "embed", "apply"}:
+            return token
+    if segments:
         token = segments[0]
         if token not in {"jobs", "job", "embed", "apply"} and not token.isdigit():
             return token
     return None
+
+
+def _is_known_board_landing(url: str) -> bool:
+    parts = urlsplit(url)
+    host = parts.netloc.lower()
+    path = parts.path.rstrip("/")
+    query = parse_qs(parts.query)
+    segments = [value for value in path.split("/") if value]
+
+    if "greenhouse.io" in host:
+        if query.get("gh_jid") or query.get("job_id") or query.get("token"):
+            return False
+        if re.search(r"/(?:jobs?|apply)/(?:\d+|[0-9a-f-]{20,})(?:/|$)", path, re.I):
+            return False
+        return _greenhouse_token(url) is not None
+    if host == "jobs.lever.co":
+        return len(segments) == 1
+    if host == "jobs.ashbyhq.com":
+        return len(segments) == 1
+    if ".myworkdayjobs.com" in host:
+        return "/job/" not in path.lower()
+    return False
 
 
 def _workday_site(segments: list[str]) -> str | None:
@@ -333,15 +401,34 @@ def _workday_site(segments: list[str]) -> str | None:
     return None
 
 
+T = TypeVar("T")
+
+
+def _register(
+    mapping: dict[T, tuple[str, str]],
+    key: T,
+    company: str,
+    scope: str,
+) -> None:
+    existing = mapping.get(key)
+    if existing is None or (existing[1] == "historical" and scope == "current"):
+        mapping[key] = (company, scope)
+
+
+def _scoped(collector: Collector, scope: str) -> Collector:
+    collector.scope = scope
+    return collector
+
+
 def collectors_from_registry(
     postings: list[Posting],
     settings: dict[str, Any] | None = None,
 ) -> list[Collector]:
     settings = settings or load_sources()
-    greenhouse: dict[str, str] = {}
-    lever: dict[str, str] = {}
-    ashby: dict[str, str] = {}
-    workday: dict[tuple[str, str, str], str] = {}
+    greenhouse: dict[str, tuple[str, str]] = {}
+    lever: dict[str, tuple[str, str]] = {}
+    ashby: dict[str, tuple[str, str]] = {}
+    workday: dict[tuple[str, str, str], tuple[str, str]] = {}
     schema_pages: dict[tuple[str, str], set[str]] = defaultdict(set)
     include_google = False
     include_databricks = False
@@ -351,33 +438,45 @@ def collectors_from_registry(
         parts = urlsplit(url)
         host = parts.netloc.lower()
         segments = [value for value in parts.path.split("/") if value]
+        scope = "historical" if posting.source_mode == "universe-seed" else "current"
 
         token = _greenhouse_token(url)
         if token:
-            greenhouse[token] = posting.company
+            _register(greenhouse, token, posting.company, scope)
         elif host == "jobs.lever.co" and segments:
-            lever[segments[0]] = posting.company
+            _register(lever, segments[0], posting.company, scope)
         elif host == "jobs.ashbyhq.com" and segments:
-            ashby[segments[0]] = posting.company
+            _register(ashby, segments[0], posting.company, scope)
         elif ".myworkdayjobs.com" in host and (site := _workday_site(segments)):
             tenant = host.split(".", 1)[0]
             root = f"{parts.scheme}://{host}"
-            workday[(root, tenant, site)] = posting.company
+            _register(workday, (root, tenant, site), posting.company, scope)
+        elif scope == "historical":
+            continue
         elif host in {"www.google.com", "google.com"} and "/about/careers/" in parts.path:
             include_google = True
         elif "databricks.com" in host:
             include_databricks = True
             schema_pages[(posting.company, host)].add(url)
-        else:
+        elif host:
             schema_pages[(posting.company, host)].add(url)
 
     collectors: list[Collector] = []
-    collectors.extend(GreenhouseCollector(company, board) for board, company in greenhouse.items())
-    collectors.extend(LeverCollector(company, site) for site, company in lever.items())
-    collectors.extend(AshbyCollector(company, board) for board, company in ashby.items())
     collectors.extend(
-        WorkdayCollector(company, root, tenant, site)
-        for (root, tenant, site), company in workday.items()
+        _scoped(GreenhouseCollector(company, board), scope)
+        for board, (company, scope) in greenhouse.items()
+    )
+    collectors.extend(
+        _scoped(LeverCollector(company, site), scope)
+        for site, (company, scope) in lever.items()
+    )
+    collectors.extend(
+        _scoped(AshbyCollector(company, board), scope)
+        for board, (company, scope) in ashby.items()
+    )
+    collectors.extend(
+        _scoped(WorkdayCollector(company, root, tenant, site), scope)
+        for (root, tenant, site), (company, scope) in workday.items()
     )
     collectors.extend(
         SchemaPageCollector(company, sorted(urls), name=f"schema:{host}:{company}")
@@ -393,7 +492,9 @@ def collectors_from_registry(
 
     unique: dict[str, Collector] = {}
     for collector in collectors:
-        unique.setdefault(collector.name, collector)
+        existing = unique.get(collector.name)
+        if existing is None or (existing.scope == "historical" and collector.scope == "current"):
+            unique[collector.name] = collector
     return list(unique.values())
 
 
@@ -401,5 +502,8 @@ def dump_discovery(postings: list[Posting]) -> dict[str, Any]:
     collectors = collectors_from_registry(postings)
     return {
         "seed_postings": len(postings),
-        "collectors": [{"name": item.name, "mode": item.mode} for item in collectors],
+        "collectors": [
+            {"name": item.name, "mode": item.mode, "scope": item.scope}
+            for item in collectors
+        ],
     }

@@ -22,8 +22,16 @@ def canonical_url(url: str) -> str:
         "utm_content",
         "gh_src",
         "lever-source",
+        "ref",
+        "jr_id",
+        "iis",
+        "iisn",
     }
-    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in blocked]
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in blocked
+    ]
     path = parts.path.rstrip("/") or "/"
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, urlencode(query), ""))
 
@@ -68,3 +76,8 @@ class CollectorResult:
     rows_scanned: int
     expected_rows: int | None = None
     error: str | None = None
+    status: str = "ok"
+    scope: str = "current"
+    note: str | None = None
+    closed_urls: list[str] = field(default_factory=list)
+    discovery_postings: list[Posting] = field(default_factory=list)

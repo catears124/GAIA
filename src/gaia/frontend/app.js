@@ -81,7 +81,7 @@ function renderJobs() {
     $("#jobs-body").innerHTML = state.items.map(item => {
       const locationPreview = item.locations.slice(0, 2).join(" · ");
       const extraLocations = Math.max(0, item.locations.length - 2);
-      const sourceBadge = item.direct_openings ? "direct" : "backstop only";
+      const sourceBadge = item.direct_openings ? "independently recovered" : "benchmark/backstop only";
       const status = tracking[item.family_key] || "";
       return `<tr data-key="${esc(item.family_key)}">
         <td class="save-col"><button class="star ${saved.has(item.family_key) ? "saved" : ""}" data-save="${esc(item.family_key)}" aria-label="Save role">☆</button></td>
@@ -125,13 +125,61 @@ async function openFamily(key) {
   $("#drawer").showModal();
 }
 
+const ACTIONABLE_STATUSES = new Set(["broken", "truncated", "empty"]);
+
+function isActionable(source) {
+  return Boolean(source.last_error) || ACTIONABLE_STATUSES.has(source.status);
+}
+
 function sourceState(source) {
-  if (source.last_error) return ["broken", "warn"];
-  if (source.mode === "board") return source.complete ? ["enumerated", "ok"] : ["incomplete", "warn"];
-  if (source.mode === "registry") return source.complete ? ["benchmark loaded", "ok"] : ["benchmark failed", "warn"];
-  if (source.mode === "verification") return ["known pages only", "warn"];
-  if (source.mode === "external-index") return ["external index", "warn"];
-  return [source.complete ? "complete" : "non-complete", source.complete ? "ok" : "warn"];
+  const status = source.status || "unknown";
+  const mapping = {
+    ok: ["enumerated", "ok"],
+    loaded: ["loaded", "ok"],
+    verified: ["verified", "ok"],
+    indexed: ["external index", "warn"],
+    blocked: ["access limited", "blocked"],
+    stale: ["closed/stale", "stale"],
+    dormant: ["dormant watch", "dormant"],
+    unstructured: ["no structured data", "muted"],
+    partial: ["partial", "warn"],
+    mixed: ["mixed", "warn"],
+    truncated: ["truncated", "error"],
+    empty: ["suspiciously empty", "error"],
+    broken: ["broken", "error"],
+  };
+  return mapping[status] || [status, source.complete ? "ok" : "warn"];
+}
+
+function sourceMatchesFilter(source, filter) {
+  const note = source.note || "";
+  if (filter === "all") return true;
+  if (filter === "actionable") return source.scope === "current" && isActionable(source);
+  if (filter === "access") return source.scope === "current" && (source.status === "blocked" || note.includes("access-blocked"));
+  if (filter === "stale") return source.scope === "current" && source.mode === "verification" && (source.status === "stale" || note.includes("stale/closed"));
+  if (filter === "historical") return source.scope === "historical";
+  return true;
+}
+
+function renderCoverageSources() {
+  const filter = $("#coverage-filter").value;
+  const sources = [...(state.coverage?.sources || [])]
+    .filter(source => sourceMatchesFilter(source, filter))
+    .sort((left, right) => {
+      const leftRank = isActionable(left) ? 0 : left.status === "blocked" ? 1 : left.status === "stale" ? 2 : 3;
+      const rightRank = isActionable(right) ? 0 : right.status === "blocked" ? 1 : right.status === "stale" ? 2 : 3;
+      return leftRank - rightRank || left.source.localeCompare(right.source);
+    });
+  $("#coverage-source-count").textContent = `${number(sources.length)} sources`;
+  if (!sources.length) {
+    $("#coverage-body").innerHTML = '<tr><td colspan="9" class="empty">No sources in this queue.</td></tr>';
+    return;
+  }
+  $("#coverage-body").innerHTML = sources.map(source => {
+    const [label, tone] = sourceState(source);
+    const detail = source.last_error || source.note || "—";
+    return `<tr><td><strong>${esc(source.source)}</strong></td><td>${esc(source.scope || "current")}</td><td>${esc(source.mode)}</td><td><span class="status ${tone}">${esc(label)}</span></td><td>${number(source.rows_scanned)}</td><td>${number(source.target_rows)}</td><td>${source.expected_rows == null ? "—" : number(source.expected_rows)}</td><td title="${esc(exact(source.last_attempt_at))}">${esc(relative(source.last_attempt_at))}</td><td title="${esc(detail)}">${esc(detail.slice(0, 110))}</td></tr>`;
+  }).join("");
 }
 
 async function loadCoverage() {
@@ -140,39 +188,37 @@ async function loadCoverage() {
   const summary = data.summary || {};
   const contract = data.contract || {};
   const recall = summary.registry_recall_percent;
+  const actionable = Number(contract.actionable_anomalies || 0);
+  const unresolved = Number(summary.registry_only || 0);
+  const access = Number(contract.access_limited || 0);
+  const stale = Number(contract.stale_verifications || 0);
+  const dormant = Number(contract.dormant_watches || 0);
+
   $("#metric-families").textContent = number(summary.families);
   $("#metric-companies").textContent = number(summary.companies);
   $("#metric-direct").textContent = recall == null ? "—" : `${recall}%`;
-  $("#metric-health").textContent = `${number(contract.complete_enumerators)}/${number(contract.configured_sources)}`;
+  $("#metric-health").textContent = number(actionable);
 
-  const unresolved = Number(summary.registry_only || 0);
-  const anomalies = Number(contract.zero_result_enumerators || 0) + Number(contract.truncated_sources || 0) + Number(contract.broken_sources || 0);
-  const trustworthy = unresolved === 0 && anomalies === 0 && recall != null;
+  const trustworthy = unresolved === 0 && actionable === 0 && recall != null;
   $("#coverage-grade").textContent = trustworthy ? "benchmark closed" : "known gaps";
   $("#coverage-grade").className = `status ${trustworthy ? "ok" : "warn"}`;
   $("#coverage-contract").classList.toggle("incomplete", !trustworthy);
   $("#coverage-contract-text").textContent = recall == null
     ? "No target registry benchmark is loaded yet. GAIA cannot make a recall statement."
-    : `GAIA independently recovers ${recall}% of ${number(summary.registry_floor)} benchmark applications. ${number(unresolved)} remain registry-only. ${number(contract.complete_enumerators)} board sources completed enumeration; ${number(anomalies)} source anomalies require attention.`;
+    : `GAIA independently recovers ${recall}% of ${number(summary.registry_floor)} live benchmark applications. ${number(unresolved)} remain registry-only. ${number(actionable)} current sources require engineering; ${number(access)} are access-limited, ${number(stale)} benchmark verifiers found closed pages, and ${number(dormant)} historical watch boards are dormant.`;
 
   $("#coverage-summary").innerHTML = [
     ["Known applications", summary.known_applications || 0, "deduplicated by application identity"],
-    ["Registry benchmark", summary.registry_floor || 0, "target-specific known applications"],
-    ["Independently recovered", summary.independent_matches || 0, "direct board or employer-page verification"],
-    ["Registry-only gap", summary.registry_only || 0, "known applications still lacking independent recovery"],
-    ["Direct-only", summary.direct_only || 0, "found outside the registry benchmark"],
-    ["Enumeration anomalies", anomalies, "broken, truncated, or suspicious zero-result boards"],
+    ["Registry benchmark", summary.registry_floor || 0, "active target-specific applications"],
+    ["Independently recovered", summary.independent_matches || 0, "board enumeration or employer-page verification"],
+    ["Registry-only gap", summary.registry_only || 0, "live benchmark applications still unresolved"],
+    ["Direct-only", summary.direct_only || 0, "found outside the benchmark"],
+    ["Actionable current gaps", actionable, "broken, truncated, or suspiciously empty current sources"],
+    ["Access limited", access, "reachable identities blocked by anti-bot or authentication"],
+    ["Historical dormant", dormant, "old watch boards retained for future openings"],
   ].map(([label, value, note]) => `<article><span>${esc(label)}</span><strong>${number(value)}</strong><small>${esc(note)}</small></article>`).join("");
 
-  const sources = [...(data.sources || [])].sort((left, right) => {
-    const leftBad = Number(Boolean(left.last_error) || (left.mode === "board" && !left.complete));
-    const rightBad = Number(Boolean(right.last_error) || (right.mode === "board" && !right.complete));
-    return rightBad - leftBad || left.source.localeCompare(right.source);
-  });
-  $("#coverage-body").innerHTML = sources.map(source => {
-    const [label, tone] = sourceState(source);
-    return `<tr><td><strong>${esc(source.source)}</strong></td><td>${esc(source.mode)}</td><td><span class="status ${tone}">${esc(label)}</span></td><td>${number(source.rows_scanned)}</td><td>${number(source.target_rows)}</td><td>${source.expected_rows == null ? "—" : number(source.expected_rows)}</td><td>${esc(relative(source.last_success_at))}</td><td title="${esc(source.last_error || "")}">${esc((source.last_error || "—").slice(0, 90))}</td></tr>`;
-  }).join("");
+  renderCoverageSources();
 }
 
 async function refreshHealth() {
@@ -196,6 +242,7 @@ $("#search").addEventListener("input", () => {
 for (const id of ["#category", "#target", "#page-size"]) {
   $(id).addEventListener("change", () => { state.page = 1; loadJobs(); });
 }
+$("#coverage-filter").addEventListener("change", renderCoverageSources);
 $("#prev").addEventListener("click", () => { state.page--; loadJobs(); });
 $("#next").addEventListener("click", () => { state.page++; loadJobs(); });
 $("#jobs-body").addEventListener("click", event => {

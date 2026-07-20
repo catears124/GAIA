@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from .classify import classify
-from .models import CollectorResult, Posting
+from .models import CollectorResult, Posting, canonical_url
 
 JOB_URL_RE = re.compile(r"/about/careers/applications/jobs/results/(\d+)(?:-[^?#/]+)?")
 
@@ -144,6 +144,7 @@ def posting_from_schema(
 class Collector(ABC):
     name: str
     mode: str = "board"
+    scope: str = "current"
 
     @abstractmethod
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult: ...
@@ -223,6 +224,7 @@ class GoogleCareersCollector(Collector):
             mode=self.mode,
             rows_scanned=len(discovered),
             expected_rows=len(discovered) if exhausted else None,
+            status="ok" if exhausted else "truncated",
         )
 
 
@@ -402,7 +404,15 @@ class WorkdayCollector(Collector):
             if offset >= total:
                 complete = True
                 break
-        return CollectorResult(self.name, postings, complete, self.mode, offset, total)
+        return CollectorResult(
+            self.name,
+            postings,
+            complete,
+            self.mode,
+            offset,
+            total,
+            status="ok" if complete else "truncated",
+        )
 
 
 class SchemaPageCollector(Collector):
@@ -415,10 +425,36 @@ class SchemaPageCollector(Collector):
 
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         postings: list[Posting] = []
+        closed_urls: list[str] = []
+        blocked = 0
+        stale = 0
+        unstructured = 0
+        hard_errors: list[str] = []
+
         for url in self.urls:
-            response = await client.get(url)
-            response.raise_for_status()
-            for job in json_ld_jobs(response.text):
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                code = exc.response.status_code
+                if code in {404, 410}:
+                    stale += 1
+                    closed_urls.append(canonical_url(url))
+                    continue
+                if code in {401, 403, 429}:
+                    blocked += 1
+                    continue
+                hard_errors.append(f"{code} {url}")
+                continue
+            except httpx.HTTPError as exc:
+                hard_errors.append(f"{type(exc).__name__}: {url}")
+                continue
+
+            jobs = json_ld_jobs(response.text)
+            if not jobs:
+                unstructured += 1
+                continue
+            for job in jobs:
                 parsed = posting_from_schema(
                     job,
                     source=self.name,
@@ -427,7 +463,51 @@ class SchemaPageCollector(Collector):
                 if parsed:
                     parsed.company = self.company
                     postings.append(classify(parsed))
-        return CollectorResult(self.name, postings, False, self.mode, len(self.urls))
+
+        notes: list[str] = []
+        if stale:
+            notes.append(f"{stale} stale/closed page{'s' if stale != 1 else ''}")
+        if blocked:
+            notes.append(f"{blocked} access-blocked page{'s' if blocked != 1 else ''}")
+        if unstructured:
+            notes.append(f"{unstructured} reachable page{'s' if unstructured != 1 else ''} without JobPosting data")
+        if hard_errors:
+            notes.append(f"{len(hard_errors)} transport/server failure{'s' if len(hard_errors) != 1 else ''}")
+
+        if hard_errors:
+            status = "partial" if postings or stale or blocked or unstructured else "broken"
+            error = "; ".join(hard_errors[:3])
+        elif postings and (stale or blocked or unstructured):
+            status = "partial"
+            error = None
+        elif postings:
+            status = "verified"
+            error = None
+        elif blocked and not stale and not unstructured:
+            status = "blocked"
+            error = None
+        elif stale and not blocked and not unstructured:
+            status = "stale"
+            error = None
+        elif unstructured and not blocked and not stale:
+            status = "unstructured"
+            error = None
+        else:
+            status = "mixed"
+            error = None
+
+        return CollectorResult(
+            source=self.name,
+            postings=postings,
+            complete=False,
+            mode=self.mode,
+            rows_scanned=len(self.urls),
+            expected_rows=len(self.urls),
+            error=error,
+            status=status,
+            note="; ".join(notes) or None,
+            closed_urls=closed_urls,
+        )
 
 
 class DatabricksIndexCollector(Collector):
@@ -467,4 +547,11 @@ class DatabricksIndexCollector(Collector):
                     )
                 )
             )
-        return CollectorResult(self.name, postings, False, self.mode, len(seen))
+        return CollectorResult(
+            self.name,
+            postings,
+            False,
+            self.mode,
+            len(seen),
+            status="indexed" if postings else "empty",
+        )
