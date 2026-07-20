@@ -2,18 +2,71 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from .grouping import family_key, normalize_title
 from .models import CollectorResult, Posting
 
+TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
+TARGET_RANK = {
+    "not_internship": -1,
+    "unknown": 0,
+    "source_confirmed": 1,
+    "year_confirmed": 2,
+    "exact": 3,
+}
+SOURCE_RANK = {
+    "direct": 0,
+    "verification": 1,
+    "external-index": 2,
+    "registry": 3,
+    "universe-seed": 4,
+}
+EMPLOYER_DATE_MODES = {"direct", "verification"}
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
 
 def iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat() if value else None
+
+
+def application_identity(url: str, source: str, source_id: str) -> str:
+    """Collapse direct and fallback copies without merging distinct requisitions."""
+    parts = urlsplit(url)
+    host = parts.netloc.lower()
+    path = parts.path.rstrip("/")
+    query = parse_qs(parts.query)
+
+    if gh_jid := (query.get("gh_jid") or query.get("job_id")):
+        return f"greenhouse:{gh_jid[0]}"
+    if "greenhouse" in host:
+        if match := re.search(r"/(?:jobs?|apply)/(\d+)(?:/|$)", path):
+            return f"greenhouse:{match.group(1)}"
+    if host == "jobs.lever.co":
+        if match := UUID_RE.search(path):
+            return f"lever:{match.group(0).lower()}"
+    if host == "jobs.ashbyhq.com":
+        if match := UUID_RE.search(path):
+            return f"ashby:{match.group(0).lower()}"
+    if "google.com" in host:
+        if match := re.search(r"/jobs/results/(\d+)", path):
+            return f"google:{match.group(1)}"
+    if "smartrecruiters.com" in host:
+        if match := re.search(r"/(\d{8,})(?:/|$)", path):
+            return f"smartrecruiters:{match.group(1)}"
+    if source.startswith("workday:") and source_id:
+        return f"{source}:{source_id}"
+
+    if path.endswith("/apply"):
+        path = path[: -len("/apply")]
+    normalized = urlunsplit((parts.scheme.lower(), host, path or "/", parts.query, ""))
+    return normalized or f"{source}:{source_id}"
 
 
 class Database:
@@ -91,7 +144,8 @@ class Database:
                     direct_openings INTEGER NOT NULL,
                     backstop_openings INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_families_target ON families(target_match, latest_posted_at);
+                CREATE INDEX IF NOT EXISTS idx_families_target
+                    ON families(target_match, latest_posted_at);
                 CREATE INDEX IF NOT EXISTS idx_families_company ON families(company);
 
                 CREATE TABLE IF NOT EXISTS source_health (
@@ -129,7 +183,8 @@ class Database:
         status = "ok" if failed == 0 else "partial"
         with self.connect() as db:
             db.execute(
-                "UPDATE sync_runs SET finished_at=?, status=?, sources=?, postings=?, failed=? WHERE id=?",
+                "UPDATE sync_runs SET finished_at=?, status=?, sources=?, postings=?, failed=? "
+                "WHERE id=?",
                 (iso(datetime.now(timezone.utc)), status, sources, postings, failed, run_id),
             )
 
@@ -147,6 +202,8 @@ class Database:
             for posting in result.postings:
                 key = family_key(posting)
                 impacted.add(key)
+                if old_family := old_keys.get(posting.posting_key):
+                    impacted.add(old_family)
                 db.execute(
                     """
                     INSERT INTO postings(
@@ -170,8 +227,12 @@ class Database:
                         posted_at=COALESCE(excluded.posted_at, postings.posted_at),
                         updated_at=COALESCE(excluded.updated_at, postings.updated_at),
                         posted_raw=COALESCE(excluded.posted_raw, postings.posted_raw),
-                        posted_precision=CASE WHEN excluded.posted_at IS NOT NULL THEN excluded.posted_precision ELSE postings.posted_precision END,
-                        posted_confidence=CASE WHEN excluded.posted_at IS NOT NULL THEN excluded.posted_confidence ELSE postings.posted_confidence END,
+                        posted_precision=CASE
+                            WHEN excluded.posted_at IS NOT NULL THEN excluded.posted_precision
+                            ELSE postings.posted_precision END,
+                        posted_confidence=CASE
+                            WHEN excluded.posted_at IS NOT NULL THEN excluded.posted_confidence
+                            ELSE postings.posted_confidence END,
                         last_seen_at=excluded.last_seen_at,
                         active=1,
                         category=excluded.category,
@@ -217,10 +278,7 @@ class Database:
                     )
                     impacted.update(old_keys[key] for key in missing)
 
-            target_rows = sum(
-                posting.target_match in {"exact", "year_confirmed", "source_confirmed"}
-                for posting in result.postings
-            )
+            target_rows = sum(posting.target_match in TARGET_MATCHES for posting in result.postings)
             db.execute(
                 """
                 INSERT INTO source_health(source, mode, complete, rows_scanned, expected_rows,
@@ -287,52 +345,114 @@ class Database:
             else:
                 placeholders = ",".join("?" for _ in keys)
                 rows = db.execute(
-                    f"SELECT * FROM postings WHERE active=1 AND family_key IN ({placeholders})",
+                    f"SELECT * FROM postings WHERE active=1 "
+                    f"AND family_key IN ({placeholders})",
                     tuple(sorted(keys)),
                 ).fetchall()
                 db.execute(
-                    f"DELETE FROM families WHERE family_key IN ({placeholders})", tuple(sorted(keys))
+                    f"DELETE FROM families WHERE family_key IN ({placeholders})",
+                    tuple(sorted(keys)),
                 )
 
             grouped: dict[str, list[sqlite3.Row]] = {}
             for row in rows:
                 grouped.setdefault(str(row["family_key"]), []).append(row)
 
-            rank = {"exact": 3, "year_confirmed": 2, "source_confirmed": 1, "unknown": 0}
             for key, family_rows in grouped.items():
-                locations = sorted(
-                    {
-                        location
-                        for row in family_rows
-                        for location in json.loads(str(row["locations_json"]))
-                        if location
-                    }
+                application_rows: dict[str, list[sqlite3.Row]] = {}
+                for row in family_rows:
+                    identity = application_identity(
+                        str(row["canonical_apply_url"]),
+                        str(row["source"]),
+                        str(row["source_id"]),
+                    )
+                    application_rows.setdefault(identity, []).append(row)
+
+                openings: list[dict[str, object]] = []
+                locations: set[str] = set()
+                employer_dates: list[str] = []
+                employer_precisions: list[str] = []
+                direct_openings = 0
+                backstop_openings = 0
+
+                for identity, variants in application_rows.items():
+                    selected = min(
+                        variants,
+                        key=lambda row: (
+                            SOURCE_RANK.get(str(row["source_mode"]), 99),
+                            row["posted_at"] is None,
+                            len(str(row["title"])),
+                        ),
+                    )
+                    opening_locations = sorted(
+                        {
+                            location
+                            for row in variants
+                            for location in json.loads(str(row["locations_json"]))
+                            if location
+                        }
+                    )
+                    locations.update(opening_locations)
+                    has_direct = any(str(row["source_mode"]) == "direct" for row in variants)
+                    direct_openings += int(has_direct)
+                    backstop_openings += int(not has_direct)
+                    dates = sorted(
+                        str(row["posted_at"])
+                        for row in variants
+                        if row["posted_at"]
+                        and str(row["source_mode"]) in EMPLOYER_DATE_MODES
+                    )
+                    if dates:
+                        employer_dates.extend(dates)
+                        employer_precisions.extend(
+                            str(row["posted_precision"])
+                            for row in variants
+                            if row["posted_at"]
+                            and str(row["source_mode"]) in EMPLOYER_DATE_MODES
+                        )
+                    openings.append(
+                        {
+                            "application_identity": identity,
+                            "posting_key": selected["posting_key"],
+                            "location": opening_locations,
+                            "apply_url": selected["apply_url"],
+                            "source": selected["source"],
+                            "source_mode": selected["source_mode"],
+                            "posted_at": dates[0] if dates else None,
+                            "source_variants": sorted(
+                                {
+                                    f"{row['source_mode']}:{row['source']}"
+                                    for row in variants
+                                }
+                            ),
+                        }
+                    )
+
+                preferred_pool = [
+                    row for row in family_rows if str(row["source_mode"]) == "direct"
+                ] or [
+                    row for row in family_rows if str(row["source_mode"]) == "verification"
+                ] or family_rows
+                preferred = min(
+                    preferred_pool,
+                    key=lambda row: (len(str(row["title"])), str(row["title"])),
                 )
-                openings = [
-                    {
-                        "posting_key": row["posting_key"],
-                        "location": json.loads(str(row["locations_json"])),
-                        "apply_url": row["apply_url"],
-                        "source": row["source"],
-                        "source_mode": row["source_mode"],
-                        "posted_at": row["posted_at"],
-                    }
-                    for row in family_rows
-                ]
-                posted = sorted(str(row["posted_at"]) for row in family_rows if row["posted_at"])
+                target = max(
+                    (str(row["target_match"]) for row in family_rows),
+                    key=lambda value: TARGET_RANK.get(value, -2),
+                )
+                precision = "unknown"
+                if "timestamp" in employer_precisions:
+                    precision = "timestamp"
+                elif "day" in employer_precisions:
+                    precision = "day"
                 first_seen = min(str(row["first_seen_at"]) for row in family_rows)
                 last_seen = max(str(row["last_seen_at"]) for row in family_rows)
-                preferred = min(family_rows, key=lambda row: (len(str(row["title"])), str(row["title"])))
-                target = max((str(row["target_match"]) for row in family_rows), key=lambda x: rank.get(x, -1))
-                precision = "unknown"
-                if any(row["posted_precision"] == "timestamp" for row in family_rows):
-                    precision = "timestamp"
-                elif any(row["posted_precision"] == "day" for row in family_rows):
-                    precision = "day"
+                employer_dates.sort()
+                openings.sort(key=lambda item: (item["location"], item["apply_url"]))
+
                 db.execute(
-                    """
-                    INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
+                    "INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         key,
                         preferred["company"],
@@ -341,17 +461,17 @@ class Database:
                         preferred["season"],
                         preferred["year"],
                         target,
-                        len(family_rows),
+                        len(openings),
                         len(locations),
-                        json.dumps(locations),
+                        json.dumps(sorted(locations)),
                         json.dumps(openings),
-                        posted[0] if posted else None,
-                        posted[-1] if posted else None,
+                        employer_dates[0] if employer_dates else None,
+                        employer_dates[-1] if employer_dates else None,
                         precision,
                         first_seen,
                         last_seen,
-                        sum(row["source_mode"] == "direct" for row in family_rows),
-                        sum(row["source_mode"] != "direct" for row in family_rows),
+                        direct_openings,
+                        backstop_openings,
                     ),
                 )
 
@@ -404,8 +524,9 @@ class Database:
                     SELECT
                         COUNT(*) AS families,
                         COUNT(DISTINCT company) AS companies,
-                        SUM(direct_openings > 0) AS direct_families,
-                        SUM(direct_openings = 0 AND backstop_openings > 0) AS backstop_only
+                        COALESCE(SUM(direct_openings > 0), 0) AS direct_families,
+                        COALESCE(SUM(direct_openings = 0 AND backstop_openings > 0), 0)
+                            AS backstop_only
                     FROM families
                     WHERE target_match IN ('exact','year_confirmed','source_confirmed')
                     """
