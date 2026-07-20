@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from .grouping import family_key, normalize_title
-from .models import CollectorResult, Posting
+from .models import CollectorResult, Posting, canonical_url
 
 TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 TARGET_RANK = {
@@ -32,6 +32,7 @@ SOURCE_RANK = {
     "universe-seed": 4,
 }
 EMPLOYER_DATE_MODES = {"direct", "verification"}
+INDEPENDENT_MODES = {"direct", "verification"}
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
 )
@@ -179,7 +180,11 @@ class Database:
                     target_rows INTEGER NOT NULL,
                     last_attempt_at TEXT NOT NULL,
                     last_success_at TEXT,
-                    last_error TEXT
+                    last_error TEXT,
+                    status TEXT NOT NULL DEFAULT 'unknown',
+                    scope TEXT NOT NULL DEFAULT 'current',
+                    note TEXT,
+                    last_run_id INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS sync_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +197,19 @@ class Database:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(source_health)").fetchall()
+            }
+            additions = {
+                "status": "TEXT NOT NULL DEFAULT 'unknown'",
+                "scope": "TEXT NOT NULL DEFAULT 'current'",
+                "note": "TEXT",
+                "last_run_id": "INTEGER",
+            }
+            for name, declaration in additions.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE source_health ADD COLUMN {name} {declaration}")
 
     def start_run(self) -> int:
         now = iso(datetime.now(timezone.utc))
@@ -210,7 +228,13 @@ class Database:
                 (iso(datetime.now(timezone.utc)), status, sources, postings, failed, run_id),
             )
 
-    def apply_result(self, result: CollectorResult, *, rebuild: bool = True) -> None:
+    def apply_result(
+        self,
+        result: CollectorResult,
+        *,
+        rebuild: bool = True,
+        run_id: int | None = None,
+    ) -> None:
         observed = iso(datetime.now(timezone.utc))
         current_keys = {posting.posting_key for posting in result.postings}
         with self.connect() as db:
@@ -295,12 +319,28 @@ class Database:
                         tuple(sorted(missing)),
                     )
 
+            if result.closed_urls:
+                closed = sorted({canonical_url(url) for url in result.closed_urls})
+                placeholders = ",".join("?" for _ in closed)
+                db.execute(
+                    f"""UPDATE postings SET active=0
+                        WHERE canonical_apply_url IN ({placeholders})
+                          AND source_mode IN ('registry','verification','external-index')""",
+                    tuple(closed),
+                )
+
             target_rows = sum(posting.target_match in TARGET_MATCHES for posting in result.postings)
+            last_success = (
+                observed
+                if result.error is None and result.status not in {"blocked", "broken"}
+                else None
+            )
             db.execute(
                 """
-                INSERT INTO source_health(source, mode, complete, rows_scanned, expected_rows,
-                                          target_rows, last_attempt_at, last_success_at, last_error)
-                VALUES (?,?,?,?,?,?,?,?,?)
+                INSERT INTO source_health(
+                    source, mode, complete, rows_scanned, expected_rows, target_rows,
+                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(source) DO UPDATE SET
                     mode=excluded.mode,
                     complete=excluded.complete,
@@ -308,8 +348,12 @@ class Database:
                     expected_rows=excluded.expected_rows,
                     target_rows=excluded.target_rows,
                     last_attempt_at=excluded.last_attempt_at,
-                    last_success_at=excluded.last_success_at,
-                    last_error=excluded.last_error
+                    last_success_at=COALESCE(excluded.last_success_at, source_health.last_success_at),
+                    last_error=excluded.last_error,
+                    status=excluded.status,
+                    scope=excluded.scope,
+                    note=excluded.note,
+                    last_run_id=excluded.last_run_id
                 """,
                 (
                     result.source,
@@ -319,28 +363,37 @@ class Database:
                     result.expected_rows,
                     target_rows,
                     observed,
-                    observed if result.error is None else None,
+                    last_success,
                     result.error,
+                    result.status,
+                    result.scope,
+                    result.note,
+                    run_id,
                 ),
             )
         if rebuild:
             self.rebuild_families()
 
-    def record_failure(self, result: CollectorResult) -> None:
+    def record_failure(self, result: CollectorResult, *, run_id: int | None = None) -> None:
         now = iso(datetime.now(timezone.utc))
         with self.connect() as db:
             db.execute(
                 """
-                INSERT INTO source_health(source, mode, complete, rows_scanned, expected_rows,
-                                          target_rows, last_attempt_at, last_success_at, last_error)
-                VALUES (?,?,?,?,?,0,?,NULL,?)
+                INSERT INTO source_health(
+                    source, mode, complete, rows_scanned, expected_rows, target_rows,
+                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id
+                ) VALUES (?,?,?,?,?,0,?,NULL,?,?,?,?,?)
                 ON CONFLICT(source) DO UPDATE SET
                     mode=excluded.mode,
                     complete=0,
                     rows_scanned=excluded.rows_scanned,
                     expected_rows=excluded.expected_rows,
                     last_attempt_at=excluded.last_attempt_at,
-                    last_error=excluded.last_error
+                    last_error=excluded.last_error,
+                    status=excluded.status,
+                    scope=excluded.scope,
+                    note=excluded.note,
+                    last_run_id=excluded.last_run_id
                 """,
                 (
                     result.source,
@@ -350,6 +403,10 @@ class Database:
                     result.expected_rows,
                     now,
                     result.error,
+                    result.status,
+                    result.scope,
+                    result.note,
+                    run_id,
                 ),
             )
 
@@ -383,11 +440,12 @@ class Database:
                 employer_date_rows = [
                     row
                     for row in variants
-                    if row["posted_at"]
-                    and str(row["source_mode"]) in EMPLOYER_DATE_MODES
+                    if row["posted_at"] and str(row["source_mode"]) in EMPLOYER_DATE_MODES
                 ]
                 employer_dates = sorted(str(row["posted_at"]) for row in employer_date_rows)
-                has_direct = any(str(row["source_mode"]) == "direct" for row in variants)
+                independently_recovered = any(
+                    str(row["source_mode"]) in INDEPENDENT_MODES for row in variants
+                )
                 application = {
                     "identity": identity,
                     "selected": selected,
@@ -398,7 +456,7 @@ class Database:
                     "employer_precisions": [
                         str(row["posted_precision"]) for row in employer_date_rows
                     ],
-                    "has_direct": has_direct,
+                    "independently_recovered": independently_recovered,
                     "opening": {
                         "application_identity": identity,
                         "posting_key": selected["posting_key"],
@@ -408,10 +466,7 @@ class Database:
                         "source_mode": selected["source_mode"],
                         "posted_at": employer_dates[0] if employer_dates else None,
                         "source_variants": sorted(
-                            {
-                                f"{row['source_mode']}:{row['source']}"
-                                for row in variants
-                            }
+                            {f"{row['source_mode']}:{row['source']}" for row in variants}
                         ),
                     },
                 }
@@ -442,18 +497,20 @@ class Database:
                     for application in applications
                     for precision in application["employer_precisions"]
                 ]
-                precision = "timestamp" if "timestamp" in precisions else (
-                    "day" if "day" in precisions else "unknown"
+                precision = (
+                    "timestamp"
+                    if "timestamp" in precisions
+                    else ("day" if "day" in precisions else "unknown")
                 )
                 variant_rows = [
-                    row
-                    for application in applications
-                    for row in application["variants"]
+                    row for application in applications for row in application["variants"]
                 ]
                 first_seen = min(str(row["first_seen_at"]) for row in variant_rows)
                 last_seen = max(str(row["last_seen_at"]) for row in variant_rows)
-                direct_openings = sum(bool(app["has_direct"]) for app in applications)
-                backstop_openings = len(applications) - direct_openings
+                independent_openings = sum(
+                    bool(app["independently_recovered"]) for app in applications
+                )
+                backstop_openings = len(applications) - independent_openings
 
                 db.execute(
                     "INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -474,7 +531,7 @@ class Database:
                         precision,
                         first_seen,
                         last_seen,
-                        direct_openings,
+                        independent_openings,
                         backstop_openings,
                     ),
                 )
@@ -521,7 +578,21 @@ class Database:
 
     def coverage(self) -> dict[str, object]:
         with self.connect() as db:
-            health = [dict(row) for row in db.execute("SELECT * FROM source_health ORDER BY source")]
+            latest_run = db.execute(
+                "SELECT MAX(id) FROM sync_runs WHERE finished_at IS NOT NULL"
+            ).fetchone()[0]
+            if latest_run is None:
+                latest_run = db.execute("SELECT MAX(last_run_id) FROM source_health").fetchone()[0]
+            if latest_run is None:
+                health = [dict(row) for row in db.execute("SELECT * FROM source_health ORDER BY source")]
+            else:
+                health = [
+                    dict(row)
+                    for row in db.execute(
+                        "SELECT * FROM source_health WHERE last_run_id=? ORDER BY source",
+                        (latest_run,),
+                    )
+                ]
             family_counts = dict(
                 db.execute(
                     """
@@ -571,21 +642,62 @@ class Database:
         registry_only = registry_floor - independently_recovered
         direct_only = identities["direct"] - registry_floor
         mode_counts = Counter(str(row["mode"]) for row in health)
+        status_counts = Counter(str(row.get("status") or "unknown") for row in health)
+
+        current_sources = [row for row in health if str(row.get("scope") or "current") == "current"]
+        historical_sources = [row for row in health if str(row.get("scope")) == "historical"]
         complete_enumerators = sum(
-            bool(row["complete"]) and str(row["mode"]) == "board" for row in health
-        )
-        broken = sum(bool(row["last_error"]) for row in health)
-        zero_result_enumerators = sum(
             bool(row["complete"])
             and str(row["mode"]) == "board"
-            and int(row["rows_scanned"] or 0) == 0
-            for row in health
+            and str(row.get("status")) == "ok"
+            for row in current_sources
         )
-        truncated = sum(
-            row["expected_rows"] is not None
+        historical_enumerators = sum(
+            bool(row["complete"])
+            and str(row["mode"]) == "board"
+            and str(row.get("status")) == "ok"
+            for row in historical_sources
+        )
+
+        def has_note(row: dict[str, object], phrase: str) -> bool:
+            return phrase in str(row.get("note") or "")
+
+        actionable = [
+            row
+            for row in current_sources
+            if row.get("last_error")
+            or str(row.get("status")) in {"broken", "truncated", "empty"}
+        ]
+        access_limited = [
+            row
+            for row in current_sources
+            if str(row.get("status")) == "blocked" or has_note(row, "access-blocked")
+        ]
+        stale_verifications = [
+            row
+            for row in current_sources
+            if str(row["mode"]) == "verification"
+            and (str(row.get("status")) == "stale" or has_note(row, "stale/closed"))
+        ]
+        unstructured_verifications = [
+            row
+            for row in current_sources
+            if str(row["mode"]) == "verification"
+            and (str(row.get("status")) == "unstructured" or has_note(row, "without JobPosting"))
+        ]
+        dormant_watches = [
+            row
+            for row in historical_sources
+            if str(row.get("status")) in {"dormant", "empty", "stale"}
+        ]
+        historical_failures = [row for row in historical_sources if row.get("last_error")]
+        truncated = [
+            row
+            for row in current_sources
+            if row["expected_rows"] is not None
             and int(row["rows_scanned"] or 0) < int(row["expected_rows"])
-            for row in health
-        )
+            and str(row["mode"]) == "board"
+        ]
         registry_recall = (
             round(100 * len(independent_matches) / len(registry_floor), 1)
             if registry_floor
@@ -606,12 +718,21 @@ class Database:
                 "registry_recall_percent": registry_recall,
             },
             "contract": {
+                "run_id": latest_run,
                 "configured_sources": len(health),
+                "current_sources": len(current_sources),
+                "historical_sources": len(historical_sources),
                 "complete_enumerators": complete_enumerators,
-                "broken_sources": broken,
-                "zero_result_enumerators": zero_result_enumerators,
-                "truncated_sources": truncated,
+                "historical_enumerators": historical_enumerators,
+                "actionable_anomalies": len(actionable),
+                "access_limited": len(access_limited),
+                "stale_verifications": len(stale_verifications),
+                "unstructured_verifications": len(unstructured_verifications),
+                "dormant_watches": len(dormant_watches),
+                "historical_failures": len(historical_failures),
+                "truncated_sources": len(truncated),
                 "modes": dict(mode_counts),
+                "statuses": dict(status_counts),
                 "companies_by_mode": {
                     mode: len(companies) for mode, companies in companies_by_mode.items()
                 },
