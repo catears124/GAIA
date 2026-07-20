@@ -88,6 +88,7 @@ class SyncService:
                     registry_results = await self._run_collectors(
                         registry_collectors(settings), client, summary
                     )
+                    self.db.rebuild_families()
                     registry_postings: list[Posting] = [
                         posting
                         for result in registry_results
@@ -103,6 +104,7 @@ class SyncService:
                         [*registry_postings, *universe_seeds], settings
                     )
                     await self._run_collectors(direct_collectors, client, summary)
+                    self.db.rebuild_families()
             except asyncio.CancelledError:
                 self.db.finish_run(
                     run_id,
@@ -129,7 +131,7 @@ class SyncService:
             if result.error:
                 self.db.record_failure(result)
             else:
-                self.db.apply_result(result)
+                self.db.apply_result(result, rebuild=False)
         summary.sources += len(results)
         summary.failed += sum(result.error is not None for result in results)
 
@@ -145,7 +147,7 @@ class SyncService:
             async with semaphore:
                 try:
                     result = await collector.collect(client)
-                    self.db.apply_result(result)
+                    self.db.apply_result(result, rebuild=False)
                     LOGGER.info(
                         "%s: scanned=%s targets=%s complete=%s",
                         collector.name,
