@@ -55,6 +55,15 @@ class SyncService:
         self._task = asyncio.create_task(self.sync())
         return True
 
+    async def stop(self) -> None:
+        if self._task is None or self._task.done():
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+
     async def sync(self) -> SyncSummary:
         async with self._lock:
             run_id = self.db.start_run()
@@ -69,27 +78,39 @@ class SyncService:
             }
             timeout = httpx.Timeout(float(os.getenv("GAIA_HTTP_TIMEOUT", "30")))
             limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
-            async with httpx.AsyncClient(
-                headers=headers,
-                timeout=timeout,
-                limits=limits,
-                follow_redirects=True,
-            ) as client:
-                registry_results = await self._run_collectors(
-                    registry_collectors(settings), client, summary
+            try:
+                async with httpx.AsyncClient(
+                    headers=headers,
+                    timeout=timeout,
+                    limits=limits,
+                    follow_redirects=True,
+                ) as client:
+                    registry_results = await self._run_collectors(
+                        registry_collectors(settings), client, summary
+                    )
+                    registry_postings: list[Posting] = [
+                        posting
+                        for result in registry_results
+                        if result.error is None
+                        for posting in result.postings
+                    ]
+                    universe_seeds, seed_health = await load_universe_seed_postings(
+                        client, settings
+                    )
+                    summary.universe_seeds = len(universe_seeds)
+                    self._record_seed_health(seed_health, summary)
+                    direct_collectors = collectors_from_registry(
+                        [*registry_postings, *universe_seeds], settings
+                    )
+                    await self._run_collectors(direct_collectors, client, summary)
+            except asyncio.CancelledError:
+                self.db.finish_run(
+                    run_id,
+                    sources=summary.sources,
+                    postings=summary.postings,
+                    failed=summary.failed + 1,
                 )
-                registry_postings: list[Posting] = [
-                    posting
-                    for result in registry_results
-                    if result.error is None
-                    for posting in result.postings
-                ]
-                universe_seeds = await load_universe_seed_postings(client, settings)
-                summary.universe_seeds = len(universe_seeds)
-                direct_collectors = collectors_from_registry(
-                    [*registry_postings, *universe_seeds], settings
-                )
-                await self._run_collectors(direct_collectors, client, summary)
+                raise
             self.db.finish_run(
                 run_id,
                 sources=summary.sources,
@@ -98,6 +119,19 @@ class SyncService:
             )
             self.last_summary = summary
             return summary
+
+    def _record_seed_health(
+        self,
+        results: list[CollectorResult],
+        summary: SyncSummary,
+    ) -> None:
+        for result in results:
+            if result.error:
+                self.db.record_failure(result)
+            else:
+                self.db.apply_result(result)
+        summary.sources += len(results)
+        summary.failed += sum(result.error is not None for result in results)
 
     async def _run_collectors(
         self,
