@@ -16,9 +16,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
-      - run: ruff check .
-      - run: python -m compileall -q src tests scripts
+      - name: Install
+        run: set -o pipefail; python -m pip install -e ".[dev]" 2>&1 | tee install.log
+      - name: Ruff
+        run: set -o pipefail; ruff check . 2>&1 | tee lint.log
+      - name: Compile
+        run: set -o pipefail; python -m compileall -q src tests scripts 2>&1 | tee compile.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-diagnostics
+          path: "*.log"
 
   test:
     runs-on: ubuntu-latest
@@ -32,8 +40,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
-      - run: pytest -q
+      - name: Install
+        run: set -o pipefail; python -m pip install -e ".[dev]" 2>&1 | tee install.log
+      - name: Pytest
+        run: set -o pipefail; pytest -q 2>&1 | tee pytest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-${{ matrix.python-version }}-diagnostics
+          path: "*.log"
 
   live-recall:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
