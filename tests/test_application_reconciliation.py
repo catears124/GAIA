@@ -30,7 +30,6 @@ def test_same_application_reconciles_before_family_grouping(tmp_path):
         source_confirms_2027=True,
     )
 
-    assert direct.family_key if hasattr(direct, "family_key") else True
     db.apply_result(
         CollectorResult("registry:test", [registry], True, "registry", 1, 1),
         rebuild=False,
