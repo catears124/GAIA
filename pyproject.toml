@@ -30,7 +30,10 @@ gaia = "gaia.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gaia"]
-artifacts = ["src/gaia/frontend/*"]
+artifacts = [
+  "src/gaia/frontend/*",
+  "src/gaia/default_sources.yaml",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
