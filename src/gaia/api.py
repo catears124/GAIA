@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -14,7 +16,17 @@ FRONTEND = Path(__file__).with_name("frontend")
 db = Database()
 service = SyncService(db, concurrency=int(os.getenv("GAIA_CONCURRENCY", "16")))
 
-app = FastAPI(title="GAIA", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if os.getenv("GAIA_INITIAL_SYNC", "1") == "1":
+        service.start_background()
+    yield
+    if service.running and service._task is not None:
+        service._task.cancel()
+
+
+app = FastAPI(title="GAIA", version="1.0.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=FRONTEND), name="assets")
 
 
@@ -59,6 +71,6 @@ def coverage() -> dict[str, object]:
 
 
 @app.post("/api/sync", status_code=202)
-def sync() -> dict[str, object]:
+async def sync() -> dict[str, object]:
     started = service.start_background()
     return {"started": started, **service.status()}
