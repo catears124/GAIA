@@ -31,3 +31,7 @@ Each source declares one of:
 - failure.
 
 The UI never converts a verification-only or external-index source into a completeness claim.
+
+## Validation
+
+The release branch is validated on Python 3.11, 3.13, and 3.14 before merge.
