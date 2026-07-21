@@ -87,6 +87,7 @@ def _present_family(row: object) -> dict[str, object]:
     item = db._family_dict(row)  # noqa: SLF001 - presentation reuse.
     item["company"] = canonical_company(str(item.get("company") or ""))
     item["locations"] = normalize_locations(item.get("locations") or [])
+    item["location_count"] = len(item["locations"])
     cleaned_openings: list[dict[str, object]] = []
     for opening in item.get("openings") or []:
         if isinstance(opening, dict):
