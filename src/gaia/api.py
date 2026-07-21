@@ -13,6 +13,7 @@ from .db import Database
 from .service import SyncService
 
 FRONTEND = Path(__file__).with_name("frontend")
+TARGET_MATCHES = ("exact", "year_confirmed", "source_confirmed")
 db = Database()
 service = SyncService(db, concurrency=int(os.getenv("GAIA_CONCURRENCY", "16")))
 
@@ -20,12 +21,12 @@ service = SyncService(db, concurrency=int(os.getenv("GAIA_CONCURRENCY", "16")))
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if os.getenv("GAIA_INITIAL_SYNC", "1") == "1":
-        service.start_background()
+        service.start_background("refresh")
     yield
     await service.stop()
 
 
-app = FastAPI(title="GAIA", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="GAIA", version="2.0.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=FRONTEND), name="assets")
 
 
@@ -39,18 +40,101 @@ def health() -> dict[str, object]:
     return {"ok": True, **service.status()}
 
 
+def _catalog_count() -> int:
+    with db.connect() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_catalog'"
+        ).fetchone()
+        if exists:
+            return int(connection.execute("SELECT COUNT(*) FROM source_catalog").fetchone()[0])
+        return int(connection.execute("SELECT COUNT(*) FROM source_health").fetchone()[0])
+
+
+@app.get("/api/stats")
+def stats() -> dict[str, int]:
+    placeholders = ",".join("?" for _ in TARGET_MATCHES)
+    with db.connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT
+                COUNT(*) AS role_families,
+                COALESCE(SUM(opening_count), 0) AS active_listings,
+                COUNT(DISTINCT company) AS companies,
+                COALESCE(SUM(julianday(first_detected_at) >= julianday('now', '-1 day')), 0)
+                    AS new_24h
+            FROM families
+            WHERE target_match IN ({placeholders})
+              AND category != 'other'
+            """,
+            TARGET_MATCHES,
+        ).fetchone()
+    return {
+        "role_families": int(row["role_families"]),
+        "active_listings": int(row["active_listings"]),
+        "companies": int(row["companies"]),
+        "new_24h": int(row["new_24h"]),
+        "sources": _catalog_count(),
+    }
+
+
+def _list_families(
+    *,
+    query: str,
+    category: str,
+    target: str,
+    track: str,
+    page: int,
+    page_size: int,
+) -> dict[str, object]:
+    conditions: list[str] = []
+    params: list[object] = []
+    if target == "default":
+        placeholders = ",".join("?" for _ in TARGET_MATCHES)
+        conditions.append(f"target_match IN ({placeholders})")
+        params.extend(TARGET_MATCHES)
+    elif target:
+        conditions.append("target_match=?")
+        params.append(target)
+    if category:
+        conditions.append("category=?")
+        params.append(category)
+    elif track == "tech":
+        conditions.append("category != 'other'")
+    if query:
+        conditions.append("(company LIKE ? OR title LIKE ? OR locations_json LIKE ?)")
+        needle = f"%{query}%"
+        params.extend([needle, needle, needle])
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+    offset = max(0, page - 1) * page_size
+    with db.connect() as connection:
+        total = int(
+            connection.execute(f"SELECT COUNT(*) FROM families{where}", params).fetchone()[0]
+        )
+        rows = connection.execute(
+            f"""
+            SELECT * FROM families{where}
+            ORDER BY COALESCE(latest_posted_at, first_detected_at) DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+    return {"total": total, "items": [db._family_dict(row) for row in rows]}
+
+
 @app.get("/api/families")
 def families(
     q: str = "",
     category: str = "",
     target: str = "default",
+    track: str = "tech",
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=20, le=250),
 ) -> dict[str, object]:
-    return db.list_families(
+    return _list_families(
         query=q.strip(),
         category=category.strip(),
         target=target.strip(),
+        track=track.strip(),
         page=page,
         page_size=page_size,
     )
@@ -64,12 +148,47 @@ def family(family_key: str) -> dict[str, object]:
     return result
 
 
+def _normalized_coverage() -> dict[str, object]:
+    data = db.coverage()
+    sources = list(data.get("sources") or [])
+    current = [row for row in sources if str(row.get("scope") or "current") == "current"]
+    actionable = [
+        row
+        for row in current
+        if row.get("last_error")
+        or str(row.get("status")) in {"broken", "truncated"}
+        or (
+            str(row.get("status")) == "empty"
+            and str(row.get("mode")) in {"board", "domain"}
+        )
+    ]
+    contract = dict(data.get("contract") or {})
+    contract["actionable_anomalies"] = len(actionable)
+    contract["complete_enumerators"] = sum(
+        bool(row.get("complete"))
+        and str(row.get("status")) == "ok"
+        and str(row.get("mode")) in {"board", "board-search", "domain"}
+        for row in current
+    )
+    contract["query_scoped_boards"] = sum(
+        str(row.get("mode")) == "board-search" for row in current
+    )
+    data["contract"] = contract
+    return data
+
+
 @app.get("/api/coverage")
 def coverage() -> dict[str, object]:
-    return db.coverage()
+    return _normalized_coverage()
 
 
 @app.post("/api/sync", status_code=202)
 async def sync() -> dict[str, object]:
-    started = service.start_background()
+    started = service.start_background("refresh")
+    return {"started": started, **service.status()}
+
+
+@app.post("/api/discover", status_code=202)
+async def discover() -> dict[str, object]:
+    started = service.start_background("discover")
     return {"started": started, **service.status()}
