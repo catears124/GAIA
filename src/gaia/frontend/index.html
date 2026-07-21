@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="GAIA finds Summer 2027 computer science internships across employer career sites and public indexes.">
-  <title>GAIA — Every CS internship</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=2.0.0">
-  <link rel="stylesheet" href="/assets/coverage.css?v=2.0.0">
-  <link rel="stylesheet" href="/assets/product.css?v=2.0.0">
+  <meta name="description" content="GAIA finds verified Summer 2027 computer-science internships from employer-controlled sources.">
+  <title>GAIA — Verified CS internships</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=3.0.0">
+  <link rel="stylesheet" href="/assets/coverage.css?v=3.0.0">
+  <link rel="stylesheet" href="/assets/product.css?v=3.0.0">
 </head>
 <body>
   <header class="topbar">
@@ -24,9 +24,9 @@
 
   <main>
     <section class="hero">
-      <p class="eyebrow">Summer 2027 · live employer index</p>
-      <h2>Every CS internship.<br>One live index.</h2>
-      <p>GAIA discovers employers from the market, polls their real career systems, and keeps detection time separate from employer publication time.</p>
+      <p class="eyebrow">Summer 2027 · verified employer index</p>
+      <h2>Every CS internship.<br>Only when it’s real.</h2>
+      <p>GAIA discovers the market continuously, but the default feed shows employer-recovered applications only. Public indexes become leads until an employer source verifies them.</p>
       <div id="sync-progress" class="sync-progress" hidden>
         <div><strong id="progress-stage">Starting…</strong><span id="progress-label">0 / 0</span></div>
         <progress id="progress-bar" value="0" max="1"></progress>
@@ -35,10 +35,10 @@
     </section>
 
     <section id="metrics" class="metrics">
-      <article><span>Active CS internships</span><strong id="metric-active">—</strong><small>distinct applications in confirmed 2027 families</small></article>
-      <article><span>New in 24h</span><strong id="metric-new">—</strong><small>first detected by GAIA</small></article>
-      <article><span>Companies</span><strong id="metric-companies">—</strong><small>with active technical internships</small></article>
-      <article><span>Source universe</span><strong id="metric-sources">—</strong><small>persisted employer and index sources</small></article>
+      <article><span>Verified CS internships</span><strong id="metric-active">—</strong><small>employer-recovered applications</small></article>
+      <article><span>New verified in 24h</span><strong id="metric-new">—</strong><small>first detected by GAIA</small></article>
+      <article><span>Companies</span><strong id="metric-companies">—</strong><small>with verified technical internships</small></article>
+      <article><span>Lead queue</span><strong id="metric-leads">—</strong><small>index rows awaiting employer verification</small></article>
     </section>
 
     <nav class="tabs" aria-label="Views">
@@ -49,15 +49,16 @@
     <section id="jobs-view">
       <div class="toolbar">
         <label class="search"><span>Search</span><input id="search" type="search" placeholder="company, role, location" autocomplete="off"></label>
-        <label><span>Category</span><select id="category"><option value="">All technical categories</option><option>software</option><option>ml-ai</option><option>quant</option><option>data</option><option>security</option><option>hardware</option><option>product</option><option>other</option></select></label>
+        <label><span>Trust</span><select id="trust"><option value="verified" selected>Verified only</option><option value="leads">Lead queue</option><option value="all">Verified + leads</option></select></label>
+        <label><span>Category</span><select id="category"><option value="">All technical categories</option><option>software</option><option>ml-ai</option><option>quant</option><option>data</option><option>security</option><option>hardware</option><option>product</option><option value="other">Other</option></select></label>
         <label><span>Evidence</span><select id="target"><option value="default">Confirmed 2027</option><option value="exact">Explicit Summer 2027</option><option value="year_confirmed">Explicit 2027</option><option value="source_confirmed">Summer + 2027 index</option><option value="">All internships</option></select></label>
         <label><span>Rows</span><select id="page-size"><option>50</option><option selected>100</option><option>250</option></select></label>
       </div>
 
       <div class="table-shell">
         <table>
-          <thead><tr><th class="save-col"></th><th>Posted / detected</th><th>Company</th><th>Role family</th><th>Openings</th><th>Locations</th><th>Category</th><th></th></tr></thead>
-          <tbody id="jobs-body"><tr><td colspan="8" class="empty">Loading internships…</td></tr></tbody>
+          <thead><tr><th class="save-col"></th><th>Posted / verified</th><th>Company</th><th>Role family</th><th>Openings</th><th>Locations</th><th>Category</th><th></th></tr></thead>
+          <tbody id="jobs-body"><tr><td colspan="8" class="empty">Loading verified internships…</td></tr></tbody>
         </table>
       </div>
       <footer class="pager"><span id="page-label">—</span><div><button id="prev">Previous</button><button id="next">Next</button></div></footer>
@@ -66,7 +67,7 @@
     <section id="coverage-view" hidden>
       <div id="coverage-contract" class="coverage-contract">
         <div class="contract-title"><h2>Coverage contract</h2><span id="coverage-grade" class="status warn">measuring</span></div>
-        <p id="coverage-contract-text">GAIA measures application-level recovery against public internship indexes and reports current failures separately from access blocks, stale pages, and dormant historical watches.</p>
+        <p id="coverage-contract-text">GAIA separates product quality from crawler diagnostics. Verified listings are employer recovered; unresolved public-index rows remain leads until recovered independently.</p>
       </div>
       <div id="coverage-summary" class="coverage-grid"></div>
       <div class="coverage-controls">
@@ -80,6 +81,6 @@
   </main>
 
   <dialog id="drawer"><button id="drawer-close" class="drawer-close" aria-label="Close">×</button><div id="drawer-content"></div></dialog>
-  <script src="/assets/app.js?v=2.0.0" defer></script>
+  <script src="/assets/app.js?v=3.0.0" defer></script>
 </body>
 </html>
