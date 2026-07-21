@@ -80,12 +80,11 @@ def _trust_clause(trust: str) -> str:
         return "1=1"
     if trust == "leads":
         return "direct_openings=0 AND backstop_openings>0"
-    # Product default: something employer-controlled recovered the application.
     return "direct_openings>0"
 
 
 def _present_family(row: object) -> dict[str, object]:
-    item = db._family_dict(row)  # noqa: SLF001 - API presentation layer intentionally reuses DB serializer.
+    item = db._family_dict(row)  # noqa: SLF001 - presentation reuse.
     item["company"] = canonical_company(str(item.get("company") or ""))
     item["locations"] = normalize_locations(item.get("locations") or [])
     cleaned_openings: list[dict[str, object]] = []
@@ -106,21 +105,22 @@ def stats() -> dict[str, int]:
     target_clause = _target_clause("default", target_params)
     tech_params: list[object] = []
     tech_clause = _tech_clause("", "tech", tech_params)
+    params = [*target_params, *tech_params]
     with db.connect() as connection:
         row = connection.execute(
             f"""
             SELECT
-+                COUNT(*) AS role_families,
-+                COALESCE(SUM(opening_count), 0) AS active_listings,
-+                COUNT(DISTINCT company) AS companies,
-+                COALESCE(SUM(julianday(first_detected_at) >= julianday('now', '-1 day')), 0)
-+                    AS new_24h
-+            FROM families
-+            WHERE {target_clause}
-+              AND {tech_clause}
-+              AND direct_openings>0
-+            """.replace("+", ""),
-            [*target_params, *tech_params],
+                COUNT(*) AS role_families,
+                COALESCE(SUM(opening_count), 0) AS active_listings,
+                COUNT(DISTINCT company) AS companies,
+                COALESCE(SUM(julianday(first_detected_at) >= julianday('now', '-1 day')), 0)
+                    AS new_24h
+            FROM families
+            WHERE {target_clause}
+              AND {tech_clause}
+              AND direct_openings>0
+            """,
+            params,
         ).fetchone()
         lead_row = connection.execute(
             f"""
@@ -131,7 +131,7 @@ def stats() -> dict[str, int]:
               AND direct_openings=0
               AND backstop_openings>0
             """,
-            [*target_params, *tech_params],
+            params,
         ).fetchone()
     return {
         "role_families": int(row["role_families"]),
@@ -213,7 +213,7 @@ def family(family_key: str) -> dict[str, object]:
     result = db.get_family(family_key)
     if result is None:
         raise HTTPException(status_code=404, detail="role family not found")
-    # Round-trip through JSON-like shape so the drawer gets the same v3 cleanup as the table.
+
     class Row(dict):
         pass
 
