@@ -60,6 +60,7 @@ function queryString() {
     q: $("#search").value.trim(),
     category: $("#category").value,
     target: $("#target").value,
+    trust: $("#trust").value,
   }).toString();
 }
 
@@ -69,9 +70,9 @@ async function loadStats() {
     $("#metric-active").textContent = number(data.active_listings);
     $("#metric-new").textContent = number(data.new_24h);
     $("#metric-companies").textContent = number(data.companies);
-    $("#metric-sources").textContent = number(data.sources);
+    $("#metric-leads").textContent = number(data.leads);
   } catch {
-    for (const id of ["#metric-active", "#metric-new", "#metric-companies", "#metric-sources"]) {
+    for (const id of ["#metric-active", "#metric-new", "#metric-companies", "#metric-leads"]) {
       $(id).textContent = "—";
     }
   }
@@ -80,7 +81,9 @@ async function loadStats() {
 async function loadJobs() {
   state.controller?.abort();
   state.controller = new AbortController();
-  $("#jobs-body").innerHTML = '<tr><td colspan="8" class="empty">Loading internships…</td></tr>';
+  const trust = $("#trust").value;
+  const label = trust === "leads" ? "Loading unresolved leads…" : "Loading verified internships…";
+  $("#jobs-body").innerHTML = `<tr><td colspan="8" class="empty">${label}</td></tr>`;
   try {
     const data = await api(`/api/families?${queryString()}`, {
       signal: state.controller.signal,
@@ -96,28 +99,39 @@ async function loadJobs() {
 }
 
 function dateCell(item) {
-  const detected = relative(item.first_detected_at);
+  const verified = relative(item.last_verified_at || item.first_detected_at);
   if (item.latest_posted_at) {
-    return `<strong title="${esc(exact(item.latest_posted_at))}">${esc(relative(item.latest_posted_at, item.posted_precision))}</strong><small class="date-detected">detected ${esc(detected)}</small>`;
+    return `<strong title="${esc(exact(item.latest_posted_at))}">${esc(relative(item.latest_posted_at, item.posted_precision))}</strong><small class="date-detected">verified ${esc(verified)}</small>`;
   }
-  return `<span class="date-unavailable">Posted date unavailable</span><small class="date-detected">detected ${esc(detected)}</small>`;
+  if (item.verified) {
+    return `<span class="date-unavailable">Posted date unavailable</span><small class="date-detected">verified ${esc(verified)}</small>`;
+  }
+  return `<span class="date-unavailable">Unverified lead</span><small class="date-detected">detected ${esc(relative(item.first_detected_at))}</small>`;
+}
+
+function qualityBadge(item) {
+  if (item.verified) return '<span class="quality verified">verified</span>';
+  return '<span class="quality lead">lead</span>';
 }
 
 function renderJobs() {
   const saved = savedSet();
   const tracking = trackingMap();
   if (!state.items.length) {
-    $("#jobs-body").innerHTML = '<tr><td colspan="8" class="empty">No role families match these filters.</td></tr>';
+    const trust = $("#trust").value;
+    const message = trust === "verified"
+      ? "No verified internships match these filters. Try the lead queue or run Discover companies."
+      : "No leads match these filters.";
+    $("#jobs-body").innerHTML = `<tr><td colspan="8" class="empty">${message}</td></tr>`;
   } else {
     $("#jobs-body").innerHTML = state.items.map(item => {
       const locationPreview = item.locations.slice(0, 2).join(" · ");
       const extraLocations = Math.max(0, item.locations.length - 2);
-      const sourceBadge = item.direct_openings ? "employer recovered" : "index only";
       const status = tracking[item.family_key] || "";
-      return `<tr data-key="${esc(item.family_key)}">
+      return `<tr data-key="${esc(item.family_key)}" class="${item.verified ? "row-verified" : "row-lead"}">
         <td class="save-col"><button class="star ${saved.has(item.family_key) ? "saved" : ""}" data-save="${esc(item.family_key)}" aria-label="Save role">☆</button></td>
         <td>${dateCell(item)}</td>
-        <td><strong>${esc(item.company)}</strong><small>${esc(sourceBadge)}${status ? ` · ${esc(status)}` : ""}</small></td>
+        <td><strong>${esc(item.company)}</strong><small>${qualityBadge(item)}${status ? ` · ${esc(status)}` : ""}</small></td>
         <td><button class="role-link" data-open="${esc(item.family_key)}">${esc(item.title)}</button><small>${esc(item.target_match.replaceAll("_", " "))}</small></td>
         <td><strong>${number(item.opening_count)}</strong><small>${item.opening_count === 1 ? "application" : "applications"}</small></td>
         <td>${esc(locationPreview || "Not stated")}${extraLocations ? `<small>+${extraLocations} more</small>` : ""}</td>
@@ -150,9 +164,12 @@ async function openFamily(key) {
   const openings = item.openings.map((opening, index) => {
     const locations = opening.location?.join(" · ") || "Location not stated";
     const variants = (opening.source_variants || []).join(" · ");
-    return `<article class="opening"><div><strong>Opening ${index + 1}</strong><p>${esc(locations)}</p><small>${esc(opening.source)} · ${esc(opening.source_mode)}${variants ? ` · ${esc(variants)}` : ""}</small></div><a href="${esc(opening.apply_url)}" target="_blank" rel="noopener">Apply ↗</a></article>`;
+    const sourceMode = opening.source_mode === "registry" || opening.source_mode === "external-index"
+      ? "lead source"
+      : "employer source";
+    return `<article class="opening ${opening.source_mode === "registry" || opening.source_mode === "external-index" ? "lead" : "verified"}"><div><strong>Opening ${index + 1}</strong><p>${esc(locations)}</p><small>${esc(sourceMode)} · ${esc(opening.source)}${variants ? ` · ${esc(variants)}` : ""}</small></div><a href="${esc(opening.apply_url)}" target="_blank" rel="noopener">Apply ↗</a></article>`;
   }).join("");
-  $("#drawer-content").innerHTML = `<p class="eyebrow">${esc(item.company)}</p><h2>${esc(item.title)}</h2><div class="drawer-meta"><span>${number(item.opening_count)} openings</span><span>${number(item.location_count)} locations</span><span>${esc(item.category)}</span></div><dl><dt>Employer posted</dt><dd title="${esc(exact(item.latest_posted_at))}">${item.latest_posted_at ? esc(relative(item.latest_posted_at, item.posted_precision)) : "Unavailable from employer"}</dd><dt>First detected</dt><dd>${esc(relative(item.first_detected_at))}</dd><dt>Last verified</dt><dd>${esc(relative(item.last_verified_at))}</dd><dt>Tracking</dt><dd><select id="tracking-status" data-family="${esc(key)}">${options}</select></dd></dl><h3>Applications</h3>${openings}`;
+  $("#drawer-content").innerHTML = `<p class="eyebrow">${esc(item.company)} · ${item.verified ? "verified" : "lead"}</p><h2>${esc(item.title)}</h2><div class="drawer-meta"><span>${number(item.opening_count)} openings</span><span>${number(item.location_count)} locations</span><span>${esc(item.category)}</span></div><dl><dt>Employer posted</dt><dd title="${esc(exact(item.latest_posted_at))}">${item.latest_posted_at ? esc(relative(item.latest_posted_at, item.posted_precision)) : "Unavailable from employer"}</dd><dt>First detected</dt><dd>${esc(relative(item.first_detected_at))}</dd><dt>Last verified</dt><dd>${esc(relative(item.last_verified_at))}</dd><dt>Tracking</dt><dd><select id="tracking-status" data-family="${esc(key)}">${options}</select></dd></dl><h3>Applications</h3>${openings}`;
   $("#drawer").showModal();
 }
 
@@ -215,15 +232,15 @@ async function loadCoverage() {
   $("#coverage-contract").classList.toggle("incomplete", !trustworthy);
   $("#coverage-contract-text").textContent = recall == null
     ? "No target benchmark is loaded yet, so GAIA cannot make a recall statement."
-    : `GAIA independently recovers ${recall}% of ${number(summary.registry_floor)} benchmark applications. ${number(unresolved)} remain index-only. ${number(actionable)} current sources require engineering. ${number(contract.query_scoped_boards || 0)} Workday sources are completely traversed inside their internship/co-op search surface.`;
+    : `Verified feed is employer-recovered. Public indexes report ${number(summary.registry_floor)} benchmark apps; ${number(summary.registry_only)} are still leads. ${number(actionable)} current sources need engineering.`;
   $("#coverage-summary").innerHTML = [
-    ["Known applications", summary.known_applications || 0, "deduplicated by application identity"],
-    ["Registry benchmark", summary.registry_floor || 0, "active target-specific applications"],
-    ["Independently recovered", summary.independent_matches || 0, "employer board or page verification"],
-    ["Registry-only gap", summary.registry_only || 0, "known applications still unresolved"],
+    ["Verified applications", summary.direct_applications || 0, "employer-controlled source recovered"],
+    ["Lead applications", summary.registry_only || 0, "index rows awaiting verification"],
+    ["Benchmark recall", recall == null ? "—" : `${recall}%`, "independent recovery of public-index apps"],
     ["Direct-only", summary.direct_only || 0, "found before or outside public indexes"],
-    ["Actionable current gaps", actionable, "actual current crawler failures"],
-  ].map(([label, value, note]) => `<article><span>${esc(label)}</span><strong>${number(value)}</strong><small>${esc(note)}</small></article>`).join("");
+    ["Actionable gaps", actionable, "actual current crawler failures"],
+    ["Source universe", contract.configured_sources || 0, "latest run source records"],
+  ].map(([label, value, note]) => `<article><span>${esc(label)}</span><strong>${typeof value === "number" ? number(value) : esc(value)}</strong><small>${esc(note)}</small></article>`).join("");
   renderCoverageSources();
 }
 
@@ -271,7 +288,7 @@ $("#search").addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => { state.page = 1; loadJobs(); }, 180);
 });
-for (const id of ["#category", "#target", "#page-size"]) {
+for (const id of ["#category", "#target", "#trust", "#page-size"]) {
   $(id).addEventListener("change", () => { state.page = 1; loadJobs(); });
 }
 $("#coverage-filter").addEventListener("change", renderCoverageSources);
