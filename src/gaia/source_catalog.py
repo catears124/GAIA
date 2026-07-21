@@ -19,6 +19,45 @@ from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, W
 from .quality import canonical_source_name
 
 
+def _install_scope_promotion(connection: sqlite3.Connection) -> None:
+    has_health = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_health'"
+    ).fetchone()
+    if not has_health:
+        return
+
+    # Backfill databases created before promotion triggers existed.
+    connection.execute(
+        """
+        UPDATE source_catalog
+        SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
+        WHERE scope='historical'
+          AND source IN (SELECT source FROM source_health WHERE scope='current')
+        """
+    )
+    connection.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS source_catalog_promote_current_insert
+        AFTER INSERT ON source_health
+        WHEN NEW.scope='current'
+        BEGIN
+            UPDATE source_catalog
+            SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
+            WHERE source=NEW.source AND scope='historical';
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS source_catalog_promote_current_update
+        AFTER UPDATE OF scope ON source_health
+        WHEN NEW.scope='current' AND OLD.scope<>'current'
+        BEGIN
+            UPDATE source_catalog
+            SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
+            WHERE source=NEW.source AND scope='historical';
+        END;
+        """
+    )
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, timeout=60)
     connection.row_factory = sqlite3.Row
@@ -36,6 +75,7 @@ def _connect(path: Path) -> sqlite3.Connection:
         )
         """
     )
+    _install_scope_promotion(connection)
     return connection
 
 
@@ -126,6 +166,7 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
             """,
             rows,
         )
+        _install_scope_promotion(database)
     return len(rows)
 
 
