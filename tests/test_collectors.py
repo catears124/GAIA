@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from gaia.collectors import SchemaPageCollector
+from gaia.collectors import LeverCollector, SchemaPageCollector
 from gaia.models import canonical_url
 
 
@@ -83,3 +83,36 @@ async def test_all_closed_schema_pages_are_stale_not_broken():
     assert result.status == "stale"
     assert result.error is None
     assert result.closed_urls
+
+
+@pytest.mark.asyncio
+async def test_lever_uses_structured_date_posted_when_available():
+    api_payload = [
+        {
+            "id": "12345678-1234-1234-1234-123456789abc",
+            "text": "Software Engineer Intern, Summer 2027",
+            "hostedUrl": "https://jobs.lever.co/example/12345678-1234-1234-1234-123456789abc",
+            "categories": {"location": "New York, NY", "commitment": "Intern"},
+        }
+    ]
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Software Engineer Intern, Summer 2027",
+        "url": api_payload[0]["hostedUrl"],
+        "datePosted": "2026-07-20T12:00:00Z",
+        "employmentType": "INTERN",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.lever.co":
+            return httpx.Response(200, json=api_payload)
+        return httpx.Response(
+            200,
+            text=f'<script type="application/ld+json">{json.dumps(schema)}</script>',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await LeverCollector("Example", "example").collect(client)
+    assert result.postings[0].posted_at is not None
+    assert result.postings[0].posted_confidence == "structured"
