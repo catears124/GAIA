@@ -118,7 +118,9 @@ async def discover_github_market(
                 headers={**headers, "Accept": "application/vnd.github.raw+json"},
             )
             response.raise_for_status()
-            parsed = _document_postings(response.text, source=source, registry=True)
+            # Dynamically found repositories are discovery surfaces, not trusted year labels.
+            # Only explicit 2027 evidence in each row can enter the default target feed.
+            parsed = _document_postings(response.text, source=source, registry=False)
             for posting in parsed:
                 posting.source_mode = "external-index"
             postings.extend(parsed)
