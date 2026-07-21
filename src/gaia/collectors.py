@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from dateutil import parser as date_parser
 
 from .classify import classify
 from .models import CollectorResult, Posting, canonical_url
+from .page_verification import page_is_closed, posting_from_unstructured_page
 
 
 def parse_date(value: Any) -> datetime | None:
@@ -308,61 +310,104 @@ class AshbyCollector(Collector):
 class SchemaPageCollector(Collector):
     mode = "verification"
 
-    def __init__(self, company: str, urls: list[str], name: str | None = None) -> None:
+    def __init__(
+        self,
+        company: str,
+        urls: list[str] | None = None,
+        name: str | None = None,
+        *,
+        leads: list[Posting] | None = None,
+    ) -> None:
         self.company = company
-        self.urls = urls
-        self.name = name or f"schema:{urlsplit(urls[0]).netloc}"
+        self.leads = list(leads or [])
+        lead_urls = [item.apply_url for item in self.leads]
+        self.urls = list(dict.fromkeys([*(urls or []), *lead_urls]))
+        if not self.urls:
+            raise ValueError("SchemaPageCollector requires at least one URL")
+        self.leads_by_url = {item.canonical_apply_url: item for item in self.leads}
+        self.name = name or f"schema:{urlsplit(self.urls[0]).netloc}"
+        self.fetch_concurrency = max(1, int(os.getenv("GAIA_VERIFY_CONCURRENCY", "12")))
 
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
+        semaphore = asyncio.Semaphore(self.fetch_concurrency)
+
+        async def fetch(url: str) -> tuple[str, list[Posting], str | None, str | None]:
+            async with semaphore:
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    code = exc.response.status_code
+                    if code in {404, 410}:
+                        return "stale", [], canonical_url(url), None
+                    if code in {401, 403, 429}:
+                        return "blocked", [], None, None
+                    return "error", [], None, f"{code} {url}"
+                except httpx.HTTPError as exc:
+                    return "error", [], None, f"{type(exc).__name__}: {url}"
+
+                if page_is_closed(response.text):
+                    return "stale", [], canonical_url(url), None
+
+                jobs = json_ld_jobs(response.text)
+                if jobs:
+                    parsed_postings: list[Posting] = []
+                    for job in jobs:
+                        parsed = posting_from_schema(
+                            job,
+                            source=self.name,
+                            source_mode="verification",
+                        )
+                        if parsed:
+                            parsed.company = self.company
+                            parsed_postings.append(classify(parsed))
+                    if parsed_postings:
+                        return "verified", parsed_postings, None, None
+
+                lead = self.leads_by_url.get(canonical_url(url))
+                fallback = posting_from_unstructured_page(
+                    response.text,
+                    page_url=str(response.url),
+                    company=self.company,
+                    source=self.name,
+                    lead=lead,
+                )
+                if fallback:
+                    return "verified", [fallback], None, None
+                return "unstructured", [], None, None
+
+        results = await asyncio.gather(*(fetch(url) for url in self.urls))
         postings: list[Posting] = []
         closed_urls: list[str] = []
-        blocked = 0
-        stale = 0
-        unstructured = 0
+        blocked = stale = unstructured = 0
         hard_errors: list[str] = []
-
-        for url in self.urls:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                code = exc.response.status_code
-                if code in {404, 410}:
-                    stale += 1
-                    closed_urls.append(canonical_url(url))
-                    continue
-                if code in {401, 403, 429}:
-                    blocked += 1
-                    continue
-                hard_errors.append(f"{code} {url}")
-                continue
-            except httpx.HTTPError as exc:
-                hard_errors.append(f"{type(exc).__name__}: {url}")
-                continue
-
-            jobs = json_ld_jobs(response.text)
-            if not jobs:
+        for status, recovered, closed_url, error in results:
+            postings.extend(recovered)
+            if closed_url:
+                closed_urls.append(closed_url)
+            if status == "blocked":
+                blocked += 1
+            elif status == "stale":
+                stale += 1
+            elif status == "unstructured":
                 unstructured += 1
-                continue
-            for job in jobs:
-                parsed = posting_from_schema(
-                    job,
-                    source=self.name,
-                    source_mode="verification",
-                )
-                if parsed:
-                    parsed.company = self.company
-                    postings.append(classify(parsed))
+            elif status == "error" and error:
+                hard_errors.append(error)
 
+        postings = list({item.canonical_apply_url: item for item in postings}.values())
         notes: list[str] = []
         if stale:
             notes.append(f"{stale} stale/closed page{'s' if stale != 1 else ''}")
         if blocked:
             notes.append(f"{blocked} access-blocked page{'s' if blocked != 1 else ''}")
         if unstructured:
-            notes.append(f"{unstructured} reachable page{'s' if unstructured != 1 else ''} without JobPosting data")
+            notes.append(
+                f"{unstructured} reachable page{'s' if unstructured != 1 else ''} without sufficient job evidence"
+            )
         if hard_errors:
-            notes.append(f"{len(hard_errors)} transport/server failure{'s' if len(hard_errors) != 1 else ''}")
+            notes.append(
+                f"{len(hard_errors)} transport/server failure{'s' if len(hard_errors) != 1 else ''}"
+            )
 
         if hard_errors:
             status = "partial" if postings or stale or blocked or unstructured else "broken"
