@@ -73,7 +73,7 @@ def _role_tokens(value: str) -> set[str]:
     }
 
 
-def _title_similarity(expected: str, candidate: str) -> float:
+def title_similarity(expected: str, candidate: str) -> float:
     expected_tokens = _role_tokens(expected)
     candidate_tokens = _role_tokens(candidate)
     if not expected_tokens or not candidate_tokens:
@@ -178,7 +178,7 @@ def _best_title(candidates: list[str], lead: Posting | None) -> tuple[str | None
         return min(internship_candidates, key=len), 1.0
 
     ranked = sorted(
-        ((_title_similarity(lead.title, candidate), -len(candidate), candidate) for candidate in candidates),
+        ((title_similarity(lead.title, candidate), -len(candidate), candidate) for candidate in candidates),
         reverse=True,
     )
     similarity, _, candidate = ranked[0]
@@ -195,8 +195,9 @@ def posting_from_unstructured_page(
 ) -> Posting | None:
     """Recover a posting from a reachable employer page without trusting generic page text.
 
-    A lead-backed page must strongly agree with the indexed role title. A sitemap-only page
-    must independently expose an internship title and explicit Summer 2027 evidence.
+    A lead-backed page must expose either the complete indexed title or a strongly matching
+    job-title field. A sitemap-only page must independently expose an internship title and
+    explicit Summer 2027 evidence.
     """
 
     if page_is_closed(html):
@@ -209,17 +210,10 @@ def posting_from_unstructured_page(
     best_title, similarity = _best_title(candidates, lead)
 
     if lead is not None:
-        expected_tokens = _role_tokens(lead.title)
-        evidence_tokens = _role_tokens(evidence)
-        token_coverage = (
-            len(expected_tokens & evidence_tokens) / len(expected_tokens)
-            if expected_tokens
-            else 0.0
-        )
         exact_in_page = _normalized(lead.title) in _normalized(evidence)
         if not INTERN_RE.search(evidence):
             return None
-        if not exact_in_page and similarity < 0.55 and token_coverage < 0.75:
+        if not exact_in_page and (best_title is None or similarity < 0.55):
             return None
         title = lead.title
         locations = list(lead.locations)
