@@ -165,7 +165,7 @@ def load_catalog(path: Path) -> list[Collector]:
     for row in rows:
         try:
             collector = _collector(str(row["kind"]), json.loads(str(row["spec_json"])))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             continue
         if collector is None:
             continue
