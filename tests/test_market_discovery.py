@@ -3,8 +3,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from gaia.collectors import SchemaPageCollector
 from gaia.market_collectors import WorkdaySearchCollector
 from gaia.market_discovery import discover_github_market
+from gaia.models import Posting
 from gaia.source_catalog import load_catalog, merge_catalog, save_catalog
 
 
@@ -94,6 +96,34 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
     assert loaded[0].scope == "historical"
     assert isinstance(loaded[0], WorkdaySearchCollector)
     assert loaded[0].terms == ("intern", "co-op")
+
+
+def test_source_catalog_persists_verification_lead_evidence(tmp_path):
+    path = tmp_path / "gaia.db"
+    lead = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://careers.example.com/jobs/123",
+        source="registry:test",
+        source_id="123",
+        source_mode="registry",
+        locations=["New York, NY"],
+    )
+    collector = SchemaPageCollector(
+        "Example",
+        name="schema:careers.example.com:Example",
+        leads=[lead],
+    )
+
+    assert save_catalog(path, [collector]) == 1
+    loaded = load_catalog(path)
+
+    assert len(loaded) == 1
+    assert isinstance(loaded[0], SchemaPageCollector)
+    assert len(loaded[0].leads) == 1
+    assert loaded[0].leads[0].title == lead.title
+    assert loaded[0].leads[0].locations == lead.locations
+    assert loaded[0].urls == [lead.apply_url]
 
 
 def test_current_discovery_overrides_historical_catalog_copy():
