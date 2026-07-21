@@ -24,20 +24,32 @@ native_sources:
   - kind: google-careers
 
 workday:
-  # Workday's public CXS search is paginated completely for each term. GAIA never scans
-  # a 20,000-role employer board just to find its internship rows.
+  # Workday search is not exact-match search. A high-recall query basis is unioned and
+  # deduplicated by externalPath before technical/year classification.
   search_terms:
     - intern
+    - internship
     - co-op
+    - coop
+    - student
+    - university
+    - campus
+    - summer
 
 market_discovery:
   github:
     enabled: true
-    repos_per_query: 10
-    max_repositories: 30
-    pushed_within_days: 180
+    repos_per_query: 20
+    max_repositories: 100
+    pushed_within_days: 365
     queries:
       - '"2027 internships" in:name,description,readme'
       - '"Summer 2027" internships in:name,description,readme'
       - '"2027 SWE" internships in:name,description,readme'
+      - '"2027 software" internship in:name,description,readme'
+      - '"2027 data" internship in:name,description,readme'
+      - '"2027 machine learning" internship in:name,description,readme'
+      - '"2027 hardware" internship in:name,description,readme'
+      - '"2027 cybersecurity" internship in:name,description,readme'
+      - '"2027 product" internship in:name,description,readme'
       - '"2027 quant" internships in:name,description,readme'
