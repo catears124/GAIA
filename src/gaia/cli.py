@@ -26,7 +26,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def run_sync(mode: str) -> None:
-    summary = await SyncService(Database()).sync(mode=mode)
+    concurrency = max(1, int(os.getenv("GAIA_CONCURRENCY", "16")))
+    summary = await SyncService(Database(), concurrency=concurrency).sync(mode=mode)
     print(summary.as_dict())
 
 
