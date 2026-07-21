@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from pathlib import PurePosixPath
@@ -410,7 +411,7 @@ def collectors_from_registry(
     lever: dict[str, tuple[str, str]] = {}
     ashby: dict[str, tuple[str, str]] = {}
     workday: dict[tuple[str, str, str], tuple[str, str]] = {}
-    custom_pages: dict[tuple[str, str], set[str]] = defaultdict(set)
+    custom_pages: dict[tuple[str, str], dict[str, Posting]] = defaultdict(dict)
     include_google = False
 
     for posting in postings:
@@ -432,7 +433,7 @@ def collectors_from_registry(
         elif host in {"www.google.com", "google.com"} and "/about/careers/" in parts.path:
             include_google = True
         elif host:
-            custom_pages[(posting.company, host)].add(posting.apply_url)
+            custom_pages[(posting.company, host)][posting.canonical_apply_url] = posting
 
     terms = tuple(settings.get("workday", {}).get("search_terms") or ("intern", "co-op"))
     collectors: list[Collector] = []
@@ -452,18 +453,24 @@ def collectors_from_registry(
         _scoped(WorkdaySearchCollector(company, root, tenant, site, terms=terms), scope)
         for (root, tenant, site), (company, scope) in workday.items()
     )
-    if deep:
-        collectors.extend(
-            SitemapDomainCollector(company, host, sorted(urls))
-            for (company, host), urls in custom_pages.items()
-            if host and len(urls) <= 100
-        )
-    else:
-        collectors.extend(
-            SchemaPageCollector(company, sorted(urls), name=f"schema:{host}:{company}")
-            for (company, host), urls in custom_pages.items()
-            if host and len(urls) <= 50
-        )
+
+    verify_batch_size = max(25, int(os.getenv("GAIA_VERIFY_BATCH_SIZE", "250")))
+    for (company, host), lead_map in custom_pages.items():
+        leads = list(lead_map.values())
+        for batch_index in range(0, len(leads), verify_batch_size):
+            batch = leads[batch_index : batch_index + verify_batch_size]
+            suffix = f":{batch_index // verify_batch_size + 1}" if len(leads) > verify_batch_size else ""
+            collectors.append(
+                SchemaPageCollector(
+                    company,
+                    name=f"schema:{host}:{company}{suffix}",
+                    leads=batch,
+                )
+            )
+        if deep:
+            collectors.append(
+                SitemapDomainCollector(company, host, [item.apply_url for item in leads])
+            )
 
     native_kinds = {str(item.get("kind")) for item in settings.get("native_sources", [])}
     if include_google or "google-careers" in native_kinds:

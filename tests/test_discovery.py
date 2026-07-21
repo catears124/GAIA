@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from gaia.collectors import SchemaPageCollector
 from gaia.discovery import (
     _choose_apply_url,
     _document_postings,
@@ -107,6 +108,49 @@ def test_historical_structured_board_is_retained_as_watch_scope():
     assert len(collectors) == 1
     assert collectors[0].scope == "historical"
     assert collectors[0].name == "ashby:example"
+
+
+def test_custom_page_leads_are_never_silently_dropped(monkeypatch):
+    monkeypatch.setenv("GAIA_VERIFY_BATCH_SIZE", "25")
+    postings = [
+        Posting(
+            company="Example",
+            title=f"Software Engineer Intern, Summer 2027 — {index}",
+            apply_url=f"https://careers.example.com/jobs/{index}",
+            source="registry:test",
+            source_id=str(index),
+            source_mode="registry",
+        )
+        for index in range(61)
+    ]
+
+    collectors = collectors_from_registry(postings, settings={"release_canaries": {}})
+    verifiers = [item for item in collectors if isinstance(item, SchemaPageCollector)]
+
+    assert len(verifiers) == 3
+    assert sum(len(item.leads) for item in verifiers) == 61
+    assert {lead.source_id for item in verifiers for lead in item.leads} == {
+        str(index) for index in range(61)
+    }
+
+
+def test_deep_discovery_keeps_direct_verification_and_adds_domain_enumeration():
+    posting = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://careers.example.com/jobs/current-role",
+        source="registry:test",
+        source_id="current",
+        source_mode="registry",
+    )
+    collectors = collectors_from_registry(
+        [posting],
+        settings={"release_canaries": {}},
+        deep=True,
+    )
+    modes = {collector.mode for collector in collectors}
+    assert "verification" in modes
+    assert "domain" in modes
 
 
 def test_workday_site_skips_locale_segment():

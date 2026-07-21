@@ -13,10 +13,20 @@ import httpx
 from .classify import classify
 from .collectors import Collector, json_ld_jobs, locations_from, posting_from_schema, text
 from .models import CollectorResult, Posting
+from .page_verification import page_is_closed, posting_from_unstructured_page
 
 TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 TECH_CATEGORIES = {"software", "ml-ai", "data", "security", "hardware", "quant", "product"}
-WORKDAY_TERMS = ("intern", "co-op")
+WORKDAY_TERMS = (
+    "intern",
+    "internship",
+    "co-op",
+    "coop",
+    "student",
+    "university",
+    "campus",
+    "summer",
+)
 JOB_PATH_RE = re.compile(
     r"(?:^|/)(?:job|jobs|career|careers|position|positions|opening|openings|requisition)(?:/|$)",
     re.I,
@@ -42,7 +52,7 @@ def _workday_relative(raw: str) -> tuple[datetime | None, str]:
 
 
 class WorkdaySearchCollector(Collector):
-    """Enumerate the internship search surface, not a company's entire board."""
+    """Enumerate a high-recall internship search basis, not a company's entire board."""
 
     mode = "board-search"
 
@@ -309,8 +319,19 @@ class SitemapDomainCollector(Collector):
                     return []
                 except httpx.HTTPError:
                     return []
+                if page_is_closed(response.text):
+                    stale += 1
+                    return []
                 jobs = json_ld_jobs(response.text)
                 if not jobs:
+                    fallback = posting_from_unstructured_page(
+                        response.text,
+                        page_url=str(response.url),
+                        company=self.company,
+                        source=self.name,
+                    )
+                    if fallback:
+                        return [fallback]
                     unstructured += 1
                     return []
                 output: list[Posting] = []
@@ -338,7 +359,7 @@ class SitemapDomainCollector(Collector):
         if stale:
             notes.append(f"{stale} stale")
         if unstructured:
-            notes.append(f"{unstructured} without JobPosting data")
+            notes.append(f"{unstructured} without sufficient job evidence")
         complete = enumerated_all and bool(urls) and len(urls) > len(self.seed_urls)
         status = "ok" if complete else ("verified" if discovered else "unstructured")
         return CollectorResult(

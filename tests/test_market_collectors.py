@@ -135,6 +135,39 @@ async def test_sitemap_domain_enumerates_structured_job_pages():
 
 
 @pytest.mark.asyncio
+async def test_sitemap_domain_recovers_unstructured_summer_2027_job_page():
+    robots = "Sitemap: https://careers.example.com/sitemap.xml\n"
+    sitemap = """<?xml version="1.0"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://careers.example.com/jobs/ml-intern-2027</loc></url>
+    </urlset>
+    """
+    detail = """
+    <html><head><meta property="og:title" content="Machine Learning Intern"></head>
+    <body><h1>Machine Learning Intern</h1>
+    <p>Our Summer 2027 internship works on production ML systems.</p></body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=robots)
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=sitemap)
+        if request.url.path == "/jobs/ml-intern-2027":
+            return httpx.Response(200, text=detail)
+        return httpx.Response(404)
+
+    collector = SitemapDomainCollector("Example", "careers.example.com", [])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await collector.collect(client)
+
+    assert result.complete is True
+    assert len(result.postings) == 1
+    assert result.postings[0].title == "Machine Learning Intern"
+    assert result.postings[0].target_match == "source_confirmed"
+
+
+@pytest.mark.asyncio
 async def test_google_recovers_embedded_job_urls_without_anchor_markup():
     search_html = r'''<script>window.jobs=["\/about\/careers\/applications\/jobs\/results\/120997883141857990-software-engineering-intern-summer-2027"]</script>'''
     schema = {
