@@ -8,12 +8,12 @@ from typing import Any
 from .collectors import (
     AshbyCollector,
     Collector,
-    GoogleCareersCollector,
     GreenhouseCollector,
     LeverCollector,
     SchemaPageCollector,
 )
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
+from .native_collectors import GoogleInternshipCollector
 from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
 
 
@@ -79,7 +79,7 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
             "urls": collector.urls,
             "name": collector.name,
         }
-    if isinstance(collector, GoogleCareersCollector):
+    if isinstance(collector, GoogleInternshipCollector):
         return "google-careers", {}
     return None
 
@@ -152,7 +152,7 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
             name=str(spec.get("name") or "") or None,
         )
     if kind == "google-careers":
-        return GoogleCareersCollector()
+        return GoogleInternshipCollector()
     return None
 
 
