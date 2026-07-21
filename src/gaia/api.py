@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import Database
-from .quality import canonical_company, normalize_locations
+from .quality import canonical_company, is_index_mode, normalize_locations
 from .service import SyncService
 
 FRONTEND = Path(__file__).with_name("frontend")
@@ -83,18 +83,32 @@ def _trust_clause(trust: str) -> str:
     return "direct_openings>0"
 
 
-def _present_family(row: object) -> dict[str, object]:
+def _opening_is_lead(opening: dict[str, object]) -> bool:
+    return is_index_mode(str(opening.get("source_mode") or ""))
+
+
+def _present_family(row: object, *, trust: str = "all") -> dict[str, object]:
     item = db._family_dict(row)  # noqa: SLF001 - presentation reuse.
     item["company"] = canonical_company(str(item.get("company") or ""))
     item["locations"] = normalize_locations(item.get("locations") or [])
-    item["location_count"] = len(item["locations"])
     cleaned_openings: list[dict[str, object]] = []
     for opening in item.get("openings") or []:
-        if isinstance(opening, dict):
-            copy = dict(opening)
-            copy["location"] = normalize_locations(copy.get("location") or [])
-            cleaned_openings.append(copy)
+        if not isinstance(opening, dict):
+            continue
+        if trust == "verified" and _opening_is_lead(opening):
+            continue
+        if trust == "leads" and not _opening_is_lead(opening):
+            continue
+        copy = dict(opening)
+        copy["location"] = normalize_locations(copy.get("location") or [])
+        cleaned_openings.append(copy)
     item["openings"] = cleaned_openings
+    item["opening_count"] = len(cleaned_openings) if trust in {"verified", "leads"} else item["opening_count"]
+    item["locations"] = normalize_locations(
+        [location for opening in cleaned_openings for location in opening.get("location", [])]
+        or item["locations"]
+    )
+    item["location_count"] = len(item["locations"])
     item["verified"] = int(item.get("direct_openings") or 0) > 0
     item["quality"] = "verified" if item["verified"] else "lead"
     return item
@@ -112,7 +126,7 @@ def stats() -> dict[str, int]:
             f"""
             SELECT
                 COUNT(*) AS role_families,
-                COALESCE(SUM(opening_count), 0) AS active_listings,
+                COALESCE(SUM(direct_openings), 0) AS active_listings,
                 COUNT(DISTINCT company) AS companies,
                 COALESCE(SUM(julianday(first_detected_at) >= julianday('now', '-1 day')), 0)
                     AS new_24h
@@ -125,7 +139,7 @@ def stats() -> dict[str, int]:
         ).fetchone()
         lead_row = connection.execute(
             f"""
-            SELECT COUNT(*) AS leads, COALESCE(SUM(opening_count),0) AS lead_apps
+            SELECT COUNT(*) AS leads, COALESCE(SUM(backstop_openings),0) AS lead_apps
             FROM families
             WHERE {target_clause}
               AND {tech_clause}
@@ -182,7 +196,7 @@ def _list_families(
             """,
             [*params, page_size, offset],
         ).fetchall()
-    return {"total": total, "items": [_present_family(row) for row in rows]}
+    return {"total": total, "items": [_present_family(row, trust=trust) for row in rows]}
 
 
 @app.get("/api/families")
@@ -221,7 +235,7 @@ def family(family_key: str) -> dict[str, object]:
     row = Row(result)
     row["locations_json"] = json.dumps(result.get("locations") or [])
     row["openings_json"] = json.dumps(result.get("openings") or [])
-    return _present_family(row)
+    return _present_family(row, trust="all")
 
 
 def _normalized_coverage() -> dict[str, object]:
