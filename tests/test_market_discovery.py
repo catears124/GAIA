@@ -8,14 +8,21 @@ from gaia.market_discovery import discover_github_market
 from gaia.source_catalog import load_catalog, merge_catalog, save_catalog
 
 
-@pytest.mark.asyncio
-async def test_github_market_discovery_finds_live_feed_without_company_names():
-    readme = """
-    | Company | Role | Location | Apply |
-    |---|---|---|---|
-    | Example | Software Engineer Intern, Summer 2027 | New York, NY | [Apply](https://jobs.lever.co/example/12345678-1234-1234-1234-123456789abc) |
-    """
+def github_settings() -> dict[str, object]:
+    return {
+        "market_discovery": {
+            "github": {
+                "enabled": True,
+                "queries": ["2027 internships"],
+                "repos_per_query": 5,
+                "max_repositories": 5,
+                "pushed_within_days": 365,
+            }
+        }
+    }
 
+
+def github_handler(readme: str):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/search/repositories":
             return httpx.Response(
@@ -34,23 +41,40 @@ async def test_github_market_discovery_finds_live_feed_without_company_names():
             return httpx.Response(200, text=readme)
         raise AssertionError(str(request.url))
 
-    settings = {
-        "market_discovery": {
-            "github": {
-                "enabled": True,
-                "queries": ["2027 internships"],
-                "repos_per_query": 5,
-                "max_repositories": 5,
-                "pushed_within_days": 365,
-            }
-        }
-    }
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        postings, health = await discover_github_market(client, settings)
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_github_market_discovery_finds_live_feed_without_company_names():
+    readme = """
+    | Company | Role | Location | Apply |
+    |---|---|---|---|
+    | Example | Software Engineer Intern, Summer 2027 | New York, NY | [Apply](https://jobs.lever.co/example/12345678-1234-1234-1234-123456789abc) |
+    """
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(github_handler(readme))
+    ) as client:
+        postings, health = await discover_github_market(client, github_settings())
     assert len(postings) == 1
     assert postings[0].company == "Example"
     assert postings[0].source_mode == "external-index"
+    assert postings[0].target_match == "exact"
     assert any(result.status == "indexed" for result in health)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_feed_cannot_infer_missing_2027_year():
+    readme = """
+    | Company | Role | Location | Apply |
+    |---|---|---|---|
+    | Example | Software Engineer Intern, Summer | New York, NY | [Apply](https://jobs.lever.co/example/12345678-1234-1234-1234-123456789abc) |
+    """
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(github_handler(readme))
+    ) as client:
+        postings, _health = await discover_github_market(client, github_settings())
+    assert len(postings) == 1
+    assert postings[0].target_match == "unknown"
 
 
 def test_source_catalog_persists_discovered_collectors(tmp_path):
