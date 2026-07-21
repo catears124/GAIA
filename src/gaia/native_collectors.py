@@ -9,7 +9,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .classify import classify
-from .collectors import Collector, json_ld_jobs, posting_from_schema
+from .collectors import GoogleCareersCollector, json_ld_jobs, posting_from_schema
 from .models import CollectorResult, Posting
 
 GOOGLE_JOB_RE = re.compile(
@@ -29,7 +29,7 @@ def _slug_title(slug: str | None) -> str:
     return re.sub(r"[-_]+", " ", slug).strip().title()
 
 
-class GoogleInternshipCollector(Collector):
+class GoogleInternshipCollector(GoogleCareersCollector):
     """Enumerate Google's public internship search without hardcoded job IDs."""
 
     name = "google-careers"
