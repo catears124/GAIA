@@ -16,6 +16,7 @@ from .discovery import collectors_from_registry, load_universe_seed_postings, re
 from .market_discovery import discover_github_market
 from .models import Posting
 from .native_collectors import GoogleInternshipCollector
+from .provider_discovery import provider_collectors_from_postings
 from .source_catalog import load_catalog, merge_catalog, save_catalog
 
 LOGGER = logging.getLogger("gaia")
@@ -163,13 +164,22 @@ class SyncService:
                         )
                         self._record_results(market_health, summary, run_id)
 
+                    discovery_postings = [
+                        *registry_postings,
+                        *universe_seeds,
+                        *market_postings,
+                    ]
                     generated_collectors = self._install_native_collectors(
-                        collectors_from_registry(
-                            [*registry_postings, *universe_seeds, *market_postings],
-                            settings,
-                            deep=mode == "discover",
-                        )
+                        [
+                            *collectors_from_registry(
+                                discovery_postings,
+                                settings,
+                                deep=mode == "discover",
+                            ),
+                            *provider_collectors_from_postings(discovery_postings),
+                        ]
                     )
+                    generated_collectors = merge_catalog(generated_collectors)
                     catalog_collectors = load_catalog(self.db.path)
                     if mode == "refresh":
                         generated_collectors = [
