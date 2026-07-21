@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -194,6 +195,37 @@ class LeverCollector(Collector):
         self.site = site
         self.name = f"lever:{site}"
 
+    async def _enrich_date(self, client: httpx.AsyncClient, posting: Posting) -> Posting:
+        if posting.posted_at or not posting.apply_url:
+            return posting
+        try:
+            response = await client.get(posting.apply_url)
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return posting
+        schemas = json_ld_jobs(response.text)
+        if not schemas:
+            return posting
+        matching = next(
+            (
+                job
+                for job in schemas
+                if text(job.get("url") or job.get("sameAs")).rstrip("/")
+                == posting.apply_url.rstrip("/")
+            ),
+            schemas[0],
+        )
+        posted_raw = text(matching.get("datePosted"))
+        posted = parse_date(posted_raw)
+        if posted:
+            posting.posted_at = posted
+            posting.posted_raw = posted_raw
+            posting.posted_precision = "timestamp"
+            posting.posted_confidence = "structured"
+        posting.description = text(matching.get("description")) or posting.description
+        posting.employment_type = text(matching.get("employmentType")) or posting.employment_type
+        return classify(posting)
+
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
         response = await client.get(
             f"https://api.lever.co/v0/postings/{self.site}", params={"mode": "json"}
@@ -215,6 +247,20 @@ class LeverCollector(Collector):
             )
             for job in payload
         ]
+        enrichable = [
+            item
+            for item in postings
+            if item.target_match != "not_internship" and item.category != "other"
+        ]
+        semaphore = asyncio.Semaphore(8)
+
+        async def enrich(item: Posting) -> Posting:
+            async with semaphore:
+                return await self._enrich_date(client, item)
+
+        enriched = await asyncio.gather(*(enrich(item) for item in enrichable))
+        by_key = {item.posting_key: item for item in enriched}
+        postings = [by_key.get(item.posting_key, item) for item in postings]
         return CollectorResult(self.name, postings, True, self.mode, len(payload), len(payload))
 
 
