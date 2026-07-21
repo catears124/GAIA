@@ -14,15 +14,19 @@ from .service import SyncService
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="gaia")
     sub = root.add_subparsers(dest="command", required=True)
-    sub.add_parser("sync", help="discover sources and run one collection pass")
+    sub.add_parser("sync", help="refresh current internship sources")
+    sub.add_parser(
+        "discover",
+        help="expand the company/source universe, then collect all discovered sources",
+    )
     serve = sub.add_parser("serve", help="serve the local web application")
     serve.add_argument("--host", default=os.getenv("GAIA_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.getenv("GAIA_PORT", "8501")))
     return root
 
 
-async def run_sync() -> None:
-    summary = await SyncService(Database()).sync()
+async def run_sync(mode: str) -> None:
+    summary = await SyncService(Database()).sync(mode=mode)
     print(summary.as_dict())
 
 
@@ -33,7 +37,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     if args.command == "sync":
-        asyncio.run(run_sync())
+        asyncio.run(run_sync("refresh"))
+    elif args.command == "discover":
+        asyncio.run(run_sync("discover"))
     elif args.command == "serve":
         uvicorn.run("gaia.api:app", host=args.host, port=args.port, reload=False)
 
