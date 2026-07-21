@@ -17,19 +17,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
       - name: Capture diagnostics
         shell: bash
         run: |
           set +e
-          ruff check . > coverage-diagnostic.txt 2>&1
+          python -m pip install --upgrade pip > coverage-diagnostic.txt 2>&1
+          echo "PIP_UPGRADE_EXIT=$?" >> coverage-diagnostic.txt
+          python -m pip install -e ".[dev]" >> coverage-diagnostic.txt 2>&1
+          echo "INSTALL_EXIT=$?" >> coverage-diagnostic.txt
+          ruff check . >> coverage-diagnostic.txt 2>&1
           echo "RUFF_EXIT=$?" >> coverage-diagnostic.txt
           python -m compileall -q src tests scripts >> coverage-diagnostic.txt 2>&1
           echo "COMPILE_EXIT=$?" >> coverage-diagnostic.txt
           pytest -q >> coverage-diagnostic.txt 2>&1
           echo "PYTEST_EXIT=$?" >> coverage-diagnostic.txt
           cat coverage-diagnostic.txt
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-diagnostic
