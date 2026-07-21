@@ -352,3 +352,18 @@ class SchemaPageCollector(Collector):
             note="; ".join(notes) or None,
             closed_urls=closed_urls,
         )
+
+
+class GoogleCareersCollector(Collector):
+    """Compatibility factory for the native Google internship-search collector."""
+
+    name = "google-careers"
+    mode = "board-search"
+
+    def __new__(cls, pages: int = 10):
+        from .native_collectors import GoogleInternshipCollector
+
+        return GoogleInternshipCollector(pages=pages)
+
+    async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
+        raise RuntimeError("GoogleCareersCollector is a compatibility factory")
