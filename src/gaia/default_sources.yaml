@@ -12,7 +12,8 @@ target_registries:
     name: speedy-swe-2027-intl
     url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
 
-# Historical feeds seed company and ATS discovery. Their roles never enter the 2027 feed.
+# Prior-year feeds are source intelligence only: employer, ATS, and career-domain census.
+# Their old roles never enter the 2027 feed; a watch becomes current only after finding a live role.
 universe_seeds:
   - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README.md
   - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README-Inactive.md
