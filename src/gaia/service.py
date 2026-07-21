@@ -15,6 +15,7 @@ from .db import Database
 from .discovery import collectors_from_registry, load_universe_seed_postings, registry_collectors
 from .market_discovery import discover_github_market
 from .models import Posting
+from .native_collectors import GoogleInternshipCollector
 from .source_catalog import load_catalog, merge_catalog, save_catalog
 
 LOGGER = logging.getLogger("gaia")
@@ -88,6 +89,18 @@ class SyncService:
         except asyncio.CancelledError:
             pass
 
+    @staticmethod
+    def _install_native_collectors(collectors: list[Collector]) -> list[Collector]:
+        output: list[Collector] = []
+        for collector in collectors:
+            if collector.name == "google-careers":
+                native = GoogleInternshipCollector()
+                native.scope = collector.scope
+                output.append(native)
+            else:
+                output.append(collector)
+        return output
+
     async def sync(self, *, mode: str = "refresh") -> SyncSummary:
         async with self._lock:
             started = time.monotonic()
@@ -150,10 +163,12 @@ class SyncService:
                         )
                         self._record_results(market_health, summary, run_id)
 
-                    generated_collectors = collectors_from_registry(
-                        [*registry_postings, *universe_seeds, *market_postings],
-                        settings,
-                        deep=mode == "discover",
+                    generated_collectors = self._install_native_collectors(
+                        collectors_from_registry(
+                            [*registry_postings, *universe_seeds, *market_postings],
+                            settings,
+                            deep=mode == "discover",
+                        )
                     )
                     catalog_collectors = load_catalog(self.db.path)
                     if mode == "refresh":
@@ -168,8 +183,8 @@ class SyncService:
                             if collector.scope == "current" and collector.mode != "domain"
                         ]
                     direct_collectors = merge_catalog(
-                        catalog_collectors,
                         generated_collectors,
+                        catalog_collectors,
                     )
                     save_catalog(self.db.path, generated_collectors)
                     await self._run_collectors(
