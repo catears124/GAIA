@@ -3,6 +3,8 @@ name: Coverage diagnostics
 on:
   push:
     branches: [coverage-recovery-v4]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
