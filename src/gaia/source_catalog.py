@@ -14,6 +14,7 @@ from .collectors import (
     SchemaPageCollector,
 )
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
+from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -51,6 +52,21 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
             "site": collector.site,
             "terms": list(collector.terms),
         }
+    if isinstance(collector, SmartRecruitersCollector):
+        return "smartrecruiters", {
+            "company": collector.company,
+            "identifier": collector.identifier,
+        }
+    if isinstance(collector, RecruiteeCollector):
+        return "recruitee", {
+            "company": collector.company,
+            "subdomain": collector.subdomain,
+        }
+    if isinstance(collector, WorkableCollector):
+        return "workable", {
+            "company": collector.company,
+            "subdomain": collector.subdomain,
+        }
     if isinstance(collector, SitemapDomainCollector):
         return "domain", {
             "company": collector.company,
@@ -83,8 +99,8 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
                 json.dumps(spec, sort_keys=True),
             )
         )
-    with _connect(path) as db:
-        db.executemany(
+    with _connect(path) as database:
+        database.executemany(
             """
             INSERT INTO source_catalog(source, kind, scope, spec_json)
             VALUES (?,?,?,?)
@@ -117,6 +133,12 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
             str(spec["site"]),
             terms=tuple(spec.get("terms") or ("intern", "co-op")),
         )
+    if kind == "smartrecruiters":
+        return SmartRecruitersCollector(str(spec["company"]), str(spec["identifier"]))
+    if kind == "recruitee":
+        return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]))
+    if kind == "workable":
+        return WorkableCollector(str(spec["company"]), str(spec["subdomain"]))
     if kind == "domain":
         return SitemapDomainCollector(
             str(spec["company"]),
@@ -135,8 +157,8 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
 
 
 def load_catalog(path: Path) -> list[Collector]:
-    with _connect(path) as db:
-        rows = db.execute(
+    with _connect(path) as database:
+        rows = database.execute(
             "SELECT source, kind, scope, spec_json FROM source_catalog ORDER BY source"
         ).fetchall()
     collectors: list[Collector] = []
