@@ -20,12 +20,12 @@ service = SyncService(db, concurrency=int(os.getenv("GAIA_CONCURRENCY", "16")))
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if os.getenv("GAIA_INITIAL_SYNC", "1") == "1":
-        service.start_background()
+        service.start_background("refresh")
     yield
     await service.stop()
 
 
-app = FastAPI(title="GAIA", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="GAIA", version="2.0.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=FRONTEND), name="assets")
 
 
@@ -71,5 +71,11 @@ def coverage() -> dict[str, object]:
 
 @app.post("/api/sync", status_code=202)
 async def sync() -> dict[str, object]:
-    started = service.start_background()
+    started = service.start_background("refresh")
+    return {"started": started, **service.status()}
+
+
+@app.post("/api/discover", status_code=202)
+async def discover() -> dict[str, object]:
+    started = service.start_background("discover")
     return {"started": started, **service.status()}
