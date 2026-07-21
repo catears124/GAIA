@@ -31,6 +31,7 @@ COUNTRY_HINTS = {
     "singapore",
     "india",
 }
+EMPTY_LOCATION_VALUES = {"", "—", "-", "–", "not stated", "location not stated", "n/a"}
 COMPANY_ALIASES = {
     "alphabet": "Google",
     "google": "Google",
@@ -74,7 +75,7 @@ def clean_text(value: object) -> str:
     text = text.replace("\u00a0", " ")
     text = FLAG_RE.sub("", text)
     text = EMOJI_RE.sub("", text)
-    return SPACE_RE.sub(" ", text).strip(" *\t|·-")
+    return SPACE_RE.sub(" ", text).strip(" *\t|·-—–")
 
 
 def _company_key(company: str) -> str:
@@ -97,16 +98,15 @@ def company_key(company: str) -> str:
 
 
 def _split_joined_us_locations(value: str) -> list[str]:
-    # Repair common registry cells such as "Nashua, NHHudson, NHManchester, NH".
     parts: list[str] = []
     start = 0
     for match in STATE_RE.finditer(value):
         end = match.end()
-        fragment = value[start:end].strip(" ,;|·")
+        fragment = value[start:end].strip(" ,;|·—–")
         if fragment:
             parts.append(fragment)
         start = end
-    tail = value[start:].strip(" ,;|·")
+    tail = value[start:].strip(" ,;|·—–")
     if tail and not parts:
         parts.append(tail)
     elif tail and len(tail.split()) <= 5 and any(hint in tail.casefold() for hint in COUNTRY_HINTS):
@@ -121,20 +121,19 @@ def normalize_locations(values: object) -> list[str]:
     output: list[str] = []
     for raw in raw_values:
         value = clean_text(raw)
-        if not value or value in {"—", "-", "not stated", "location not stated"}:
+        if value.casefold() in EMPTY_LOCATION_VALUES:
             continue
         value = LOCATION_COUNT_RE.sub("", value)
         value = re.sub(r"\b\d+\s+locations?\b", " ", value, flags=re.I)
         value = value.replace("Remote-Friendly", "Remote")
-        # Break around bullets, explicit separators, and markdown remnants before repairing glued cities.
         chunks = re.split(r"\s*(?:\||/|;|·|\n|\r|\t|\*\*)\s*", value)
         for chunk in chunks:
-            chunk = SPACE_RE.sub(" ", chunk).strip(" ,;-·*")
-            if not chunk:
+            chunk = SPACE_RE.sub(" ", chunk).strip(" ,;-·*—–")
+            if chunk.casefold() in EMPTY_LOCATION_VALUES:
                 continue
             for fixed in _split_joined_us_locations(chunk):
-                fixed = SPACE_RE.sub(" ", fixed).strip(" ,;-·*")
-                if fixed:
+                fixed = SPACE_RE.sub(" ", fixed).strip(" ,;-·*—–")
+                if fixed.casefold() not in EMPTY_LOCATION_VALUES:
                     output.append(fixed)
     deduped: list[str] = []
     seen: set[str] = set()
