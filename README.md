@@ -1,35 +1,92 @@
 # GAIA
 
-**Great, Another Internship Aggregator** is a local-first Summer 2027 internship radar built around measurable recall, source provenance, and conservative role-family grouping.
+**Great, Another Internship Aggregator** is a local-first index for Summer 2027 computer-science internships.
 
-GAIA does **not** claim to index every internship on the public web. It makes a narrower, testable claim: enumerable boards must finish pagination before they are marked complete, benchmark applications that GAIA cannot independently recover remain visible as a gap, and expected limitations are never collapsed into a fake generic health score.
+## Headline
 
-## Product contract
+> Every CS internship. One live index.
 
-- **Employer posted** is supplied by an employer-controlled source. It is never replaced with crawler detection time or a registry-maintained timestamp.
-- **First detected** and **last verified** are GAIA timestamps and remain separate.
-- Exact copies of one application are deduplicated by ATS/job identity before opening counts are computed.
-- Multi-location and multi-requisition variants are grouped into conservative role families without merging different specializations, seasons, years, or employment types.
-- Explicit title evidence is authoritative. A registry cannot turn a stated 2026 role, Fall 2027 role, fellowship, or seasonless internship into Summer 2027.
-- Target-specific registries are a recall benchmark and discovery feed, not the definition of direct coverage.
-- Historical 2025–2026 internship archives seed enumerable employer ATS boards without entering the 2027 feed.
-- A historical watch automatically becomes a current source when it exposes a confirmed 2027 role.
-- Closed benchmark pages are removed from the active registry floor after independent verification.
-- Coverage reports application-level benchmark recall and separates actionable current failures, access-limited sources, stale benchmark pages, unstructured pages, and dormant historical watches.
+That is the product goal, not a claim that the public web can be proven globally complete. GAIA makes the strongest claim it can actually audit: it continuously generates an employer/source universe, fully traverses supported internship surfaces, measures recovery against independent public indexes, and leaves every unresolved application or source visible.
 
-## Interface
+## Why GAIA 2 exists
 
-The default table shows **role families**, not raw source rows. Expanding a family reveals each distinct application, its locations, source variants, and direct apply link.
+GAIA 1 treated company discovery and job refresh as one giant crawl. A large Workday employer could make a normal refresh walk tens of thousands of unrelated jobs before it found a few internships. It was slow, noisy, and circular because the company universe depended too heavily on a few manually configured repositories.
 
-The UI provides:
+GAIA 2 separates the system into two planes:
 
-- server-side search and pagination;
-- exact versus registry-confirmed target filters;
-- approximate date rendering for day-granularity Workday values;
-- local saved/application tracking;
-- application-level coverage diagnostics;
-- separate engineering queues for broken/truncated sources, anti-bot blocks, stale pages, and historical watches;
-- nonblocking background synchronization.
+### Refresh jobs
+
+The normal startup and **Refresh jobs** action poll only current sources already known to expose Summer 2027 opportunities.
+
+- Greenhouse, Lever, Ashby, SmartRecruiters, Recruitee and Workable boards are enumerated directly.
+- Workday is traversed completely inside its public `intern` and `co-op` search surfaces. GAIA never scans the employer's entire general-purpose board during an interactive refresh.
+- Google Careers uses its public internship search and extracts job identities from both links and embedded page data.
+- Current custom pages are independently verified.
+- Progress is visible in the UI and source logs are concise by default.
+
+### Discover companies
+
+The explicit **Discover companies** action expands the monitored market.
+
+- Current 2027 internship indexes seed application URLs and employers.
+- Recently active internship repositories are discovered dynamically through GitHub repository search; no company names are embedded in this process.
+- Historical 2025–2026 internship archives seed ATS boards that may reopen for 2027.
+- Known URLs are promoted automatically into provider-level boards.
+- Custom employer domains are expanded through `robots.txt`, sitemap indexes and structured `JobPosting` pages.
+- Discovered source specifications persist in SQLite, so future refreshes no longer depend on the original index that revealed them.
+
+The heavy discovery sweep is intentionally separate from the fast interactive refresh.
+
+## Supported source families
+
+Native enumeration currently covers:
+
+- Google Careers
+- Greenhouse
+- Lever
+- Ashby
+- Workday CXS internship/co-op search
+- SmartRecruiters Posting API
+- Recruitee Careers Site API
+- Workable public account jobs
+- employer sitemaps and Schema.org `JobPosting` pages
+
+Unsupported or access-limited domains remain explicit coverage work; they are never silently treated as complete.
+
+## Date contract
+
+GAIA exposes separate time concepts:
+
+- **Employer posted** comes only from an employer-controlled ATS or structured employer page.
+- **First detected** is when GAIA first observed the application.
+- **Last verified** is when GAIA most recently confirmed it.
+- Registry timestamps never become employer publication dates.
+- Workday relative values such as `Posted 1 Day Ago` remain approximate and render as `~1 day ago`.
+- When an employer exposes no defensible publication date, GAIA says so and still shows detection time. It does not invent precision.
+
+## Job identity and grouping
+
+- Exact copies from an employer board and one or more indexes collapse by ATS/job identity before counts are computed.
+- Separate location requisitions can group into one conservative role family.
+- Different specializations, seasons, years and employment types remain separate.
+- The default feed includes technical categories only: software, ML/AI, data, security, hardware, quant and product.
+- Nontechnical internships remain queryable through the API by using `track=all`.
+
+## Coverage contract
+
+GAIA reports:
+
+- active applications known across all sources;
+- benchmark applications from independent 2027 indexes;
+- applications independently recovered from employer sources;
+- benchmark applications still index-only;
+- employer applications found before or outside the benchmark;
+- complete source traversals;
+- genuine current crawler failures;
+- access-limited sources;
+- stale pages and dormant historical watches.
+
+A source is not healthy merely because it returned HTTP 200. Pagination or the declared search surface must finish. Historical failures do not inflate the current failure count, and a query-scoped Workday source returning zero internships is not mislabeled as a broken global board.
 
 ## Run locally
 
@@ -51,86 +108,58 @@ python scripts/run_local.py
 
 Open `http://127.0.0.1:8501`.
 
-Manual commands:
+Commands:
 
 ```bash
+# Fast current-source refresh
 gaia sync
+
+# Heavy employer/feed/sitemap discovery sweep
+gaia discover
+
+# Web application
 gaia serve
-python -m gaia.audit
 ```
 
-The local SQLite database defaults to `data/gaia.db`. Override it with `GAIA_DB`.
+The SQLite database defaults to `data/gaia.db`. Override it with `GAIA_DB`.
 
-After upgrading an existing installation, run one complete sync before interpreting Coverage. The dashboard is scoped to the latest completed sync so obsolete source rows from earlier releases do not remain permanent red failures.
+Useful tuning variables:
 
-## Coverage modes and scopes
-
-### Current board enumeration
-
-- Google Careers internship search
-- Greenhouse
-- Lever
-- Ashby
-- Workday CXS
-
-A board is complete only after GAIA reaches the end of pagination. HTTP 200 alone is not sufficient. A current board that unexpectedly returns zero rows is actionable.
-
-### Verification only
-
-Known employer pages exposing Schema.org `JobPosting` data are independently verified, but GAIA does not claim to discover unlinked sibling pages from that source.
-
-Verification outcomes are explicit:
-
-- `verified`: current structured posting recovered;
-- `stale`: employer returned 404/410 and the benchmark copy is closed;
-- `blocked`: 401/403/429 prevents independent verification;
-- `unstructured`: page is reachable but exposes no usable `JobPosting` object;
-- `partial` or `broken`: mixed or genuine transport/parser failure.
-
-### External index
-
-Databricks is currently covered through an explicitly labeled external job index because its employer careers surface does not expose a stable enumerable public feed. This catches the canary role without being counted as direct board enumeration.
-
-### Registry benchmark
-
-Multiple Summer 2027 public registries provide a measurable known-listing floor and reveal employers GAIA has not independently recovered. Closed pages are removed from the live floor after independent 404/410 verification.
-
-### Historical employer watches
-
-Valid Simplify/Pitt historical archives from 2025–2026 contribute enumerable ATS board identities only. GAIA does not repeatedly request every old custom application page. Empty or retired historical boards are labeled `dormant`, not counted as current failures, and remain available to detect future openings.
-
-## Adding sources
-
-Source configuration lives in `src/gaia/default_sources.yaml` and can be replaced with:
-
-```bash
-GAIA_SOURCES=path/to/sources.yaml
+```text
+GAIA_CONCURRENCY=16
+GAIA_WORKDAY_PAGE_CONCURRENCY=6
+GAIA_DETAIL_CONCURRENCY=8
+GAIA_WORKDAY_MAX_PER_TERM=4000
+GAIA_DOMAIN_CONCURRENCY=12
+GAIA_DOMAIN_MAX_URLS=500
+GAIA_GITHUB_TOKEN=<optional token for higher discovery rate limits>
+GAIA_DEBUG_COLLECTORS=1
 ```
 
-New adapters implement the `Collector` protocol and must declare:
+## Adding a provider
 
-- coverage mode and current/historical scope;
-- whether enumeration completed;
-- rows scanned and expected rows when known;
+A collector must declare:
+
+- its coverage mode and current/historical scope;
+- whether its declared surface was fully traversed;
+- rows scanned and expected rows where available;
 - publication-date provenance and precision;
-- explicit status and diagnostic note;
-- regression fixtures for pagination and application identity.
+- a stable application identity;
+- regression fixtures for pagination, empty results and malformed responses.
+
+Provider discovery should be URL-pattern based. Employer names belong in discovered data and the persisted source catalog, not in Python branches.
 
 ## Validation
 
-The repository contains unit tests for:
+The test suite covers:
 
-- Google and Databricks recall canaries;
-- Workday full-board enumeration and public URLs;
+- Workday query-scoped pagination and the prohibition on empty search text;
+- concurrent page traversal and duplicate-term reconciliation;
+- Google extraction from anchors and embedded page data;
+- SmartRecruiters, Recruitee and Workable promotion and enumeration;
+- dynamic GitHub market-feed discovery;
+- sitemap expansion and structured publication dates;
+- persisted source-catalog behavior;
 - strict Summer 2027 classification;
-- fellowship and conflicting-year exclusion;
-- application deduplication across direct and registry copies;
-- employer-date provenance;
-- conservative role-family grouping;
-- HTML and Markdown registry parsing;
-- Greenhouse embed-board recovery;
-- stale, blocked, unstructured, dormant, and broken source accounting;
-- latest-run coverage scoping;
-- historical-watch promotion when a current target appears.
-
-GitHub Actions is configured for Python 3.11, 3.13, and 3.14 plus scheduled live recall audits. The private repository currently requires Actions runner access to be enabled before that hosted matrix can execute.
+- application deduplication and conservative role-family grouping;
+- source status, latest-run scoping and benchmark recall accounting.
