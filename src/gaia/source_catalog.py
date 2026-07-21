@@ -13,6 +13,7 @@ from .collectors import (
     SchemaPageCollector,
 )
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
+from .models import Posting
 from .native_collectors import GoogleInternshipCollector
 from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
 from .quality import canonical_source_name
@@ -78,6 +79,15 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
         return "verification", {
             "company": collector.company,
             "urls": collector.urls,
+            "leads": [
+                {
+                    "title": item.title,
+                    "url": item.apply_url,
+                    "source_id": item.source_id,
+                    "locations": item.locations,
+                }
+                for item in collector.leads
+            ],
             "name": canonical_source_name(collector.name),
         }
     if isinstance(collector, GoogleInternshipCollector):
@@ -147,10 +157,25 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
             [str(url) for url in spec.get("seed_urls") or []],
         )
     if kind == "verification":
+        company = str(spec["company"])
+        leads = [
+            Posting(
+                company=company,
+                title=str(item.get("title") or ""),
+                apply_url=str(item.get("url") or ""),
+                source="catalog:verification",
+                source_id=str(item.get("source_id") or item.get("url") or ""),
+                locations=[str(value) for value in item.get("locations") or []],
+                source_mode="registry",
+            )
+            for item in spec.get("leads") or []
+            if item.get("title") and item.get("url")
+        ]
         return SchemaPageCollector(
-            str(spec["company"]),
+            company,
             [str(url) for url in spec.get("urls") or []],
             name=canonical_source_name(str(spec.get("name") or "")) or None,
+            leads=leads,
         )
     if kind == "google-careers":
         return GoogleInternshipCollector()
