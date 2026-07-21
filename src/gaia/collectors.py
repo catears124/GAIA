@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -14,8 +13,6 @@ from dateutil import parser as date_parser
 
 from .classify import classify
 from .models import CollectorResult, Posting, canonical_url
-
-JOB_URL_RE = re.compile(r"/about/careers/applications/jobs/results/(\d+)(?:-[^?#/]+)?")
 
 
 def parse_date(value: Any) -> datetime | None:
@@ -150,84 +147,6 @@ class Collector(ABC):
     async def collect(self, client: httpx.AsyncClient) -> CollectorResult: ...
 
 
-class GoogleCareersCollector(Collector):
-    name = "google-careers"
-    mode = "board"
-    base = "https://www.google.com/about/careers/applications/jobs/results/"
-
-    def __init__(self, pages: int = 50) -> None:
-        self.pages = pages
-
-    async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
-        discovered: dict[str, Posting] = {}
-        exhausted = False
-        for page in range(1, self.pages + 1):
-            response = await client.get(
-                self.base,
-                params={"employment_type": "INTERN", "page": page},
-            )
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, "html.parser")
-            page_ids: set[str] = set()
-            before = len(discovered)
-            for anchor in soup.find_all("a", href=True):
-                href = str(anchor["href"])
-                match = JOB_URL_RE.search(href)
-                if not match:
-                    continue
-                source_id = match.group(1)
-                page_ids.add(source_id)
-                title = " ".join(anchor.get_text(" ", strip=True).split())
-                if not title or title.lower() in {"learn more", "apply", "share"}:
-                    slug = href.split("/results/", 1)[-1].split("?", 1)[0]
-                    title = slug.split("-", 1)[-1].replace("-", " ").title()
-                discovered[source_id] = Posting(
-                    company="Google",
-                    title=title,
-                    apply_url=urljoin(self.base, href),
-                    source=self.name,
-                    source_id=source_id,
-                    locations=[],
-                )
-            if not page_ids or len(discovered) == before:
-                exhausted = True
-                break
-
-        semaphore = asyncio.Semaphore(8)
-
-        async def enrich(posting: Posting) -> Posting:
-            async with semaphore:
-                try:
-                    response = await client.get(posting.apply_url)
-                    response.raise_for_status()
-                except httpx.HTTPError:
-                    return classify(posting)
-                schema = json_ld_jobs(response.text)
-                if schema:
-                    parsed = posting_from_schema(schema[0], source=self.name)
-                    if parsed:
-                        parsed.company = "Google"
-                        parsed.source_id = posting.source_id
-                        return classify(parsed)
-                soup = BeautifulSoup(response.text, "html.parser")
-                heading = soup.find(["h1", "h2"])
-                if heading:
-                    posting.title = " ".join(heading.get_text(" ", strip=True).split())
-                posting.description = " ".join(soup.get_text(" ", strip=True).split())[:20000]
-                return classify(posting)
-
-        postings = await asyncio.gather(*(enrich(item) for item in discovered.values()))
-        return CollectorResult(
-            source=self.name,
-            postings=[item for item in postings if item.target_match != "not_internship"],
-            complete=exhausted,
-            mode=self.mode,
-            rows_scanned=len(discovered),
-            expected_rows=len(discovered) if exhausted else None,
-            status="ok" if exhausted else "truncated",
-        )
-
-
 class GreenhouseCollector(Collector):
     mode = "board"
 
@@ -340,81 +259,6 @@ class AshbyCollector(Collector):
         return CollectorResult(self.name, postings, True, self.mode, len(jobs), len(jobs))
 
 
-class WorkdayCollector(Collector):
-    mode = "board"
-
-    def __init__(self, company: str, host: str, tenant: str, site: str) -> None:
-        self.company = company
-        self.host = host.rstrip("/")
-        self.tenant = tenant
-        self.site = site
-        self.name = f"workday:{tenant}:{site}"
-
-    async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
-        endpoint = f"{self.host}/wday/cxs/{self.tenant}/{self.site}/jobs"
-        postings: list[Posting] = []
-        offset = 0
-        total: int | None = None
-        complete = False
-        while total is None or offset < total:
-            response = await client.post(
-                endpoint,
-                json={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": ""},
-                headers={"Origin": self.host, "Referer": f"{self.host}/{self.site}"},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            total = int(payload.get("total") or len(payload.get("jobPostings", [])))
-            page = payload.get("jobPostings", [])
-            if not page:
-                complete = offset >= total
-                break
-            for job in page:
-                raw_posted = text(job.get("postedOn"))
-                posted = None
-                if re.search(r"\bToday\b", raw_posted, re.I):
-                    posted = datetime.now(timezone.utc)
-                elif match := re.search(r"(\d+)\+?\s+Day", raw_posted, re.I):
-                    posted = datetime.now(timezone.utc) - timedelta(days=int(match.group(1)))
-                external_path = text(job.get("externalPath"))
-                source_id = text(
-                    job.get("bulletFields", [""])[0]
-                    if job.get("bulletFields")
-                    else external_path
-                )
-                url = f"{self.host}/{self.site}/{external_path.lstrip('/')}"
-                postings.append(
-                    classify(
-                        Posting(
-                            company=self.company,
-                            title=text(job.get("title")),
-                            apply_url=url,
-                            source=self.name,
-                            source_id=source_id or url,
-                            locations=locations_from(job.get("locationsText")),
-                            employment_type=text(job.get("timeType")),
-                            posted_at=posted,
-                            posted_raw=raw_posted or None,
-                            posted_precision="day" if posted else "unknown",
-                            posted_confidence="approximate" if posted else "unknown",
-                        )
-                    )
-                )
-            offset += len(page)
-            if offset >= total:
-                complete = True
-                break
-        return CollectorResult(
-            self.name,
-            postings,
-            complete,
-            self.mode,
-            offset,
-            total,
-            status="ok" if complete else "truncated",
-        )
-
-
 class SchemaPageCollector(Collector):
     mode = "verification"
 
@@ -507,51 +351,4 @@ class SchemaPageCollector(Collector):
             status=status,
             note="; ".join(notes) or None,
             closed_urls=closed_urls,
-        )
-
-
-class DatabricksIndexCollector(Collector):
-    """Independent canary backstop while Databricks' employer page remains non-enumerable."""
-
-    name = "index:databricks-linkedin"
-    mode = "external-index"
-    url = "https://www.linkedin.com/company/databricks/jobs"
-
-    async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
-        response = await client.get(self.url, follow_redirects=True)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        postings: list[Posting] = []
-        seen: set[str] = set()
-        for anchor in soup.find_all("a", href=True):
-            title = " ".join(anchor.get_text(" ", strip=True).split())
-            href = str(anchor["href"])
-            if not re.search(r"\bintern\b", title, re.I) or "2027" not in title:
-                continue
-            source_id = re.sub(r"\D", "", href) or href
-            if source_id in seen:
-                continue
-            seen.add(source_id)
-            parent_text = " ".join((anchor.parent or anchor).get_text(" ", strip=True).split())
-            postings.append(
-                classify(
-                    Posting(
-                        company="Databricks",
-                        title=title,
-                        apply_url=urljoin(self.url, href),
-                        source=self.name,
-                        source_id=source_id,
-                        source_mode="external-index",
-                        description=parent_text,
-                        posted_precision="unknown",
-                    )
-                )
-            )
-        return CollectorResult(
-            self.name,
-            postings,
-            False,
-            self.mode,
-            len(seen),
-            status="indexed" if postings else "empty",
         )
