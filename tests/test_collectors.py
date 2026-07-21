@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from gaia.collectors import LeverCollector, SchemaPageCollector
-from gaia.models import canonical_url
+from gaia.models import Posting, canonical_url
 
 
 @pytest.mark.asyncio
@@ -83,6 +83,93 @@ async def test_all_closed_schema_pages_are_stale_not_broken():
     assert result.status == "stale"
     assert result.error is None
     assert result.closed_urls
+
+
+@pytest.mark.asyncio
+async def test_unstructured_employer_page_recovers_matching_registry_lead():
+    url = "https://careers.example.com/jobs/software-engineering-intern-2027"
+    lead = Posting(
+        company="Example",
+        title="Software Engineering Intern I, Summer 2027",
+        apply_url=url,
+        source="registry:test",
+        source_id="lead-1",
+        source_mode="registry",
+        locations=["Austin, TX"],
+    )
+    html = """
+    <html><head><title>Software Engineering Intern I | Example Careers</title></head>
+    <body><main><h1>Software Engineering Intern I</h1>
+    <p>Join our Summer 2027 engineering internship program in Austin.</p>
+    <a href="/apply">Apply now</a></main></body></html>
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    collector = SchemaPageCollector("Example", leads=[lead])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await collector.collect(client)
+
+    assert result.status == "verified"
+    assert len(result.postings) == 1
+    assert result.postings[0].title == lead.title
+    assert result.postings[0].target_match == "exact"
+    assert result.postings[0].source_mode == "verification"
+    assert result.postings[0].locations == ["Austin, TX"]
+
+
+@pytest.mark.asyncio
+async def test_unstructured_employer_page_rejects_unrelated_registry_lead():
+    url = "https://careers.example.com/jobs/software-engineering-intern-2027"
+    lead = Posting(
+        company="Example",
+        title="Quantitative Trading Intern, Summer 2027",
+        apply_url=url,
+        source="registry:test",
+        source_id="lead-2",
+        source_mode="registry",
+    )
+    html = """
+    <html><head><title>Marketing Operations Intern</title></head>
+    <body><h1>Marketing Operations Intern</h1><p>Summer 2027 marketing program.</p></body></html>
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=html)
+
+    collector = SchemaPageCollector("Example", leads=[lead])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await collector.collect(client)
+
+    assert result.status == "unstructured"
+    assert result.postings == []
+
+
+@pytest.mark.asyncio
+async def test_soft_closed_employer_page_is_removed_even_with_http_200():
+    url = "https://careers.example.com/jobs/closed"
+    lead = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url=url,
+        source="registry:test",
+        source_id="closed",
+        source_mode="registry",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="<html><body><h1>This job is no longer available</h1></body></html>",
+        )
+
+    collector = SchemaPageCollector("Example", leads=[lead])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await collector.collect(client)
+
+    assert result.status == "stale"
+    assert result.closed_urls == [canonical_url(url)]
 
 
 @pytest.mark.asyncio
