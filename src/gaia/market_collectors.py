@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import re
+import weakref
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -15,24 +19,115 @@ from .collectors import Collector, json_ld_jobs, locations_from, posting_from_sc
 from .models import CollectorResult, Posting
 from .page_verification import page_is_closed, posting_from_unstructured_page
 
-TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 TECH_CATEGORIES = {"software", "ml-ai", "data", "security", "hardware", "quant", "product"}
-WORKDAY_TERMS = (
-    "intern",
-    "internship",
-    "co-op",
-    "coop",
-    "student",
-    "university",
-    "campus",
-    "summer",
-)
+WORKDAY_TERMS = ("intern", "co-op")
+WORKDAY_TERM_ALIASES = {
+    "intern": "intern",
+    "internship": "intern",
+    "co-op": "co-op",
+    "coop": "co-op",
+}
 JOB_PATH_RE = re.compile(
     r"(?:^|/)(?:job|jobs|career|careers|position|positions|opening|openings|requisition)(?:/|$)",
     re.I,
 )
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]|$)")
 SITEMAP_RE = re.compile(r"^\s*Sitemap:\s*(\S+)", re.I | re.M)
+RETRYABLE_WORKDAY_STATUS = {429, 502, 503, 504}
+
+
+@dataclass(slots=True)
+class _WorkdayRequestState:
+    semaphore: asyncio.Semaphore
+    pace_lock: asyncio.Lock
+    next_allowed: float = 0.0
+    consecutive_429: int = 0
+    circuit_until: float = 0.0
+
+
+_WORKDAY_STATES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, _WorkdayRequestState
+] = weakref.WeakKeyDictionary()
+
+
+def _workday_state() -> _WorkdayRequestState:
+    loop = asyncio.get_running_loop()
+    state = _WORKDAY_STATES.get(loop)
+    if state is None:
+        concurrency = max(1, int(os.getenv("GAIA_WORKDAY_GLOBAL_CONCURRENCY", "1")))
+        state = _WorkdayRequestState(asyncio.Semaphore(concurrency), asyncio.Lock())
+        _WORKDAY_STATES[loop] = state
+    return state
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("Retry-After", "").strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+
+
+async def _workday_request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs: object,
+) -> httpx.Response:
+    """Send one globally paced Workday request with retry and circuit breaking."""
+
+    state = _workday_state()
+    loop = asyncio.get_running_loop()
+    attempts = max(1, int(os.getenv("GAIA_WORKDAY_RETRIES", "4")))
+    interval = max(0.0, float(os.getenv("GAIA_WORKDAY_MIN_INTERVAL", "1.0")))
+    jitter = max(0.0, float(os.getenv("GAIA_WORKDAY_JITTER", "0.25")))
+    backoff = max(0.1, float(os.getenv("GAIA_WORKDAY_BACKOFF", "2.0")))
+    circuit_threshold = max(1, int(os.getenv("GAIA_WORKDAY_CIRCUIT_THRESHOLD", "3")))
+    circuit_seconds = max(1.0, float(os.getenv("GAIA_WORKDAY_CIRCUIT_SECONDS", "60")))
+
+    last_response: httpx.Response | None = None
+    for attempt in range(attempts):
+        async with state.semaphore:
+            now = loop.time()
+            if state.circuit_until > now:
+                await asyncio.sleep(state.circuit_until - now)
+
+            async with state.pace_lock:
+                wait = state.next_allowed - loop.time()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                state.next_allowed = loop.time() + interval + random.uniform(0.0, jitter)
+
+            response = await client.request(method, url, **kwargs)
+            last_response = response
+            if response.status_code not in RETRYABLE_WORKDAY_STATUS:
+                state.consecutive_429 = 0
+                response.raise_for_status()
+                return response
+
+            if response.status_code == 429:
+                state.consecutive_429 += 1
+                if state.consecutive_429 >= circuit_threshold:
+                    state.circuit_until = max(state.circuit_until, loop.time() + circuit_seconds)
+            else:
+                state.consecutive_429 = 0
+
+        if attempt + 1 < attempts:
+            retry_after = _retry_after_seconds(response) or 0.0
+            delay = max(retry_after, backoff * (2**attempt)) + random.uniform(0.0, jitter)
+            await asyncio.sleep(delay)
+
+    assert last_response is not None
+    last_response.raise_for_status()
+    return last_response
 
 
 def _workday_relative(raw: str) -> tuple[datetime | None, str]:
@@ -52,7 +147,7 @@ def _workday_relative(raw: str) -> tuple[datetime | None, str]:
 
 
 class WorkdaySearchCollector(Collector):
-    """Enumerate a high-recall internship search basis, not a company's entire board."""
+    """Enumerate Workday's internship search surface without flooding its shared edge."""
 
     mode = "board-search"
 
@@ -69,11 +164,17 @@ class WorkdaySearchCollector(Collector):
         self.host = host.rstrip("/")
         self.tenant = tenant
         self.site = site
-        self.terms = tuple(dict.fromkeys(term.strip() for term in terms if term.strip()))
-        self.name = f"workday:{tenant}:{site}"
-        self.page_concurrency = max(1, int(os.getenv("GAIA_WORKDAY_PAGE_CONCURRENCY", "6")))
-        self.detail_concurrency = max(1, int(os.getenv("GAIA_DETAIL_CONCURRENCY", "8")))
+        normalized_terms = [
+            WORKDAY_TERM_ALIASES.get(term.strip().casefold())
+            for term in terms
+            if term.strip()
+        ]
+        self.terms = tuple(dict.fromkeys(term for term in normalized_terms if term))
+        if not self.terms:
+            self.terms = WORKDAY_TERMS
+        self.name = f"workday:{tenant.casefold()}:{site.casefold()}"
         self.max_per_term = max(20, int(os.getenv("GAIA_WORKDAY_MAX_PER_TERM", "4000")))
+        self.detail_budget = max(0, int(os.getenv("GAIA_WORKDAY_DETAIL_BUDGET", "0")))
 
     @property
     def endpoint(self) -> str:
@@ -85,12 +186,13 @@ class WorkdaySearchCollector(Collector):
         term: str,
         offset: int,
     ) -> dict[str, object]:
-        response = await client.post(
+        response = await _workday_request(
+            client,
+            "POST",
             self.endpoint,
             json={"appliedFacets": {}, "limit": 20, "offset": offset, "searchText": term},
             headers={"Origin": self.host, "Referer": f"{self.host}/{self.site}"},
         )
-        response.raise_for_status()
         return response.json()
 
     async def _query(
@@ -102,19 +204,9 @@ class WorkdaySearchCollector(Collector):
         total = int(first.get("total") or len(first.get("jobPostings", [])))
         capped_total = min(total, self.max_per_term)
         pages = list(first.get("jobPostings", []))
-        offsets = list(range(20, capped_total, 20))
-        semaphore = asyncio.Semaphore(self.page_concurrency)
-
-        async def fetch(offset: int) -> list[dict[str, object]]:
-            async with semaphore:
-                payload = await self._page(client, term, offset)
-                return list(payload.get("jobPostings", []))
-
-        batch_size = self.page_concurrency * 4
-        for start in range(0, len(offsets), batch_size):
-            batch = offsets[start : start + batch_size]
-            for page in await asyncio.gather(*(fetch(offset) for offset in batch)):
-                pages.extend(page)
+        for offset in range(20, capped_total, 20):
+            payload = await self._page(client, term, offset)
+            pages.extend(payload.get("jobPostings", []))
         complete = total <= self.max_per_term and len(pages) >= total
         return pages, complete, total
 
@@ -149,11 +241,12 @@ class WorkdaySearchCollector(Collector):
         external_path = "/" + parts.path.split(marker, 1)[1].lstrip("/")
         detail_url = f"{self.host}/wday/cxs/{self.tenant}/{self.site}{external_path}"
         try:
-            response = await client.get(
+            response = await _workday_request(
+                client,
+                "GET",
                 detail_url,
                 headers={"Referer": posting.apply_url, "Accept": "application/json"},
             )
-            response.raise_for_status()
             info = response.json().get("jobPostingInfo") or {}
         except (httpx.HTTPError, ValueError, TypeError):
             return posting
@@ -183,8 +276,16 @@ class WorkdaySearchCollector(Collector):
         by_path: dict[str, dict[str, object]] = {}
         complete = True
         totals = 0
+        rate_limited = False
         for term in self.terms:
-            rows, query_complete, total = await self._query(client, term)
+            try:
+                rows, query_complete, total = await self._query(client, term)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 429:
+                    raise
+                complete = False
+                rate_limited = True
+                break
             complete = complete and query_complete
             totals += total
             for row in rows:
@@ -196,28 +297,31 @@ class WorkdaySearchCollector(Collector):
         enrichable = [
             item
             for item in postings
-            if item.target_match in TARGET_MATCHES or item.category in TECH_CATEGORIES
-        ]
-        semaphore = asyncio.Semaphore(self.detail_concurrency)
+            if item.target_match != "not_internship" and item.category in TECH_CATEGORIES
+        ][: self.detail_budget]
+        enriched_by_url: dict[str, Posting] = {}
+        for item in enrichable:
+            enriched = await self._enrich(client, item)
+            enriched_by_url[item.canonical_apply_url] = enriched
+        if enriched_by_url:
+            postings = [enriched_by_url.get(item.canonical_apply_url, item) for item in postings]
 
-        async def enrich(item: Posting) -> Posting:
-            async with semaphore:
-                return await self._enrich(client, item)
-
-        enriched = await asyncio.gather(*(enrich(item) for item in enrichable))
-        enriched_by_url = {item.canonical_apply_url: item for item in enriched}
-        postings = [enriched_by_url.get(item.canonical_apply_url, item) for item in postings]
         note = f"query-scoped board search: {', '.join(self.terms)}"
-        if not complete:
+        if rate_limited:
+            note += "; Workday rate limit persisted after retries"
+        if not complete and not rate_limited:
             note += f"; one or more queries exceeded {self.max_per_term:,} results"
+        status = "blocked" if rate_limited and not by_path else (
+            "partial" if rate_limited else ("ok" if complete else "truncated")
+        )
         return CollectorResult(
             source=self.name,
             postings=postings,
             complete=complete,
             mode=self.mode,
             rows_scanned=len(by_path),
-            expected_rows=len(by_path) if complete else totals,
-            status="ok" if complete else "truncated",
+            expected_rows=len(by_path) if complete else (totals or None),
+            status=status,
             note=note,
         )
 

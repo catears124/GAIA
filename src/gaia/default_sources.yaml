@@ -24,17 +24,11 @@ native_sources:
   - kind: google-careers
 
 workday:
-  # Workday search is not exact-match search. A high-recall query basis is unioned and
-  # deduplicated by externalPath before technical/year classification.
+  # Keep the query basis narrow. The Workday shared edge is globally paced and retries 429s;
+  # broad terms such as student, university, campus, and summer are intentionally rejected.
   search_terms:
     - intern
-    - internship
     - co-op
-    - coop
-    - student
-    - university
-    - campus
-    - summer
 
 market_discovery:
   github:
