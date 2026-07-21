@@ -40,16 +40,16 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     if isinstance(collector, GreenhouseCollector):
-        return "greenhouse", {"company": collector.company, "board": collector.board.casefold()}
+        return "greenhouse", {"company": collector.company, "board": collector.board}
     if isinstance(collector, LeverCollector):
-        return "lever", {"company": collector.company, "site": collector.site.casefold()}
+        return "lever", {"company": collector.company, "site": collector.site}
     if isinstance(collector, AshbyCollector):
-        return "ashby", {"company": collector.company, "board": collector.board.casefold()}
+        return "ashby", {"company": collector.company, "board": collector.board}
     if isinstance(collector, WorkdaySearchCollector):
         return "workday-search", {
             "company": collector.company,
             "host": collector.host,
-            "tenant": collector.tenant.casefold(),
+            "tenant": collector.tenant,
             "site": collector.site,
             "terms": list(collector.terms),
         }
@@ -61,17 +61,17 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     if isinstance(collector, RecruiteeCollector):
         return "recruitee", {
             "company": collector.company,
-            "subdomain": collector.subdomain.casefold(),
+            "subdomain": collector.subdomain,
         }
     if isinstance(collector, WorkableCollector):
         return "workable", {
             "company": collector.company,
-            "subdomain": collector.subdomain.casefold(),
+            "subdomain": collector.subdomain,
         }
     if isinstance(collector, SitemapDomainCollector):
         return "domain", {
             "company": collector.company,
-            "host": collector.host.casefold(),
+            "host": collector.host,
             "seed_urls": collector.seed_urls,
         }
     if isinstance(collector, SchemaPageCollector):
@@ -121,29 +121,29 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
 
 def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
     if kind == "greenhouse":
-        return GreenhouseCollector(str(spec["company"]), str(spec["board"]).casefold())
+        return GreenhouseCollector(str(spec["company"]), str(spec["board"]))
     if kind == "lever":
-        return LeverCollector(str(spec["company"]), str(spec["site"]).casefold())
+        return LeverCollector(str(spec["company"]), str(spec["site"]))
     if kind == "ashby":
-        return AshbyCollector(str(spec["company"]), str(spec["board"]).casefold())
+        return AshbyCollector(str(spec["company"]), str(spec["board"]))
     if kind == "workday-search":
         return WorkdaySearchCollector(
             str(spec["company"]),
             str(spec["host"]),
-            str(spec["tenant"]).casefold(),
+            str(spec["tenant"]),
             str(spec["site"]),
             terms=tuple(spec.get("terms") or ("intern", "co-op")),
         )
     if kind == "smartrecruiters":
         return SmartRecruitersCollector(str(spec["company"]), str(spec["identifier"]))
     if kind == "recruitee":
-        return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]).casefold())
+        return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]))
     if kind == "workable":
-        return WorkableCollector(str(spec["company"]), str(spec["subdomain"]).casefold())
+        return WorkableCollector(str(spec["company"]), str(spec["subdomain"]))
     if kind == "domain":
         return SitemapDomainCollector(
             str(spec["company"]),
-            str(spec["host"]).casefold(),
+            str(spec["host"]),
             [str(url) for url in spec.get("seed_urls") or []],
         )
     if kind == "verification":
