@@ -1,26 +1,34 @@
 # GAIA
 
-**Great, Another Internship Aggregator** is a local-first index for Summer 2027 computer-science internships.
+**Great, Another Internship Aggregator** is a local-first index for verified Summer 2027 computer-science internships.
 
-## Headline
+## v3 product contract
 
-> Every CS internship. One live index.
+> Every CS internship. Only when it is real.
 
-That is the product goal, not a claim that the public web can be proven globally complete. GAIA makes the strongest claim it can actually audit: it continuously generates an employer/source universe, fully traverses supported internship surfaces, measures recovery against independent public indexes, and leaves every unresolved application or source visible.
+GAIA discovers leads from public indexes, historical archives, employer career systems, robots/sitemaps and supported ATS providers. The default product feed is stricter: a listing appears as a normal internship only after GAIA recovers it from an employer-controlled source.
 
-## Why GAIA 2 exists
+Public indexes are useful, but they are leads. They do not get to dominate the homepage merely because a README said “Summer 2027.”
 
-GAIA 1 treated company discovery and job refresh as one giant crawl. A large Workday employer could make a normal refresh walk tens of thousands of unrelated jobs before it found a few internships. It was slow, noisy, and circular because the company universe depended too heavily on a few manually configured repositories.
+## What appears in the default feed
 
-GAIA 2 separates the system into two planes:
+The default feed includes only role families that satisfy all of the following:
+
+- technical category: software, ML/AI, data, security, hardware, quant or product;
+- confirmed 2027 evidence;
+- at least one employer-controlled source variant, either a native ATS/API result or a verified structured employer page.
+
+Index-only records move to the **Lead queue**. They remain searchable and visible, but they are no longer treated as ready-to-apply product rows.
+
+## Two-plane crawler design
 
 ### Refresh jobs
 
-The normal startup and **Refresh jobs** action poll only current sources already known to expose Summer 2027 opportunities.
+The normal startup and **Refresh jobs** action poll only current sources already known to expose relevant internships.
 
 - Greenhouse, Lever, Ashby, SmartRecruiters, Recruitee and Workable boards are enumerated directly.
-- Workday is traversed completely inside its public `intern` and `co-op` search surfaces. GAIA never scans the employer's entire general-purpose board during an interactive refresh.
-- Google Careers uses its public internship search and extracts job identities from both links and embedded page data.
+- Workday is traversed inside its public `intern` and `co-op` search surfaces; GAIA does not scan the whole employer board during interactive refresh.
+- Google Careers uses its public internship search and extracts job identities from links and embedded page data.
 - Current custom pages are independently verified.
 - Progress is visible in the UI and source logs are concise by default.
 
@@ -29,10 +37,10 @@ The normal startup and **Refresh jobs** action poll only current sources already
 The explicit **Discover companies** action expands the monitored market.
 
 - Current 2027 internship indexes seed application URLs and employers.
-- Recently active internship repositories are discovered dynamically through GitHub repository search; no company names are embedded in this process.
+- Recently active internship repositories are discovered dynamically through GitHub repository search.
 - Historical 2025–2026 internship archives seed ATS boards that may reopen for 2027.
-- Known URLs are promoted automatically into provider-level boards.
-- Custom employer domains are expanded through `robots.txt`, sitemap indexes and structured `JobPosting` pages.
+- Known URLs promote automatically into provider-level boards.
+- Custom employer domains expand through `robots.txt`, sitemap indexes and structured `JobPosting` pages.
 - Discovered source specifications persist in SQLite, so future refreshes no longer depend on the original index that revealed them.
 
 The heavy discovery sweep is intentionally separate from the fast interactive refresh.
@@ -62,31 +70,33 @@ GAIA exposes separate time concepts:
 - **Last verified** is when GAIA most recently confirmed it.
 - Registry timestamps never become employer publication dates.
 - Workday relative values such as `Posted 1 Day Ago` remain approximate and render as `~1 day ago`.
-- When an employer exposes no defensible publication date, GAIA says so and still shows detection time. It does not invent precision.
+- When an employer exposes no defensible publication date, GAIA says so and still shows verification time. It does not invent precision.
 
-## Job identity and grouping
+## Canonicalization
 
-- Exact copies from an employer board and one or more indexes collapse by ATS/job identity before counts are computed.
-- Separate location requisitions can group into one conservative role family.
-- Different specializations, seasons, years and employment types remain separate.
-- The default feed includes technical categories only: software, ML/AI, data, security, hardware, quant and product.
-- Nontechnical internships remain queryable through the API by using `track=all`.
+v3 adds a product-quality layer:
+
+- company aliases and flags are normalized for display and grouping;
+- `D. E. Shaw`, `DE Shaw`, and related variants merge;
+- `BAE Systems 🇺🇸` displays as `BAE Systems`;
+- glued registry location strings such as `4 locations**Nashua, NHHudson, NH...` are repaired before display;
+- persisted source identities are deduplicated without destroying case-sensitive provider IDs.
 
 ## Coverage contract
 
-GAIA reports:
+Coverage is an engineering diagnostic, not the product headline. GAIA reports:
 
-- active applications known across all sources;
+- verified employer applications;
+- unresolved lead applications;
 - benchmark applications from independent 2027 indexes;
-- applications independently recovered from employer sources;
-- benchmark applications still index-only;
+- benchmark applications still lead-only;
 - employer applications found before or outside the benchmark;
 - complete source traversals;
 - genuine current crawler failures;
 - access-limited sources;
 - stale pages and dormant historical watches.
 
-A source is not healthy merely because it returned HTTP 200. Pagination or the declared search surface must finish. Historical failures do not inflate the current failure count, and a query-scoped Workday source returning zero internships is not mislabeled as a broken global board.
+A source is not healthy merely because it returned HTTP 200. Pagination or the declared search surface must finish. Historical failures do not inflate the current failure count, and query-scoped Workday sources returning zero internships are not mislabeled as broken global boards.
 
 ## Run locally
 
@@ -162,4 +172,5 @@ The test suite covers:
 - persisted source-catalog behavior;
 - strict Summer 2027 classification;
 - application deduplication and conservative role-family grouping;
-- source status, latest-run scoping and benchmark recall accounting.
+- source status, latest-run scoping and benchmark recall accounting;
+- v3 company/source/location canonicalization.
