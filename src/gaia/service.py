@@ -93,7 +93,7 @@ class SyncService:
             started = time.monotonic()
             self.progress = SyncProgress(
                 mode=mode,
-                stage="loading registries",
+                stage="loading current indexes",
                 started_at=started,
             )
             run_id = self.db.start_run()
@@ -128,13 +128,15 @@ class SyncService:
                             registry_postings.extend(result.postings)
                             registry_postings.extend(result.discovery_postings)
 
-                    self.progress.stage = "loading employer universe"
-                    universe_seeds, seed_health = await load_universe_seed_postings(
-                        client,
-                        settings,
-                    )
-                    summary.universe_seeds = len(universe_seeds)
-                    self._record_results(seed_health, summary, run_id)
+                    universe_seeds: list[Posting] = []
+                    if mode == "discover":
+                        self.progress.stage = "loading historical employer universe"
+                        universe_seeds, seed_health = await load_universe_seed_postings(
+                            client,
+                            settings,
+                        )
+                        summary.universe_seeds = len(universe_seeds)
+                        self._record_results(seed_health, summary, run_id)
 
                     market_postings: list[Posting] = []
                     if mode == "discover":
@@ -148,22 +150,22 @@ class SyncService:
                         )
                         self._record_results(market_health, summary, run_id)
 
-                    discovery_postings = [
-                        *registry_postings,
-                        *universe_seeds,
-                        *market_postings,
-                    ]
                     generated_collectors = collectors_from_registry(
-                        discovery_postings,
+                        [*registry_postings, *universe_seeds, *market_postings],
                         settings,
                         deep=mode == "discover",
                     )
                     catalog_collectors = load_catalog(self.db.path)
                     if mode == "refresh":
+                        generated_collectors = [
+                            collector
+                            for collector in generated_collectors
+                            if collector.scope == "current" and collector.mode != "domain"
+                        ]
                         catalog_collectors = [
                             collector
                             for collector in catalog_collectors
-                            if collector.mode != "domain"
+                            if collector.scope == "current" and collector.mode != "domain"
                         ]
                     direct_collectors = merge_catalog(
                         catalog_collectors,
@@ -178,7 +180,7 @@ class SyncService:
                         stage=(
                             "enumerating employers and sitemaps"
                             if mode == "discover"
-                            else "refreshing internship sources"
+                            else "refreshing current internship sources"
                         ),
                     )
                     self.progress.stage = "rebuilding role families"
