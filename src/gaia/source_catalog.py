@@ -15,6 +15,7 @@ from .collectors import (
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
 from .native_collectors import GoogleInternshipCollector
 from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
+from .quality import canonical_source_name
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -39,16 +40,16 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     if isinstance(collector, GreenhouseCollector):
-        return "greenhouse", {"company": collector.company, "board": collector.board}
+        return "greenhouse", {"company": collector.company, "board": collector.board.casefold()}
     if isinstance(collector, LeverCollector):
-        return "lever", {"company": collector.company, "site": collector.site}
+        return "lever", {"company": collector.company, "site": collector.site.casefold()}
     if isinstance(collector, AshbyCollector):
-        return "ashby", {"company": collector.company, "board": collector.board}
+        return "ashby", {"company": collector.company, "board": collector.board.casefold()}
     if isinstance(collector, WorkdaySearchCollector):
         return "workday-search", {
             "company": collector.company,
             "host": collector.host,
-            "tenant": collector.tenant,
+            "tenant": collector.tenant.casefold(),
             "site": collector.site,
             "terms": list(collector.terms),
         }
@@ -60,24 +61,24 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     if isinstance(collector, RecruiteeCollector):
         return "recruitee", {
             "company": collector.company,
-            "subdomain": collector.subdomain,
+            "subdomain": collector.subdomain.casefold(),
         }
     if isinstance(collector, WorkableCollector):
         return "workable", {
             "company": collector.company,
-            "subdomain": collector.subdomain,
+            "subdomain": collector.subdomain.casefold(),
         }
     if isinstance(collector, SitemapDomainCollector):
         return "domain", {
             "company": collector.company,
-            "host": collector.host,
+            "host": collector.host.casefold(),
             "seed_urls": collector.seed_urls,
         }
     if isinstance(collector, SchemaPageCollector):
         return "verification", {
             "company": collector.company,
             "urls": collector.urls,
-            "name": collector.name,
+            "name": canonical_source_name(collector.name),
         }
     if isinstance(collector, GoogleInternshipCollector):
         return "google-careers", {}
@@ -93,7 +94,7 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
         kind, spec = described
         rows.append(
             (
-                collector.name,
+                canonical_source_name(collector.name),
                 kind,
                 collector.scope,
                 json.dumps(spec, sort_keys=True),
@@ -120,36 +121,36 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
 
 def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
     if kind == "greenhouse":
-        return GreenhouseCollector(str(spec["company"]), str(spec["board"]))
+        return GreenhouseCollector(str(spec["company"]), str(spec["board"]).casefold())
     if kind == "lever":
-        return LeverCollector(str(spec["company"]), str(spec["site"]))
+        return LeverCollector(str(spec["company"]), str(spec["site"]).casefold())
     if kind == "ashby":
-        return AshbyCollector(str(spec["company"]), str(spec["board"]))
+        return AshbyCollector(str(spec["company"]), str(spec["board"]).casefold())
     if kind == "workday-search":
         return WorkdaySearchCollector(
             str(spec["company"]),
             str(spec["host"]),
-            str(spec["tenant"]),
+            str(spec["tenant"]).casefold(),
             str(spec["site"]),
             terms=tuple(spec.get("terms") or ("intern", "co-op")),
         )
     if kind == "smartrecruiters":
         return SmartRecruitersCollector(str(spec["company"]), str(spec["identifier"]))
     if kind == "recruitee":
-        return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]))
+        return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]).casefold())
     if kind == "workable":
-        return WorkableCollector(str(spec["company"]), str(spec["subdomain"]))
+        return WorkableCollector(str(spec["company"]), str(spec["subdomain"]).casefold())
     if kind == "domain":
         return SitemapDomainCollector(
             str(spec["company"]),
-            str(spec["host"]),
+            str(spec["host"]).casefold(),
             [str(url) for url in spec.get("seed_urls") or []],
         )
     if kind == "verification":
         return SchemaPageCollector(
             str(spec["company"]),
             [str(url) for url in spec.get("urls") or []],
-            name=str(spec.get("name") or "") or None,
+            name=canonical_source_name(str(spec.get("name") or "")) or None,
         )
     if kind == "google-careers":
         return GoogleInternshipCollector()
@@ -161,26 +162,30 @@ def load_catalog(path: Path) -> list[Collector]:
         rows = database.execute(
             "SELECT source, kind, scope, spec_json FROM source_catalog ORDER BY source"
         ).fetchall()
-    collectors: list[Collector] = []
+    merged: dict[str, Collector] = {}
     for row in rows:
         try:
             collector = _collector(str(row["kind"]), json.loads(str(row["spec_json"])))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             continue
         if collector is None:
             continue
         collector.scope = str(row["scope"])
-        collectors.append(collector)
-    return collectors
+        key = canonical_source_name(collector.name)
+        existing = merged.get(key)
+        if existing is None or (existing.scope == "historical" and collector.scope == "current"):
+            merged[key] = collector
+    return list(merged.values())
 
 
 def merge_catalog(*groups: list[Collector]) -> list[Collector]:
     merged: dict[str, Collector] = {}
     for group in groups:
         for collector in group:
-            existing = merged.get(collector.name)
+            key = canonical_source_name(collector.name)
+            existing = merged.get(key)
             if existing is None or (
                 existing.scope == "historical" and collector.scope == "current"
             ):
-                merged[collector.name] = collector
+                merged[key] = collector
     return list(merged.values())
