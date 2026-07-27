@@ -150,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_source_health_lifecycle
 CREATE TABLE IF NOT EXISTS crawl_targets (
     source TEXT PRIMARY KEY REFERENCES source_catalog(source) ON DELETE CASCADE,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    scheduled BOOLEAN NOT NULL DEFAULT TRUE,
     priority SMALLINT NOT NULL DEFAULT 100,
     interval_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (interval_seconds >= 60),
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -166,9 +167,13 @@ CREATE TABLE IF NOT EXISTS crawl_targets (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_crawl_targets_due
+ALTER TABLE crawl_targets
+    ADD COLUMN IF NOT EXISTS scheduled BOOLEAN NOT NULL DEFAULT TRUE;
+
+DROP INDEX IF EXISTS idx_crawl_targets_due;
+CREATE INDEX idx_crawl_targets_due
     ON crawl_targets (priority, next_run_at)
-    WHERE enabled;
+    WHERE scheduled;
 CREATE INDEX IF NOT EXISTS idx_crawl_targets_lease
     ON crawl_targets (lease_expires_at)
     WHERE lease_expires_at IS NOT NULL;
