@@ -8,11 +8,25 @@ import httpx
 
 from .collectors import Collector
 from .db import Database
-from .discovery import collectors_from_registry, load_universe_seed_postings, registry_collectors
-from .inventory import ClaimedTarget, InventoryStore, InventoryWorker as BaseInventoryWorker
+from .discovery import (
+    collectors_from_registry,
+    load_universe_seed_postings,
+    registry_collectors,
+)
+from .inventory import (
+    ClaimedTarget,
+    InventoryStore,
+    InventoryWorker as BaseInventoryWorker,
+)
 from .provider_discovery import provider_collectors_from_postings
 from .quality import canonical_source_name
-from .source_catalog import _collector, _spec, merge_catalog, save_candidates, save_catalog
+from .source_catalog import (
+    _collector,
+    _spec,
+    merge_catalog,
+    save_candidates,
+    save_catalog,
+)
 
 LOGGER = logging.getLogger("gaia.inventory.runtime")
 
@@ -134,6 +148,27 @@ class RuntimeInventoryStore(InventoryStore):
                 """,
                 (key, initial_delay),
             )
+
+    def has_due_coverage_targets(self) -> bool:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM crawl_targets AS target
+                    JOIN source_catalog AS catalog USING(source)
+                    WHERE target.enabled
+                      AND target.scheduled
+                      AND catalog.validated
+                      AND target.next_run_at<=now()
+                      AND (
+                          target.lease_expires_at IS NULL
+                          OR target.lease_expires_at<now()
+                      )
+                ) AS due
+                """
+            ).fetchone()
+        return bool(row["due"])
 
     def claim_target(self, *, lease_seconds: int) -> ClaimedTarget | None:
         with self.database.connect() as connection:
@@ -274,6 +309,11 @@ class InventoryWorker(BaseInventoryWorker):
         if collector is not None:
             collector.name = target.source
         return collector
+
+    async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
+        if self.store.has_due_coverage_targets():
+            return False
+        return await super()._run_discovery_if_due(client)
 
     async def _probe_candidate(
         self,
