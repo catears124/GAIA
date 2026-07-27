@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -12,44 +11,17 @@ from fastapi.staticfiles import StaticFiles
 
 from .db import Database
 from .quality import (
-    TECH_CATEGORIES,
+    TECH_CATEGORIES as BASE_TECH_CATEGORIES,
     canonical_company,
     is_index_mode,
     normalize_locations,
 )
-from .service import SyncService
 
 FRONTEND = Path(__file__).with_name("frontend")
 TARGET_MATCHES = ("exact", "year_confirmed", "source_confirmed")
+TECH_CATEGORIES = (*BASE_TECH_CATEGORIES, "other-technical")
 db = Database()
-service = SyncService(db, concurrency=int(os.getenv("GAIA_CONCURRENCY", "16")))
-
-
-def _initial_sync_due() -> bool:
-    if os.getenv("GAIA_INITIAL_SYNC", "1") != "1":
-        return False
-    freshness_hours = max(1.0, float(os.getenv("GAIA_INITIAL_SYNC_MAX_AGE_HOURS", "6")))
-    with db.connect() as connection:
-        row = connection.execute(
-            """
-            SELECT EXTRACT(EPOCH FROM (now() - MAX(finished_at))) / 3600.0 AS age_hours
-            FROM sync_runs
-            WHERE finished_at IS NOT NULL
-            """
-        ).fetchone()
-    age = row["age_hours"]
-    return age is None or float(age) >= freshness_hours
-
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    if _initial_sync_due():
-        service.start_background("refresh")
-    yield
-    await service.stop()
-
-
-app = FastAPI(title="GAIA", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="GAIA", version="5.0.0")
 app.mount("/assets", StaticFiles(directory=FRONTEND), name="assets")
 
 
@@ -60,46 +32,88 @@ def root(request: Request) -> HTMLResponse:
     return HTMLResponse(content.replace("__GAIA_OG_IMAGE__", str(og_image)))
 
 
-@app.get("/api/health")
-def health() -> dict[str, object]:
+def _inventory_state() -> dict[str, object]:
     with db.connect() as connection:
-        latest_run = connection.execute(
-            """
-            SELECT id, started_at, finished_at, status, sources, postings, failed
-            FROM sync_runs
-            WHERE finished_at IS NOT NULL AND status IN ('ok', 'partial')
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        latest_success = connection.execute(
-            "SELECT MAX(finished_at) AS finished_at FROM sync_runs WHERE status='ok'"
-        ).fetchone()["finished_at"]
-        source_state = connection.execute(
+        row = connection.execute(
             """
             SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status IN ('broken', 'truncated')) AS failing
-            FROM source_health
-            WHERE scope='current' AND last_run_id=%s
-            """,
-            (int(latest_run["id"]) if latest_run else -1,),
+                COUNT(*) FILTER (WHERE target.enabled AND catalog.scope='current') AS total,
+                COUNT(*) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                      AND target.lease_expires_at>now()
+                ) AS running,
+                COUNT(*) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                      AND target.last_complete_at IS NULL
+                ) AS never_completed,
+                COUNT(*) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                      AND target.last_complete_at IS NOT NULL
+                      AND target.last_complete_at <
+                          now() - make_interval(secs => target.interval_seconds * 2)
+                ) AS overdue,
+                COUNT(*) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                      AND target.last_status IN ('broken','blocked','truncated','partial')
+                ) AS degraded,
+                MAX(target.last_finished_at) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                ) AS latest_activity_at,
+                MIN(target.last_complete_at) FILTER (
+                    WHERE target.enabled AND catalog.scope='current'
+                ) AS coverage_watermark,
+                COUNT(*) FILTER (WHERE target.enabled AND catalog.scope='historical') AS historical
+            FROM crawl_targets AS target
+            JOIN source_catalog AS catalog USING(source)
+            """
         ).fetchone()
-    run = db._json_row(latest_run) if latest_run else None  # noqa: SLF001
+    state = db._json_row(row)  # noqa: SLF001
+    for key in ("total", "running", "never_completed", "overdue", "degraded", "historical"):
+        state[key] = int(state.get(key) or 0)
+    total = int(state["total"])
+    incomplete = min(
+        total,
+        int(state["never_completed"]) + int(state["overdue"]) + int(state["degraded"]),
+    )
+    state["fresh"] = max(0, total - incomplete)
+    state["fresh_percent"] = round(100 * int(state["fresh"]) / total, 1) if total else 0.0
+    state["healthy"] = bool(total) and incomplete == 0
+    return state
+
+
+@app.get("/api/health")
+def health() -> dict[str, object]:
+    inventory = _inventory_state()
+    fully_initialized = int(inventory["never_completed"]) == 0 and int(inventory["total"]) > 0
+    watermark = inventory.get("coverage_watermark") if fully_initialized else None
+    failing = int(inventory["never_completed"]) + int(inventory["overdue"]) + int(
+        inventory["degraded"]
+    )
     return {
-        "ok": latest_run is not None,
+        "ok": bool(inventory["healthy"]),
         "read_only": os.getenv("GAIA_READ_ONLY", "0") == "1",
-        "running": service.running,
-        "progress": service.progress.as_dict(),
-        "last_summary": service.last_summary.as_dict() if service.last_summary else None,
-        "data": {
-            "last_run": run,
-            "last_success_at": db._json_row({"value": latest_success})["value"]  # noqa: SLF001
-            if latest_success
-            else None,
-            "sources": int(source_state["total"] or 0),
-            "failing_sources": int(source_state["failing"] or 0),
+        "running": int(inventory["running"]) > 0,
+        "progress": {
+            "mode": "continuous-inventory",
+            "stage": "crawling" if int(inventory["running"]) else "scheduled",
+            "completed": int(inventory["fresh"]),
+            "total": int(inventory["total"]),
+            "current": None,
+            "started_at": None,
+            "elapsed_seconds": 0,
         },
+        "last_summary": None,
+        "data": {
+            "last_run": (
+                {"finished_at": watermark, "status": "ok" if inventory["healthy"] else "degraded"}
+                if watermark
+                else None
+            ),
+            "last_success_at": watermark,
+            "sources": int(inventory["total"]),
+            "failing_sources": failing,
+        },
+        "inventory": inventory,
     }
 
 
@@ -207,7 +221,7 @@ def _opening_is_direct(opening: dict[str, object]) -> bool:
 
 
 def _present_family(row: Mapping[str, object], *, trust: str = "all") -> dict[str, object]:
-    item = db._family_dict(row)  # noqa: SLF001 - central presentation normalization.
+    item = db._family_dict(row)  # noqa: SLF001
     item["company"] = canonical_company(str(item.get("company") or ""))
     item["locations"] = normalize_locations(item.get("locations") or [])
     cleaned_openings: list[dict[str, object]] = []
@@ -248,15 +262,9 @@ def stats() -> dict[str, int]:
                 COUNT(*) AS role_families,
                 COALESCE(SUM(direct_openings), 0) AS active_listings,
                 COUNT(DISTINCT company) AS companies,
-                COALESCE(
-                    SUM(direct_openings) FILTER (
-                        WHERE latest_posted_at >= now() - interval '1 day'
-                    ),
-                    0
-                ) AS new_24h,
                 COUNT(*) FILTER (
-                    WHERE latest_posted_at >= now() - interval '1 day'
-                ) AS new_families_24h,
+                    WHERE first_detected_at >= date_trunc('day', now())
+                ) AS new_families_today,
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
             FROM families
@@ -277,12 +285,33 @@ def stats() -> dict[str, int]:
             """,
             params,
         ).fetchone()
+        movement = connection.execute(
+            """
+            SELECT
+                COUNT(DISTINCT canonical_apply_url) FILTER (
+                    WHERE first_seen_at >= date_trunc('day', now())
+                ) AS new_today,
+                COUNT(DISTINCT canonical_apply_url) FILTER (
+                    WHERE removed_at >= date_trunc('day', now())
+                ) AS removed_today
+            FROM postings
+            WHERE source_mode='direct'
+              AND target_match = ANY(%s)
+              AND category = ANY(%s)
+            """,
+            (list(TARGET_MATCHES), list(TECH_CATEGORIES)),
+        ).fetchone()
+    new_today = int(movement["new_today"] or 0)
+    removed_today = int(movement["removed_today"] or 0)
     return {
         "role_families": int(row["role_families"]),
         "active_listings": int(row["active_listings"]),
         "companies": int(row["companies"]),
-        "new_24h": int(row["new_24h"]),
-        "new_families_24h": int(row["new_families_24h"]),
+        "new_24h": new_today,
+        "new_today": new_today,
+        "removed_today": removed_today,
+        "net_today": new_today - removed_today,
+        "new_families_24h": int(row["new_families_today"]),
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
         "sources": _catalog_count(),
@@ -426,11 +455,7 @@ def facets(trust: str = "verified", target: str = "default") -> dict[str, object
             """,
             params,
         ).fetchone()["count"]
-    return {
-        "companies": companies,
-        "categories": categories,
-        "remote_count": int(remote_count),
-    }
+    return {"companies": companies, "categories": categories, "remote_count": int(remote_count)}
 
 
 @app.get("/api/families/{family_key}")
@@ -443,53 +468,37 @@ def family(family_key: str, trust: str = Query("verified")) -> dict[str, object]
     return _present_family(result, trust=trust)
 
 
-def _normalized_coverage() -> dict[str, object]:
-    data = db.coverage()
-    sources = list(data.get("sources") or [])
-    current = [row for row in sources if str(row.get("scope") or "current") == "current"]
-    actionable = [
-        row
-        for row in current
-        if str(row.get("mode")) in {"board", "board-search", "domain"}
-        and (row.get("last_error") or str(row.get("status")) in {"broken", "truncated"})
-    ]
-    contract = dict(data.get("contract") or {})
-    contract["actionable_anomalies"] = len(actionable)
-    contract["complete_enumerators"] = sum(
-        bool(row.get("complete"))
-        and str(row.get("status")) == "ok"
-        and str(row.get("mode")) in {"board", "board-search", "domain"}
-        for row in current
-    )
-    contract["query_scoped_boards"] = sum(
-        str(row.get("mode")) == "board-search" for row in current
-    )
-    data["contract"] = contract
-    return data
-
-
 @app.get("/api/coverage")
 def coverage() -> dict[str, object]:
-    return _normalized_coverage()
-
-
-@app.post("/api/sync", status_code=202)
-async def sync() -> dict[str, object]:
-    if os.getenv("GAIA_READ_ONLY", "0") == "1":
-        raise HTTPException(
-            status_code=503,
-            detail="This deployment is read-only; run the crawler from a trusted worker.",
-        )
-    started = service.start_background("refresh")
-    return {"started": started, **service.status()}
-
-
-@app.post("/api/discover", status_code=202)
-async def discover() -> dict[str, object]:
-    if os.getenv("GAIA_READ_ONLY", "0") == "1":
-        raise HTTPException(
-            status_code=503,
-            detail="This deployment is read-only; run discovery from a trusted worker.",
-        )
-    started = service.start_background("discover")
-    return {"started": started, **service.status()}
+    data = db.coverage()
+    with db.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT health.*, target.enabled, target.priority, target.interval_seconds,
+                   target.next_run_at, target.lease_expires_at, target.last_complete_at,
+                   target.last_status AS crawl_status, target.last_rows AS crawl_rows,
+                   target.consecutive_failures AS crawl_failures
+            FROM source_health AS health
+            LEFT JOIN crawl_targets AS target USING(source)
+            ORDER BY health.source
+            """
+        ).fetchall()
+    sources = [db._json_row(row) for row in rows]  # noqa: SLF001
+    inventory = _inventory_state()
+    contract = dict(data.get("contract") or {})
+    contract.update(
+        {
+            "continuous_inventory": True,
+            "configured_sources": int(inventory["total"]),
+            "fresh_sources": int(inventory["fresh"]),
+            "fresh_percent": inventory["fresh_percent"],
+            "never_completed": int(inventory["never_completed"]),
+            "overdue_sources": int(inventory["overdue"]),
+            "degraded_sources": int(inventory["degraded"]),
+            "historical_sources": int(inventory["historical"]),
+            "coverage_watermark": inventory.get("coverage_watermark"),
+        }
+    )
+    data["contract"] = contract
+    data["sources"] = sources
+    return data
