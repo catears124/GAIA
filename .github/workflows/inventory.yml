@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 14
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL }}
-      GAIA_GITHUB_TOKEN: ${{ secrets.GAIA_GITHUB_TOKEN }}
+      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_GITHUB_TOKEN: ${{ secrets.GAIA_GITHUB_TOKEN || github.token }}
       GAIA_WORKER_CONCURRENCY: "12"
       GAIA_WORKDAY_FULL_INVENTORY: "1"
       GAIA_WORKDAY_MAX_PER_TERM: "20000"
