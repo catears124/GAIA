@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
-import sqlite3
-from pathlib import Path
 from typing import Any
+
+from psycopg.types.json import Jsonb
 
 from .collectors import (
     AshbyCollector,
@@ -12,6 +11,7 @@ from .collectors import (
     LeverCollector,
     SchemaPageCollector,
 )
+from .db import Database
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
 from .models import Posting
 from .native_collectors import GoogleInternshipCollector
@@ -25,70 +25,6 @@ from .provider_collectors import (
     WorkableCollector,
 )
 from .quality import canonical_source_name, is_actionable_application_url
-
-
-def _install_scope_promotion(connection: sqlite3.Connection) -> None:
-    has_health = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_health'"
-    ).fetchone()
-    if not has_health:
-        return
-
-    # Only proven productive sources are promoted into the hot refresh set.
-    connection.execute(
-        """
-        UPDATE source_catalog
-        SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-        WHERE source IN (
-            SELECT source FROM source_health WHERE lifecycle='productive'
-        )
-        """
-    )
-    connection.executescript(
-        """
-        DROP TRIGGER IF EXISTS source_catalog_promote_current_insert;
-        DROP TRIGGER IF EXISTS source_catalog_promote_current_update;
-
-        CREATE TRIGGER source_catalog_promote_current_insert
-        AFTER INSERT ON source_health
-        WHEN NEW.lifecycle='productive'
-        BEGIN
-            UPDATE source_catalog
-            SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-            WHERE source=NEW.source;
-        END;
-
-        CREATE TRIGGER source_catalog_promote_current_update
-        AFTER UPDATE OF lifecycle ON source_health
-        WHEN NEW.lifecycle='productive' AND OLD.lifecycle<>'productive'
-        BEGIN
-            UPDATE source_catalog
-            SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-            WHERE source=NEW.source;
-        END;
-        """
-    )
-
-
-def _connect(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path, timeout=60)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=60000")
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS source_catalog (
-            source TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            spec_json TEXT NOT NULL,
-            first_discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            last_discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    _install_scope_promotion(connection)
-    return connection
 
 
 def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
@@ -164,7 +100,7 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def save_catalog(path: Path, collectors: list[Collector]) -> int:
+def save_catalog(database: Database, collectors: list[Collector]) -> int:
     rows = []
     for collector in collectors:
         described = _spec(collector)
@@ -176,26 +112,36 @@ def save_catalog(path: Path, collectors: list[Collector]) -> int:
                 canonical_source_name(collector.name),
                 kind,
                 collector.scope,
-                json.dumps(spec, sort_keys=True),
+                Jsonb(spec),
             )
         )
-    with _connect(path) as database:
-        database.executemany(
+    if not rows:
+        return 0
+    with database.connect() as connection:
+        connection.executemany(
             """
-            INSERT INTO source_catalog(source, kind, scope, spec_json)
-            VALUES (?,?,?,?)
+            INSERT INTO source_catalog(source, kind, scope, spec)
+            VALUES (%s,%s,%s,%s)
             ON CONFLICT(source) DO UPDATE SET
                 kind=excluded.kind,
                 scope=CASE
                     WHEN source_catalog.scope='current' THEN 'current'
                     ELSE excluded.scope
                 END,
-                spec_json=excluded.spec_json,
-                last_discovered_at=CURRENT_TIMESTAMP
+                spec=excluded.spec,
+                last_discovered_at=now()
             """,
             rows,
         )
-        _install_scope_promotion(database)
+        connection.execute(
+            """
+            UPDATE source_catalog AS catalog
+            SET scope='current', last_discovered_at=now()
+            FROM source_health AS health
+            WHERE health.source=catalog.source
+              AND health.lifecycle='productive'
+            """
+        )
     return len(rows)
 
 
@@ -266,32 +212,21 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
     return None
 
 
-def load_catalog(path: Path) -> list[Collector]:
-    with _connect(path) as database:
-        has_health = database.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_health'"
-        ).fetchone()
-        if has_health:
-            rows = database.execute(
-                """
-                SELECT c.source, c.kind, c.scope, c.spec_json, h.lifecycle
-                FROM source_catalog AS c
-                LEFT JOIN source_health AS h ON h.source=c.source
-                ORDER BY c.source
-                """
-            ).fetchall()
-        else:
-            rows = database.execute(
-                """
-                SELECT source, kind, scope, spec_json, NULL AS lifecycle
-                FROM source_catalog ORDER BY source
-                """
-            ).fetchall()
+def load_catalog(database: Database) -> list[Collector]:
+    with database.connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT c.source, c.kind, c.scope, c.spec, h.lifecycle
+            FROM source_catalog AS c
+            LEFT JOIN source_health AS h ON h.source=c.source
+            ORDER BY c.source
+            """
+        ).fetchall()
     merged: dict[str, Collector] = {}
     for row in rows:
         try:
-            collector = _collector(str(row["kind"]), json.loads(str(row["spec_json"])))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            collector = _collector(str(row["kind"]), dict(row["spec"] or {}))
+        except (KeyError, TypeError, ValueError):
             continue
         if collector is None:
             continue

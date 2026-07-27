@@ -8,4 +8,8 @@ __pycache__/
 data/*.db
 data/*.db-*
 data/discovered_sources.json
+deploy/
+.vercel/
 .env
+.env.*
+!.env.example
