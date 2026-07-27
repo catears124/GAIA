@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,13 +30,14 @@ def _initial_sync_due() -> bool:
         return False
     freshness_hours = max(1.0, float(os.getenv("GAIA_INITIAL_SYNC_MAX_AGE_HOURS", "6")))
     with db.connect() as connection:
-        age = connection.execute(
+        row = connection.execute(
             """
-            SELECT (julianday('now') - julianday(MAX(finished_at))) * 24
+            SELECT EXTRACT(EPOCH FROM (now() - MAX(finished_at))) / 3600.0 AS age_hours
             FROM sync_runs
             WHERE finished_at IS NOT NULL
             """
-        ).fetchone()[0]
+        ).fetchone()
+    age = row["age_hours"]
     return age is None or float(age) >= freshness_hours
 
 
@@ -49,7 +49,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await service.stop()
 
 
-app = FastAPI(title="GAIA", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="GAIA", version="4.0.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=FRONTEND), name="assets")
 
 
@@ -73,19 +73,19 @@ def health() -> dict[str, object]:
             """
         ).fetchone()
         latest_success = connection.execute(
-            "SELECT MAX(finished_at) FROM sync_runs WHERE status='ok'"
-        ).fetchone()[0]
+            "SELECT MAX(finished_at) AS finished_at FROM sync_runs WHERE status='ok'"
+        ).fetchone()["finished_at"]
         source_state = connection.execute(
             """
             SELECT
                 COUNT(*) AS total,
-                SUM(status IN ('broken', 'truncated')) AS failing
+                COUNT(*) FILTER (WHERE status IN ('broken', 'truncated')) AS failing
             FROM source_health
-            WHERE scope='current' AND last_run_id=?
+            WHERE scope='current' AND last_run_id=%s
             """,
             (int(latest_run["id"]) if latest_run else -1,),
         ).fetchone()
-    run = dict(latest_run) if latest_run else None
+    run = db._json_row(latest_run) if latest_run else None  # noqa: SLF001
     return {
         "ok": latest_run is not None,
         "read_only": os.getenv("GAIA_READ_ONLY", "0") == "1",
@@ -94,7 +94,9 @@ def health() -> dict[str, object]:
         "last_summary": service.last_summary.as_dict() if service.last_summary else None,
         "data": {
             "last_run": run,
-            "last_success_at": latest_success,
+            "last_success_at": db._json_row({"value": latest_success})["value"]  # noqa: SLF001
+            if latest_success
+            else None,
             "sources": int(source_state["total"] or 0),
             "failing_sources": int(source_state["failing"] or 0),
         },
@@ -103,45 +105,40 @@ def health() -> dict[str, object]:
 
 def _catalog_count() -> int:
     with db.connect() as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_catalog'"
-        ).fetchone()
-        if exists:
-            return int(connection.execute("SELECT COUNT(*) FROM source_catalog").fetchone()[0])
-        return int(connection.execute("SELECT COUNT(*) FROM source_health").fetchone()[0])
+        row = connection.execute("SELECT COUNT(*) AS count FROM source_catalog").fetchone()
+    return int(row["count"])
 
 
 def _target_clause(target: str, params: list[object]) -> str:
     if target == "default":
-        placeholders = ",".join("?" for _ in TARGET_MATCHES)
-        params.extend(TARGET_MATCHES)
-        return f"target_match IN ({placeholders})"
+        params.append(list(TARGET_MATCHES))
+        return "target_match = ANY(%s)"
     if target:
         params.append(target)
-        return "target_match=?"
-    return "1=1"
+        return "target_match=%s"
+    return "TRUE"
 
 
 def _tech_clause(category: str, track: str, params: list[object]) -> str:
     if category:
         params.append(category)
-        return "category=?"
+        return "category=%s"
     if track != "all":
-        placeholders = ",".join("?" for _ in TECH_CATEGORIES)
-        params.extend(TECH_CATEGORIES)
-        return f"category IN ({placeholders})"
-    return "1=1"
+        params.append(list(TECH_CATEGORIES))
+        return "category = ANY(%s)"
+    return "TRUE"
 
 
 def _trust_clause(trust: str) -> str:
     if trust == "all":
-        return "1=1"
+        return "TRUE"
     if trust == "leads":
         return "direct_openings=0 AND backstop_openings>0"
     return "direct_openings>0"
 
+
 def _escape_like(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
 
 
 def _search_clause(query: str, params: list[object]) -> str:
@@ -149,11 +146,11 @@ def _search_clause(query: str, params: list[object]) -> str:
     for token in query.split():
         pattern = f"%{_escape_like(token)}%"
         clauses.append(
-            "(company LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' "
-            "OR locations_json LIKE ? ESCAPE '\\')"
+            "(company ILIKE %s ESCAPE '!' OR title ILIKE %s ESCAPE '!' "
+            "OR array_to_string(locations, ' ') ILIKE %s ESCAPE '!')"
         )
         params.extend([pattern, pattern, pattern])
-    return " AND ".join(clauses) or "1=1"
+    return " AND ".join(clauses) or "TRUE"
 
 
 def _location_clause(location: str, params: list[object]) -> str:
@@ -161,13 +158,13 @@ def _location_clause(location: str, params: list[object]) -> str:
         code = location.upper()
         params.extend([code, f"%, {code}"])
         return (
-            "EXISTS (SELECT 1 FROM json_each(locations_json) "
-            "WHERE value = ? COLLATE NOCASE OR value LIKE ? COLLATE NOCASE)"
+            "EXISTS (SELECT 1 FROM unnest(locations) AS value "
+            "WHERE value = %s OR value ILIKE %s)"
         )
     params.append(f"%{_escape_like(location)}%")
     return (
-        "EXISTS (SELECT 1 FROM json_each(locations_json) "
-        "WHERE value LIKE ? ESCAPE '\\' COLLATE NOCASE)"
+        "EXISTS (SELECT 1 FROM unnest(locations) AS value "
+        "WHERE value ILIKE %s ESCAPE '!')"
     )
 
 
@@ -180,11 +177,11 @@ def _search_order(query: str, sort: str, params: list[object]) -> str:
     params.extend([query, first, f"{phrase}%", f"{first_pattern}%", f"%{phrase}%"])
     return (
         "CASE "
-        "WHEN company = ? COLLATE NOCASE THEN 0 "
-        "WHEN company = ? COLLATE NOCASE THEN 1 "
-        "WHEN company LIKE ? ESCAPE '\\' THEN 2 "
-        "WHEN company LIKE ? ESCAPE '\\' THEN 3 "
-        "WHEN title LIKE ? ESCAPE '\\' THEN 4 "
+        "WHEN lower(company) = lower(%s) THEN 0 "
+        "WHEN lower(company) = lower(%s) THEN 1 "
+        "WHEN company ILIKE %s ESCAPE '!' THEN 2 "
+        "WHEN company ILIKE %s ESCAPE '!' THEN 3 "
+        "WHEN title ILIKE %s ESCAPE '!' THEN 4 "
         "ELSE 5 END, "
         f"{_order_clause(sort)}"
     )
@@ -192,7 +189,7 @@ def _search_order(query: str, sort: str, params: list[object]) -> str:
 
 def _order_clause(sort: str) -> str:
     if sort == "company":
-        return "company COLLATE NOCASE, title COLLATE NOCASE, family_key"
+        return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
     return (
@@ -209,8 +206,8 @@ def _opening_is_direct(opening: dict[str, object]) -> bool:
     return str(opening.get("source_mode") or "") == "direct"
 
 
-def _present_family(row: object, *, trust: str = "all") -> dict[str, object]:
-    item = db._family_dict(row)  # noqa: SLF001 - presentation reuse.
+def _present_family(row: Mapping[str, object], *, trust: str = "all") -> dict[str, object]:
+    item = db._family_dict(row)  # noqa: SLF001 - central presentation normalization.
     item["company"] = canonical_company(str(item.get("company") or ""))
     item["locations"] = normalize_locations(item.get("locations") or [])
     cleaned_openings: list[dict[str, object]] = []
@@ -225,7 +222,8 @@ def _present_family(row: object, *, trust: str = "all") -> dict[str, object]:
         copy["location"] = normalize_locations(copy.get("location") or [])
         cleaned_openings.append(copy)
     item["openings"] = cleaned_openings
-    item["opening_count"] = len(cleaned_openings) if trust in {"verified", "leads"} else item["opening_count"]
+    if trust in {"verified", "leads"}:
+        item["opening_count"] = len(cleaned_openings)
     item["locations"] = normalize_locations(
         [location for opening in cleaned_openings for location in opening.get("location", [])]
         or item["locations"]
@@ -251,18 +249,13 @@ def stats() -> dict[str, int]:
                 COALESCE(SUM(direct_openings), 0) AS active_listings,
                 COUNT(DISTINCT company) AS companies,
                 COALESCE(
-                    SUM(
-                        CASE
-                            WHEN julianday(latest_posted_at) >= julianday('now', '-1 day')
-                            THEN direct_openings
-                            ELSE 0
-                        END
+                    SUM(direct_openings) FILTER (
+                        WHERE latest_posted_at >= now() - interval '1 day'
                     ),
                     0
                 ) AS new_24h,
-                COALESCE(
-                    SUM(julianday(latest_posted_at) >= julianday('now', '-1 day')),
-                    0
+                COUNT(*) FILTER (
+                    WHERE latest_posted_at >= now() - interval '1 day'
                 ) AS new_families_24h,
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
@@ -323,36 +316,35 @@ def _list_families(
     if location:
         conditions.append(_location_clause(location, params))
     if company:
-        conditions.append("company = ? COLLATE NOCASE")
+        conditions.append("lower(company) = lower(%s)")
         params.append(company)
     if remote:
         conditions.append(
-            "EXISTS (SELECT 1 FROM json_each(locations_json) "
-            "WHERE value LIKE '%remote%' COLLATE NOCASE)"
+            "EXISTS (SELECT 1 FROM unnest(locations) AS value WHERE value ILIKE '%remote%')"
         )
     if posted_within:
         conditions.append(
-            "julianday(COALESCE(latest_posted_at, first_detected_at)) "
-            ">= julianday('now', ?)"
+            "COALESCE(latest_posted_at, first_detected_at) "
+            ">= now() - (%s * interval '1 day')"
         )
-        params.append(f"-{posted_within} days")
+        params.append(posted_within)
     order_params = list(params)
     order = _search_order(query, sort, order_params)
     where = " WHERE " + " AND ".join(f"({condition})" for condition in conditions)
     offset = max(0, page - 1) * page_size
     with db.connect() as connection:
-        total = int(
-            connection.execute(f"SELECT COUNT(*) FROM families{where}", params).fetchone()[0]
-        )
+        total = connection.execute(
+            f"SELECT COUNT(*) AS count FROM families{where}", params
+        ).fetchone()["count"]
         rows = connection.execute(
             f"""
             SELECT * FROM families{where}
             ORDER BY {order}
-            LIMIT ? OFFSET ?
+            LIMIT %s OFFSET %s
             """,
             [*order_params, page_size, offset],
         ).fetchall()
-    return {"total": total, "items": [_present_family(row, trust=trust) for row in rows]}
+    return {"total": int(total), "items": [_present_family(row, trust=trust) for row in rows]}
 
 
 @app.get("/api/families")
@@ -390,6 +382,7 @@ def families(
         posted_within=posted_within,
     )
 
+
 @app.get("/api/facets")
 def facets(trust: str = "verified", target: str = "default") -> dict[str, object]:
     if trust not in {"verified", "leads", "all"}:
@@ -406,7 +399,7 @@ def facets(trust: str = "verified", target: str = "default") -> dict[str, object
                 SELECT company AS value, COUNT(*) AS count
                 FROM families{where}
                 GROUP BY company
-                ORDER BY count DESC, company COLLATE NOCASE
+                ORDER BY count DESC, lower(company)
                 """,
                 params,
             ).fetchall()
@@ -423,24 +416,21 @@ def facets(trust: str = "verified", target: str = "default") -> dict[str, object
                 params,
             ).fetchall()
         ]
-        remote_count = int(
-            connection.execute(
-                f"""
-                SELECT COUNT(*) FROM families{where}
-                AND EXISTS (
-                    SELECT 1 FROM json_each(locations_json)
-                    WHERE value LIKE '%remote%' COLLATE NOCASE
-                )
-                """,
-                params,
-            ).fetchone()[0]
-        )
+        remote_count = connection.execute(
+            f"""
+            SELECT COUNT(*) AS count FROM families{where}
+            AND EXISTS (
+                SELECT 1 FROM unnest(locations) AS value
+                WHERE value ILIKE '%remote%'
+            )
+            """,
+            params,
+        ).fetchone()["count"]
     return {
         "companies": companies,
         "categories": categories,
-        "remote_count": remote_count,
+        "remote_count": int(remote_count),
     }
-
 
 
 @app.get("/api/families/{family_key}")
@@ -450,14 +440,7 @@ def family(family_key: str, trust: str = Query("verified")) -> dict[str, object]
     result = db.get_family(family_key)
     if result is None:
         raise HTTPException(status_code=404, detail="role family not found")
-
-    class Row(dict):
-        pass
-
-    row = Row(result)
-    row["locations_json"] = json.dumps(result.get("locations") or [])
-    row["openings_json"] = json.dumps(result.get("openings") or [])
-    return _present_family(row, trust=trust)
+    return _present_family(result, trust=trust)
 
 
 def _normalized_coverage() -> dict[str, object]:
@@ -468,10 +451,7 @@ def _normalized_coverage() -> dict[str, object]:
         row
         for row in current
         if str(row.get("mode")) in {"board", "board-search", "domain"}
-        and (
-            row.get("last_error")
-            or str(row.get("status")) in {"broken", "truncated"}
-        )
+        and (row.get("last_error") or str(row.get("status")) in {"broken", "truncated"})
     ]
     contract = dict(data.get("contract") or {})
     contract["actionable_anomalies"] = len(actionable)
@@ -498,7 +478,7 @@ async def sync() -> dict[str, object]:
     if os.getenv("GAIA_READ_ONLY", "0") == "1":
         raise HTTPException(
             status_code=503,
-            detail="This deployment is a published snapshot; refresh the source index instead.",
+            detail="This deployment is read-only; run the crawler from a trusted worker.",
         )
     started = service.start_background("refresh")
     return {"started": started, **service.status()}
@@ -509,7 +489,7 @@ async def discover() -> dict[str, object]:
     if os.getenv("GAIA_READ_ONLY", "0") == "1":
         raise HTTPException(
             status_code=503,
-            detail="This deployment is a published snapshot; run discovery in the source index.",
+            detail="This deployment is read-only; run discovery from a trusted worker.",
         )
     started = service.start_background("discover")
     return {"started": started, **service.status()}
