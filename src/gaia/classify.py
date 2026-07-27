@@ -95,7 +95,7 @@ def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting
     title_years = {int(value) for value in YEAR_RE.findall(title)}
     description_years = {int(value) for value in YEAR_RE.findall(employer_description)}
     evidence_years = title_years or description_years
-    season_text = title if title_years or not employer_description else f"{title} {employer_description}"
+    season_text = f"{title} {employer_description}"
     season = next((name for name, pattern in SEASON_RULES.items() if pattern.search(season_text)), None)
     year = 2027 if 2027 in evidence_years else (
         next(iter(evidence_years)) if len(evidence_years) == 1 else None
@@ -103,7 +103,9 @@ def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting
 
     if excluded or not internship_evidence:
         target_match = "not_internship"
-    elif SUMMER_2027_RE.search(title) or SUMMER_2027_RE.search(employer_description):
+    elif (2027 in evidence_years and season == "summer") or (
+        SUMMER_2027_RE.search(title) or SUMMER_2027_RE.search(employer_description)
+    ):
         target_match = "exact"
     elif evidence_years and 2027 not in evidence_years:
         target_match = "wrong_year"
