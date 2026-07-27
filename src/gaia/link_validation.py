@@ -35,20 +35,19 @@ async def validate_application_links(
 ) -> LinkValidationSummary:
     if limit <= 0:
         return LinkValidationSummary()
-    placeholders = ",".join("?" for _ in TARGET_MATCHES)
     with db.connect() as connection:
         rows = connection.execute(
-            f"""
+            """
             SELECT canonical_apply_url, MIN(link_checked_at) AS last_checked
             FROM postings
-            WHERE active=1
+            WHERE active
               AND source_mode='direct'
-              AND target_match IN ({placeholders})
+              AND target_match = ANY(%s)
             GROUP BY canonical_apply_url
-            ORDER BY last_checked IS NOT NULL, last_checked
-            LIMIT ?
+            ORDER BY MIN(link_checked_at) IS NOT NULL, MIN(link_checked_at)
+            LIMIT %s
             """,
-            (*TARGET_MATCHES, limit),
+            (list(TARGET_MATCHES), limit),
         ).fetchall()
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
@@ -70,21 +69,21 @@ async def validate_application_links(
             return url, status, final_url, state
 
     results = await asyncio.gather(*(check(str(row["canonical_apply_url"])) for row in rows))
-    checked_at = datetime.now(UTC).isoformat()
+    checked_at = datetime.now(UTC)
     summary = LinkValidationSummary(checked=len(results))
     with db.connect() as connection:
         for url, http_status, final_url, state in results:
             connection.execute(
                 """
                 UPDATE postings
-                SET link_checked_at=?, link_http_status=?, link_final_url=?, link_status=?
-                WHERE canonical_apply_url=?
+                SET link_checked_at=%s, link_http_status=%s, link_final_url=%s, link_status=%s
+                WHERE canonical_apply_url=%s
                 """,
                 (checked_at, http_status, final_url, state, url),
             )
             if state == "closed":
                 connection.execute(
-                    "UPDATE postings SET active=0 WHERE canonical_apply_url=?",
+                    "UPDATE postings SET active=FALSE WHERE canonical_apply_url=%s",
                     (url,),
                 )
             setattr(summary, state, getattr(summary, state) + 1)
