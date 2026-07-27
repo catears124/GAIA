@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Continuously monitored Summer 2027 technical internships from employer-controlled sources.">
+  <meta name="description" content="Continuously monitored technical internships from employer-controlled sources and clearly labeled market leads.">
   <meta name="theme-color" content="#0d1b16">
   <meta property="og:title" content="GAIA — Internships you can trust">
   <meta property="og:description" content="Technical internships from a continuously monitored employer-job inventory.">
@@ -12,7 +12,7 @@
   <meta name="twitter:card" content="summary_large_image">
   <title>GAIA — Internships you can trust</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/product.css?v=7.0.0">
+  <link rel="stylesheet" href="/assets/product.css?v=7.1.0">
 </head>
 <body>
   <a class="skip-link" href="#results">Skip to opportunities</a>
@@ -36,10 +36,10 @@
   <main>
     <section class="hero" aria-labelledby="page-title">
       <div class="hero-copy">
-        <p class="eyebrow"><span></span> Summer 2027 · Technical internships</p>
+        <p class="eyebrow"><span></span> Technical internships · all active cycles</p>
         <h1 id="page-title">Your next role<br>should be <em>real.</em></h1>
-        <p>GAIA continuously inventories employer career systems—not repost farms—so you spend less time questioning links and more time applying.</p>
-        <a class="hero-link" href="#results">Explore verified roles <span aria-hidden="true">↓</span></a>
+        <p>GAIA continuously inventories employer career systems and tracks outside market leads, so newly opened SWE, ML, data, product, hardware, security, and quant internships appear in one place.</p>
+        <a class="hero-link" href="#results">Explore the live market <span aria-hidden="true">↓</span></a>
       </div>
       <aside class="proof" aria-label="Live index summary">
         <p class="proof-label">Live inventory</p>
@@ -51,7 +51,7 @@
           <div><strong id="metric-companies">—</strong><span>companies</span></div>
           <div><strong id="metric-new">—</strong><span>first seen today</span></div>
         </div>
-        <p class="proof-note"><span aria-hidden="true">✓</span> Every listing carries source confidence and coverage state.</p>
+        <p class="proof-note"><span aria-hidden="true">✓</span> Employer applications and unverified leads are labeled separately.</p>
       </aside>
     </section>
 
@@ -64,13 +64,13 @@
           <kbd>/</kbd>
         </label>
         <div class="filters" aria-label="Internship filters">
-          <label><span>Confidence</span><select id="trust"><option value="verified" selected>Verified only</option><option value="all">All opportunities</option><option value="leads">Leads to verify</option></select></label>
+          <label><span>Confidence</span><select id="trust"><option value="verified">Verified only</option><option value="all" selected>All opportunities</option><option value="leads">Leads to verify</option></select></label>
           <label><span>Discipline</span><select id="category"><option value="">All disciplines</option><option value="software">Software</option><option value="ml-ai">ML / AI</option><option value="data">Data</option><option value="security">Security</option><option value="hardware">Hardware</option><option value="quant">Quant</option><option value="product">Product</option><option value="other-technical">Other technical</option></select></label>
           <label><span>Company</span><select id="company"><option value="">All companies</option></select></label>
           <label><span>Location</span><input id="location" type="search" placeholder="Anywhere"></label>
-          <label><span>Season</span><select id="target"><option value="default" selected>Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027 role</option><option value="">Any year</option></select></label>
+          <label><span>Cycle</span><select id="target"><option value="" selected>All active internships</option><option value="default">Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027 role</option></select></label>
           <label><span>Recency</span><select id="posted-within"><option value="0">Any time</option><option value="1">Past 24 hours</option><option value="7">Past week</option><option value="30">Past month</option></select></label>
-          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newest first</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
+          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newly found</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
           <label class="toggle-filter"><input id="remote" type="checkbox"><span class="toggle" aria-hidden="true"></span><span>Remote</span></label>
         </div>
       </div>
@@ -78,7 +78,7 @@
       <div class="results-head" id="results">
         <div>
           <p id="result-count" aria-live="polite">Loading opportunities…</p>
-          <p id="result-note">Direct applications from employer systems.</p>
+          <p id="result-note">Employer applications and clearly labeled market leads.</p>
         </div>
         <div class="result-actions">
           <button id="density-toggle" class="text-button" aria-pressed="false">Compact view</button>
@@ -123,6 +123,7 @@
     <div id="drawer-content"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=7.0.0" defer></script>
+  <script src="/assets/app.js?v=7.1.0" defer></script>
+  <script src="/assets/live.js?v=7.1.0" defer></script>
 </body>
 </html>
