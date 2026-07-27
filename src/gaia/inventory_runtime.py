@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import UTC, datetime
 
 import httpx
 
-from .collectors import Collector, CollectorResult
+from .collectors import Collector
 from .db import Database
 from .discovery import collectors_from_registry, load_universe_seed_postings, registry_collectors
 from .inventory import ClaimedTarget, InventoryStore, InventoryWorker as BaseInventoryWorker
@@ -304,13 +303,23 @@ class InventoryWorker(BaseInventoryWorker):
             and result.mode in {"board", "board-search"}
         )
         if valid:
-            save_catalog(
-                self.database,
-                [collector],
-                validated=True,
-                origin="validated-candidate-probe",
-            )
-            self.database.apply_result(result, rebuild=False)
+            try:
+                self.database.apply_result(result, rebuild=False)
+                save_catalog(
+                    self.database,
+                    [collector],
+                    validated=True,
+                    origin="validated-candidate-probe",
+                )
+            except Exception as exc:
+                LOGGER.exception("candidate persistence failed for %s", target.source)
+                self.store.finish_candidate(
+                    target,
+                    promoted=False,
+                    status="broken",
+                    error=repr(exc),
+                )
+                return False
             self.store.finish_candidate(
                 target,
                 promoted=True,
