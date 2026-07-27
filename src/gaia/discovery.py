@@ -24,21 +24,24 @@ from .collectors import (
 from .config import load_sources
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
 from .models import Posting
+from .quality import is_actionable_application_url
 
 MARKDOWN_LINK_RE = re.compile(r"\[.*?\]\((https?://[^)]+)\)")
 HTML_LINK_RE = re.compile(r'href=["\'](https?://[^"\']+)["\']', re.I)
 LOCALE_RE = re.compile(r"^[a-z]{2}(?:-[a-z]{2})?$", re.I)
 IMAGE_RE = re.compile(r"\.(?:png|jpe?g|gif|svg|webp)(?:\?|$)", re.I)
 
-BLOCKED_APPLICATION_HOSTS = {
-    "github.com",
-    "www.github.com",
-    "simplify.jobs",
-    "www.simplify.jobs",
-    "speedyapply.com",
-    "www.speedyapply.com",
-    "discord.gg",
-    "www.linkedin.com",
+UNTRUSTED_VERIFICATION_HOSTS = {
+    "jobright.ai",
+    "www.jobright.ai",
+    "workopia.io",
+    "www.workopia.io",
+    "indeed.com",
+    "www.indeed.com",
+    "glassdoor.com",
+    "www.glassdoor.com",
+    "ziprecruiter.com",
+    "www.ziprecruiter.com",
 }
 KNOWN_ATS_FRAGMENTS = (
     "greenhouse.io",
@@ -138,7 +141,7 @@ def _application_score(url: str) -> int:
     path = parts.path.lower()
     if not parts.scheme.startswith("http") or not host or IMAGE_RE.search(path):
         return -10_000
-    if host in BLOCKED_APPLICATION_HOSTS:
+    if not is_actionable_application_url(url):
         return -9_000
     score = 0
     if any(fragment in host for fragment in KNOWN_ATS_FRAGMENTS):
@@ -421,6 +424,10 @@ def collectors_from_registry(
         scope = "historical" if posting.source_mode == "universe-seed" else "current"
         if token := _greenhouse_token(posting.apply_url):
             _register(greenhouse, token, posting.company, scope)
+        elif parse_qs(parts.query).get("gh_jid"):
+            inferred_board = re.sub(r"[^a-z0-9]", "", posting.company.lower())
+            if inferred_board:
+                _register(greenhouse, inferred_board, posting.company, scope)
         elif host == "jobs.lever.co" and segments:
             _register(lever, segments[0], posting.company, scope)
         elif host == "jobs.ashbyhq.com" and segments:
@@ -465,6 +472,7 @@ def collectors_from_registry(
                     company,
                     name=f"schema:{host}:{company}{suffix}",
                     leads=batch,
+                    trusted=host not in UNTRUSTED_VERIFICATION_HOSTS,
                 )
             )
         if deep:

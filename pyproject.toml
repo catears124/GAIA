@@ -35,6 +35,9 @@ artifacts = [
   "src/gaia/default_sources.yaml",
 ]
 
+[tool.vercel.scripts]
+build = "python -c \"from app import app; assert app.title == 'GAIA'\""
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"

@@ -8,7 +8,7 @@ import weakref
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
@@ -20,12 +20,14 @@ from .models import CollectorResult, Posting
 from .page_verification import page_is_closed, posting_from_unstructured_page
 
 TECH_CATEGORIES = {"software", "ml-ai", "data", "security", "hardware", "quant", "product"}
-WORKDAY_TERMS = ("intern", "co-op")
+WORKDAY_TERMS = ("2027 intern", "2027 co-op")
 WORKDAY_TERM_ALIASES = {
-    "intern": "intern",
-    "internship": "intern",
-    "co-op": "co-op",
-    "coop": "co-op",
+    "intern": "2027 intern",
+    "internship": "2027 intern",
+    "2027 intern": "2027 intern",
+    "co-op": "2027 co-op",
+    "coop": "2027 co-op",
+    "2027 co-op": "2027 co-op",
 }
 JOB_PATH_RE = re.compile(
     r"(?:^|/)(?:job|jobs|career|careers|position|positions|opening|openings|requisition)(?:/|$)",
@@ -72,8 +74,8 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
         except (TypeError, ValueError, OverflowError):
             return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
 
 
 async def _workday_request(
@@ -132,15 +134,15 @@ async def _workday_request(
 
 def _workday_relative(raw: str) -> tuple[datetime | None, str]:
     if re.search(r"\bToday\b", raw, re.I):
-        return datetime.now(timezone.utc), "day"
+        return datetime.now(UTC), "day"
     if match := re.search(r"(\d+)\+?\s+Day", raw, re.I):
-        return datetime.now(timezone.utc) - timedelta(days=int(match.group(1))), "day"
+        return datetime.now(UTC) - timedelta(days=int(match.group(1))), "day"
     if ISO_DATE_RE.match(raw):
         try:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc), "timestamp"
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC), "timestamp"
         except ValueError:
             pass
     return None, "unknown"
@@ -173,7 +175,7 @@ class WorkdaySearchCollector(Collector):
         if not self.terms:
             self.terms = WORKDAY_TERMS
         self.name = f"workday:{tenant.casefold()}:{site.casefold()}"
-        self.max_per_term = max(20, int(os.getenv("GAIA_WORKDAY_MAX_PER_TERM", "4000")))
+        self.max_per_term = max(20, int(os.getenv("GAIA_WORKDAY_MAX_PER_TERM", "400")))
         self.detail_budget = max(0, int(os.getenv("GAIA_WORKDAY_DETAIL_BUDGET", "0")))
 
     @property

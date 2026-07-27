@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -40,7 +41,7 @@ async def discover_github_market(
     per_query = max(1, min(20, int(config.get("repos_per_query", 10))))
     max_repos = max(1, int(config.get("max_repositories", 30)))
     cutoff_days = max(7, int(config.get("pushed_within_days", 180)))
-    cutoff = datetime.now(timezone.utc) - timedelta(days=cutoff_days)
+    cutoff = datetime.now(UTC) - timedelta(days=cutoff_days)
     headers = _github_headers()
 
     repositories: dict[str, dict[str, Any]] = {}
@@ -113,10 +114,15 @@ async def discover_github_market(
         full_name = str(repository["full_name"])
         source = f"market-index:github:{full_name}"
         try:
+            branch = quote(str(repository.get("default_branch") or "main"), safe="")
             response = await client.get(
-                f"https://api.github.com/repos/{full_name}/readme",
-                headers={**headers, "Accept": "application/vnd.github.raw+json"},
+                f"https://raw.githubusercontent.com/{full_name}/{branch}/README.md"
             )
+            if response.status_code == 404:
+                response = await client.get(
+                    f"https://api.github.com/repos/{full_name}/readme",
+                    headers={**headers, "Accept": "application/vnd.github.raw+json"},
+                )
             response.raise_for_status()
             # Dynamically found repositories are discovery surfaces, not trusted year labels.
             # Only explicit 2027 evidence in each row can enter the default target feed.

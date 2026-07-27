@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from .collectors import Collector
 from .market_collectors import SitemapDomainCollector
 from .models import Posting
-from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
+from .provider_collectors import (
+    ICIMSCollector,
+    JobviteCollector,
+    OracleCloudCollector,
+    RecruiteeCollector,
+    SmartRecruitersCollector,
+    SuccessFactorsCollector,
+    WorkableCollector,
+)
 from .quality import canonical_company
 
 PRIOR_YEAR_BLOCKED_HOSTS = {
@@ -78,6 +86,10 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
     smartrecruiters: dict[str, tuple[str, str]] = {}
     recruitee: dict[str, tuple[str, str]] = {}
     workable: dict[str, tuple[str, str]] = {}
+    jobvite: dict[str, tuple[str, str]] = {}
+    icims: dict[str, tuple[str, str]] = {}
+    oracle: dict[tuple[str, str], tuple[str, str]] = {}
+    successfactors: dict[tuple[str, str], tuple[str, str]] = {}
     prior_year_domains: dict[str, Counter[str]] = {}
     discover_prior_year_domains = os.getenv("GAIA_PRIOR_YEAR_DOMAINS", "1") == "1"
 
@@ -90,6 +102,28 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
         if host == "jobs.smartrecruiters.com" and segments:
             _prefer(smartrecruiters, segments[0], posting.company, scope)
             continue
+
+        if host == "jobs.jobvite.com" and segments:
+            _prefer(jobvite, segments[0], posting.company, scope)
+            continue
+
+        if host.endswith(".icims.com") and "jobs" in segments:
+            _prefer(icims, host, posting.company, scope)
+            continue
+
+        if "oraclecloud.com" in host and "sites" in segments:
+            site_index = segments.index("sites")
+            if site_index + 1 < len(segments):
+                key = (f"{parts.scheme}://{host}", segments[site_index + 1])
+                _prefer(oracle, key, posting.company, scope)
+                continue
+
+        if "successfactors." in host:
+            company_id = (parse_qs(parts.query).get("company") or [""])[0]
+            if company_id:
+                key = (f"{parts.scheme}://{host}", company_id)
+                _prefer(successfactors, key, posting.company, scope)
+                continue
 
         if host.endswith(".recruitee.com") and host not in {
             "api.recruitee.com",
@@ -131,6 +165,22 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
         collectors.append(collector)
     for subdomain, (company, scope) in workable.items():
         collector = WorkableCollector(company, subdomain)
+        collector.scope = scope
+        collectors.append(collector)
+    for slug, (company, scope) in jobvite.items():
+        collector = JobviteCollector(company, slug)
+        collector.scope = scope
+        collectors.append(collector)
+    for host, (company, scope) in icims.items():
+        collector = ICIMSCollector(company, host)
+        collector.scope = scope
+        collectors.append(collector)
+    for (origin, site), (company, scope) in oracle.items():
+        collector = OracleCloudCollector(company, origin, site)
+        collector.scope = scope
+        collectors.append(collector)
+    for (origin, company_id), (company, scope) in successfactors.items():
+        collector = SuccessFactorsCollector(company, origin, company_id)
         collector.scope = scope
         collectors.append(collector)
     for host, companies in prior_year_domains.items():

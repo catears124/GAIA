@@ -4,6 +4,7 @@ import re
 from dataclasses import replace
 
 from .models import Posting
+from .quality import canonical_company, clean_text, normalize_locations
 
 INTERN_RE = re.compile(r"\b(intern(ship)?|co[- ]?op|industrial placement)\b", re.I)
 NEGATIVE_RE = re.compile(
@@ -19,7 +20,7 @@ SEASON_RULES = {
 }
 
 CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("quant", re.compile(r"\b(quant|trading|trader|systematic|research analyst)\b", re.I)),
+    ("quant", re.compile(r"\b(quant(?:itative)?|trading|trader|systematic|research analyst)\b", re.I)),
     (
         "ml-ai",
         re.compile(
@@ -35,7 +36,7 @@ CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
             re.I,
         ),
     ),
-    ("data", re.compile(r"\b(data scientist|data engineer|analytics|business intelligence)\b", re.I)),
+    ("data", re.compile(r"\b(data scientist|data engineer|data analyst|analytics|business intelligence)\b", re.I)),
     ("security", re.compile(r"\b(security|cyber|penetration|vulnerability)\b", re.I)),
     ("hardware", re.compile(r"\b(hardware|silicon|firmware|embedded|electrical|fpga|asic|robotics)\b", re.I)),
     ("product", re.compile(r"\b(product manager|product management|product design|ux|ui)\b", re.I)),
@@ -43,26 +44,36 @@ CATEGORY_RULES: list[tuple[str, re.Pattern[str]]] = [
 
 
 def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting:
-    title = posting.title.strip()
+    title = clean_text(posting.title)
     title_is_intern = bool(INTERN_RE.search(title))
     type_is_intern = bool(INTERN_RE.search(posting.employment_type or ""))
     excluded = bool(NEGATIVE_RE.search(title)) and not title_is_intern
 
     title_years = {int(value) for value in YEAR_RE.findall(title)}
-    season = next((name for name, pattern in SEASON_RULES.items() if pattern.search(title)), None)
-    year = 2027 if 2027 in title_years else (
-        next(iter(title_years)) if len(title_years) == 1 else None
+    employer_description = (
+        clean_text(posting.description)
+        if posting.source_mode in {"direct", "verification"}
+        else ""
+    )
+    description_years = {int(value) for value in YEAR_RE.findall(employer_description)}
+    evidence_years = title_years or description_years
+    season_text = title if title_years or not employer_description else f"{title} {employer_description}"
+    season = next((name for name, pattern in SEASON_RULES.items() if pattern.search(season_text)), None)
+    year = 2027 if 2027 in evidence_years else (
+        next(iter(evidence_years)) if len(evidence_years) == 1 else None
     )
 
     if excluded or not (title_is_intern or type_is_intern):
         target_match = "not_internship"
-    elif SUMMER_2027_RE.search(title):
+    elif SUMMER_2027_RE.search(title) or (
+        not title_years and SUMMER_2027_RE.search(employer_description)
+    ):
         target_match = "exact"
-    elif title_years and 2027 not in title_years:
+    elif evidence_years and 2027 not in evidence_years:
         target_match = "wrong_year"
-    elif 2027 in title_years and season and season != "summer":
+    elif 2027 in evidence_years and season and season != "summer":
         target_match = "wrong_season"
-    elif title_years == {2027} and season is None:
+    elif evidence_years == {2027} and season is None:
         target_match = "year_confirmed"
     elif source_confirms_2027 and not title_years and season == "summer":
         # Registry provenance can fill an omitted year, never override a stated one.
@@ -72,14 +83,22 @@ def classify(posting: Posting, *, source_confirms_2027: bool = False) -> Posting
         target_match = "unknown"
 
     category = "other"
-    classification_text = f"{title} {posting.employment_type}"
+    primary_classification_text = f"{title} {posting.employment_type}"
     for name, pattern in CATEGORY_RULES:
-        if pattern.search(classification_text):
+        if pattern.search(primary_classification_text):
             category = name
             break
+    if category == "other" and employer_description:
+        for name, pattern in CATEGORY_RULES:
+            if pattern.search(employer_description):
+                category = name
+                break
 
     return replace(
         posting,
+        company=canonical_company(posting.company),
+        title=title,
+        locations=normalize_locations(posting.locations),
         category=category,
         season=season,
         year=year,

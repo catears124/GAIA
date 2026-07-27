@@ -5,7 +5,10 @@ import asyncio
 import httpx
 import pytest
 
-from gaia.market_collectors import WorkdaySearchCollector
+from gaia.collectors import SchemaPageCollector
+from gaia.market_collectors import SitemapDomainCollector, WorkdaySearchCollector
+from gaia.models import Posting
+from gaia.service import _refresh_catalog_collector
 
 
 def test_workday_sanitizes_persisted_broad_terms_and_source_case():
@@ -17,8 +20,40 @@ def test_workday_sanitizes_persisted_broad_terms_and_source_case():
         terms=("internship", "student", "university", "campus", "summer", "coop"),
     )
 
-    assert collector.terms == ("intern", "co-op")
+    assert collector.terms == ("2027 intern", "2027 co-op")
     assert collector.name == "workday:generac:external"
+
+
+def test_refresh_rechecks_productive_verification_sources():
+    lead = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://careers.example.com/job",
+        source="registry:test",
+        source_id="job",
+        source_mode="registry",
+    )
+    collector = SchemaPageCollector("Example", [lead.apply_url], leads=[lead])
+
+    assert _refresh_catalog_collector(
+        collector,
+        workday_names=set(),
+        domain_names=set(),
+        verification_names={collector.name},
+    )
+    assert not _refresh_catalog_collector(
+        collector,
+        workday_names=set(),
+        domain_names=set(),
+        verification_names=set(),
+    )
+    domain = SitemapDomainCollector("Example", "careers.example.com", [lead.apply_url])
+    assert _refresh_catalog_collector(
+        domain,
+        workday_names=set(),
+        domain_names={domain.name},
+        verification_names=set(),
+    )
 
 
 @pytest.mark.asyncio

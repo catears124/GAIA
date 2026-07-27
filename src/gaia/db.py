@@ -7,12 +7,18 @@ import sqlite3
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from .grouping import family_key, normalize_title
-from .models import CollectorResult, Posting, canonical_url
+from .models import CollectorResult, canonical_url
+from .quality import (
+    TECH_CATEGORIES,
+    canonical_company,
+    is_actionable_application_url,
+    normalize_locations,
+)
 
 TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 TARGET_RANK = {
@@ -27,6 +33,7 @@ TARGET_RANK = {
 SOURCE_RANK = {
     "direct": 0,
     "verification": 1,
+    "verification-lead": 2,
     "external-index": 2,
     "registry": 3,
     "universe-seed": 4,
@@ -39,7 +46,7 @@ UUID_RE = re.compile(
 
 
 def iso(value: datetime | None) -> str | None:
-    return value.astimezone(timezone.utc).isoformat() if value else None
+    return value.astimezone(UTC).isoformat() if value else None
 
 
 def application_identity(url: str, source: str, source_id: str) -> str:
@@ -66,6 +73,9 @@ def application_identity(url: str, source: str, source_id: str) -> str:
     if "smartrecruiters.com" in host:
         if match := re.search(r"/(\d{8,})(?:/|$)", path):
             return f"smartrecruiters:{match.group(1)}"
+    if host.endswith("amazon.jobs"):
+        if match := re.search(r"/jobs/(\d+)(?:/|$)", path):
+            return f"amazon:{match.group(1)}"
     if "myworkdayjobs.com" in host:
         if match := re.search(r"_([A-Za-z]{0,6}\d[A-Za-z0-9-]*)$", path):
             return f"workday:{host}:{match.group(1).lower()}"
@@ -74,6 +84,23 @@ def application_identity(url: str, source: str, source_id: str) -> str:
         path = path[: -len("/apply")]
     normalized = urlunsplit((parts.scheme.lower(), host, path or "/", parts.query, ""))
     return normalized or f"{source}:{source_id}"
+
+def coverage_role_signature(company: str, title: str) -> str:
+    """Match benchmark roles across employer URL and punctuation changes."""
+    aliases = {
+        "engineering": "engineer",
+        "internship": "intern",
+        "internships": "intern",
+    }
+    ignored = {"or", "summer", "2027"}
+    tokens = [
+        aliases.get(token, token)
+        for token in re.findall(r"[a-z0-9+#]+", title.lower())
+        if token not in ignored
+    ]
+    return f"{canonical_company(company).casefold()}:{' '.join(tokens)}"
+
+
 
 
 def _source_sort(row: sqlite3.Row) -> tuple[int, bool, int, str]:
@@ -141,7 +168,11 @@ class Database:
                     category TEXT NOT NULL,
                     season TEXT,
                     year INTEGER,
-                    target_match TEXT NOT NULL
+                    target_match TEXT NOT NULL,
+                    link_checked_at TEXT,
+                    link_http_status INTEGER,
+                    link_final_url TEXT,
+                    link_status TEXT NOT NULL DEFAULT 'unchecked'
                 );
                 CREATE INDEX IF NOT EXISTS idx_postings_family ON postings(family_key, active);
                 CREATE INDEX IF NOT EXISTS idx_postings_target ON postings(target_match, active);
@@ -170,6 +201,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_families_target
                     ON families(target_match, latest_posted_at);
                 CREATE INDEX IF NOT EXISTS idx_families_company ON families(company);
+                CREATE INDEX IF NOT EXISTS idx_families_feed
+                    ON families(target_match, category, direct_openings, latest_posted_at DESC);
 
                 CREATE TABLE IF NOT EXISTS source_health (
                     source TEXT PRIMARY KEY,
@@ -184,7 +217,21 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'unknown',
                     scope TEXT NOT NULL DEFAULT 'current',
                     note TEXT,
-                    last_run_id INTEGER
+                    last_run_id INTEGER,
+                    lifecycle TEXT NOT NULL DEFAULT 'candidate',
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS benchmark_cases (
+                    version TEXT NOT NULL,
+                    posting_key TEXT NOT NULL,
+                    company TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    employment_type TEXT NOT NULL,
+                    source_mode TEXT NOT NULL,
+                    expected_category TEXT NOT NULL,
+                    expected_target_match TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    PRIMARY KEY(version, posting_key)
                 );
                 CREATE TABLE IF NOT EXISTS sync_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,18 +253,118 @@ class Database:
                 "scope": "TEXT NOT NULL DEFAULT 'current'",
                 "note": "TEXT",
                 "last_run_id": "INTEGER",
+                "lifecycle": "TEXT NOT NULL DEFAULT 'candidate'",
+                "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, declaration in additions.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE source_health ADD COLUMN {name} {declaration}")
+            posting_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(postings)").fetchall()
+            }
+            posting_additions = {
+                "link_checked_at": "TEXT",
+                "link_http_status": "INTEGER",
+                "link_final_url": "TEXT",
+                "link_status": "TEXT NOT NULL DEFAULT 'unchecked'",
+            }
+            for name, declaration in posting_additions.items():
+                if name not in posting_columns:
+                    db.execute(f"ALTER TABLE postings ADD COLUMN {name} {declaration}")
+            db.execute(
+                """
+                UPDATE source_health
+                SET lifecycle='productive', consecutive_failures=0
+                WHERE lifecycle='candidate'
+                  AND target_rows>0
+                  AND status NOT IN ('broken','blocked')
+                """
+            )
+            db.execute(
+                """
+                UPDATE postings
+                SET description=''
+                WHERE description!=''
+                  AND target_match NOT IN ('exact','year_confirmed','source_confirmed')
+                """
+            )
 
     def start_run(self) -> int:
-        now = iso(datetime.now(timezone.utc))
+        now = datetime.now(UTC)
+        stale_after = max(300, int(os.getenv("GAIA_SYNC_LOCK_TIMEOUT", "7200")))
+        cutoff = iso(now - timedelta(seconds=stale_after))
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """
+                UPDATE sync_runs
+                SET finished_at=?, status='cancelled'
+                WHERE status='running' AND started_at<?
+                """,
+                (iso(now), cutoff),
+            )
+            running = db.execute(
+                "SELECT id FROM sync_runs WHERE status='running' LIMIT 1"
+            ).fetchone()
+            if running is not None:
+                raise RuntimeError(f"sync run {int(running['id'])} is already running")
             cursor = db.execute(
-                "INSERT INTO sync_runs(started_at, status) VALUES (?, 'running')", (now,)
+                "INSERT INTO sync_runs(started_at, status) VALUES (?, 'running')",
+                (iso(now),),
             )
             return int(cursor.lastrowid)
+
+    def seed_benchmark_corpus(self, *, version: str = "v1", limit: int = 500) -> int:
+        """Freeze a deterministic, production-derived classification regression corpus."""
+        if limit <= 0:
+            return 0
+        captured_at = iso(datetime.now(UTC))
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT posting_key, company, title, employment_type, source_mode,
+                       category, target_match
+                FROM postings
+                WHERE active=1
+                ORDER BY
+                    CASE source_mode WHEN 'direct' THEN 0 WHEN 'registry' THEN 1 ELSE 2 END,
+                    target_match,
+                    category,
+                    company COLLATE NOCASE,
+                    title COLLATE NOCASE,
+                    posting_key
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            db.executemany(
+                """
+                INSERT OR IGNORE INTO benchmark_cases(
+                    version, posting_key, company, title, employment_type, source_mode,
+                    expected_category, expected_target_match, captured_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        version,
+                        row["posting_key"],
+                        row["company"],
+                        row["title"],
+                        row["employment_type"],
+                        row["source_mode"],
+                        row["category"],
+                        row["target_match"],
+                        captured_at,
+                    )
+                    for row in rows
+                ],
+            )
+            return int(
+                db.execute(
+                    "SELECT COUNT(*) FROM benchmark_cases WHERE version=?", (version,)
+                ).fetchone()[0]
+            )
 
     def finish_run(self, run_id: int, *, sources: int, postings: int, failed: int) -> None:
         status = "ok" if failed == 0 else "partial"
@@ -225,7 +372,7 @@ class Database:
             db.execute(
                 "UPDATE sync_runs SET finished_at=?, status=?, sources=?, postings=?, failed=? "
                 "WHERE id=?",
-                (iso(datetime.now(timezone.utc)), status, sources, postings, failed, run_id),
+                (iso(datetime.now(UTC)), status, sources, postings, failed, run_id),
             )
 
     def apply_result(
@@ -235,8 +382,17 @@ class Database:
         rebuild: bool = True,
         run_id: int | None = None,
     ) -> None:
-        observed = iso(datetime.now(timezone.utc))
-        current_keys = {posting.posting_key for posting in result.postings}
+        observed = iso(datetime.now(UTC))
+        postings = [
+            posting
+            for posting in result.postings
+            if posting.company.strip()
+            and posting.title.strip()
+            and posting.canonical_apply_url.strip()
+        ]
+        for posting in postings:
+            posting.locations = normalize_locations(posting.locations)
+        current_keys = {posting.posting_key for posting in postings}
         with self.connect() as db:
             old_keys = {
                 str(row["posting_key"])
@@ -245,7 +401,27 @@ class Database:
                     (result.source,),
                 )
             }
-            for posting in result.postings:
+            previous_target_identities: set[str] = set()
+            if result.complete and result.mode in {"board", "board-search"}:
+                previous_target_identities = {
+                    application_identity(
+                        str(row["canonical_apply_url"]),
+                        str(row["source"]),
+                        str(row["source_id"]),
+                    )
+                    for row in db.execute(
+                        """
+                        SELECT canonical_apply_url, source, source_id
+                        FROM postings
+                        WHERE source=? AND target_match IN ('exact','year_confirmed','source_confirmed')
+                        """,
+                        (result.source,),
+                    )
+                }
+            for posting in postings:
+                stored_description = (
+                    posting.description if posting.target_match in TARGET_MATCHES else ""
+                )
                 db.execute(
                     """
                     INSERT INTO postings(
@@ -294,7 +470,7 @@ class Database:
                         posting.source,
                         posting.source_id,
                         posting.source_mode,
-                        posting.description,
+                        stored_description,
                         posting.employment_type,
                         iso(posting.posted_at),
                         iso(posting.updated_at),
@@ -319,6 +495,77 @@ class Database:
                         tuple(sorted(missing)),
                     )
 
+                current_target_identities = {
+                    application_identity(
+                        posting.canonical_apply_url,
+                        posting.source,
+                        posting.source_id,
+                    )
+                    for posting in postings
+                    if posting.target_match in TARGET_MATCHES
+                }
+                if result.source.startswith("greenhouse:") and result.status in {"ok", "empty"}:
+                    board = result.source.partition(":")[2].lower()
+                    provider_stale_keys = [
+                        str(row["posting_key"])
+                        for row in db.execute(
+                            """
+                            SELECT posting_key, company, canonical_apply_url, source, source_id
+                            FROM postings
+                            WHERE active=1
+                              AND source_mode IN ('registry','external-index','verification-lead')
+                            """
+                        )
+                        if re.sub(r"[^a-z0-9]", "", str(row["company"]).lower()) == board
+                        and application_identity(
+                            str(row["canonical_apply_url"]),
+                            str(row["source"]),
+                            str(row["source_id"]),
+                        )
+                        not in current_target_identities
+                    ]
+                    if provider_stale_keys:
+                        placeholders = ",".join("?" for _ in provider_stale_keys)
+                        db.execute(
+                            f"UPDATE postings SET active=0 WHERE posting_key IN ({placeholders})",
+                            tuple(provider_stale_keys),
+                        )
+
+                stale_identities = previous_target_identities - current_target_identities
+                if stale_identities:
+                    stale_keys = [
+                        str(row["posting_key"])
+                        for row in db.execute(
+                            """
+                            SELECT posting_key, canonical_apply_url, source, source_id
+                            FROM postings
+                            WHERE active=1
+                              AND source_mode IN (
+                                  'registry',
+                                  'external-index',
+                                  'verification-lead'
+                              )
+                              AND target_match IN (
+                                  'exact',
+                                  'year_confirmed',
+                                  'source_confirmed'
+                              )
+                            """
+                        )
+                        if application_identity(
+                            str(row["canonical_apply_url"]),
+                            str(row["source"]),
+                            str(row["source_id"]),
+                        )
+                        in stale_identities
+                    ]
+                    if stale_keys:
+                        placeholders = ",".join("?" for _ in stale_keys)
+                        db.execute(
+                            f"UPDATE postings SET active=0 WHERE posting_key IN ({placeholders})",
+                            tuple(stale_keys),
+                        )
+
             if result.closed_urls:
                 closed = sorted({canonical_url(url) for url in result.closed_urls})
                 placeholders = ",".join("?" for _ in closed)
@@ -335,12 +582,18 @@ class Database:
                 if result.error is None and result.status not in {"blocked", "broken"}
                 else None
             )
+            productive = any(
+                posting.source_mode in {"direct", "verification"}
+                and posting.target_match in TARGET_MATCHES
+                for posting in postings
+            )
             db.execute(
                 """
                 INSERT INTO source_health(
                     source, mode, complete, rows_scanned, expected_rows, target_rows,
-                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id,
+                    lifecycle, consecutive_failures
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
                 ON CONFLICT(source) DO UPDATE SET
                     mode=excluded.mode,
                     complete=excluded.complete,
@@ -351,9 +604,15 @@ class Database:
                     last_success_at=COALESCE(excluded.last_success_at, source_health.last_success_at),
                     last_error=excluded.last_error,
                     status=excluded.status,
-                    scope=excluded.scope,
+                    scope=CASE WHEN excluded.lifecycle='productive' THEN 'current' ELSE excluded.scope END,
                     note=excluded.note,
-                    last_run_id=excluded.last_run_id
+                    last_run_id=excluded.last_run_id,
+                    lifecycle=CASE
+                        WHEN excluded.lifecycle='productive' THEN 'productive'
+                        WHEN source_health.lifecycle='quarantined' THEN 'candidate'
+                        ELSE source_health.lifecycle
+                    END,
+                    consecutive_failures=0
                 """,
                 (
                     result.source,
@@ -369,20 +628,23 @@ class Database:
                     result.scope,
                     result.note,
                     run_id,
+                    "productive" if productive else "candidate",
                 ),
             )
         if rebuild:
             self.rebuild_families()
 
     def record_failure(self, result: CollectorResult, *, run_id: int | None = None) -> None:
-        now = iso(datetime.now(timezone.utc))
+        now = iso(datetime.now(UTC))
+        quarantine_after = max(1, int(os.getenv("GAIA_SOURCE_QUARANTINE_FAILURES", "3")))
         with self.connect() as db:
             db.execute(
                 """
                 INSERT INTO source_health(
                     source, mode, complete, rows_scanned, expected_rows, target_rows,
-                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id
-                ) VALUES (?,?,?,?,?,0,?,NULL,?,?,?,?,?)
+                    last_attempt_at, last_success_at, last_error, status, scope, note, last_run_id,
+                    lifecycle, consecutive_failures
+                ) VALUES (?,?,?,?,?,0,?,NULL,?,?,?,?,?,'candidate',1)
                 ON CONFLICT(source) DO UPDATE SET
                     mode=excluded.mode,
                     complete=0,
@@ -391,9 +653,17 @@ class Database:
                     last_attempt_at=excluded.last_attempt_at,
                     last_error=excluded.last_error,
                     status=excluded.status,
-                    scope=excluded.scope,
+                    scope=CASE
+                        WHEN source_health.consecutive_failures + 1 >= ? THEN 'historical'
+                        ELSE excluded.scope
+                    END,
                     note=excluded.note,
-                    last_run_id=excluded.last_run_id
+                    last_run_id=excluded.last_run_id,
+                    lifecycle=CASE
+                        WHEN source_health.consecutive_failures + 1 >= ? THEN 'quarantined'
+                        ELSE source_health.lifecycle
+                    END,
+                    consecutive_failures=source_health.consecutive_failures + 1
                 """,
                 (
                     result.source,
@@ -407,12 +677,29 @@ class Database:
                     result.scope,
                     result.note,
                     run_id,
+                    quarantine_after,
+                    quarantine_after,
                 ),
             )
 
     def rebuild_families(self) -> None:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM postings WHERE active=1").fetchall()
+            rows = db.execute(
+                "SELECT * FROM postings WHERE active=1 AND target_match!='not_internship'"
+            ).fetchall()
+            blocked_keys = [
+                str(row["posting_key"])
+                for row in rows
+                if not is_actionable_application_url(str(row["canonical_apply_url"]))
+            ]
+            if blocked_keys:
+                placeholders = ",".join("?" for _ in blocked_keys)
+                db.execute(
+                    f"UPDATE postings SET active=0 WHERE posting_key IN ({placeholders})",
+                    tuple(blocked_keys),
+                )
+                blocked = set(blocked_keys)
+                rows = [row for row in rows if str(row["posting_key"]) not in blocked]
             db.execute("DELETE FROM families")
 
             variants_by_application: dict[str, list[sqlite3.Row]] = {}
@@ -426,6 +713,8 @@ class Database:
 
             applications_by_family: dict[str, list[dict[str, object]]] = {}
             for identity, variants in variants_by_application.items():
+                if all(str(row["source_mode"]) == "verification-lead" for row in variants):
+                    continue
                 selected = min(variants, key=_source_sort)
                 target_anchor = max(variants, key=_target_sort)
                 canonical_family = str(target_anchor["family_key"])
@@ -444,7 +733,7 @@ class Database:
                 ]
                 employer_dates = sorted(str(row["posted_at"]) for row in employer_date_rows)
                 independently_recovered = any(
-                    str(row["source_mode"]) in INDEPENDENT_MODES for row in variants
+                    str(row["source_mode"]) == "direct" for row in variants
                 )
                 application = {
                     "identity": identity,
@@ -465,6 +754,12 @@ class Database:
                         "source": selected["source"],
                         "source_mode": selected["source_mode"],
                         "posted_at": employer_dates[0] if employer_dates else None,
+                        "first_detected_at": min(
+                            str(row["first_seen_at"]) for row in variants if row["first_seen_at"]
+                        ),
+                        "last_verified_at": max(
+                            str(row["last_seen_at"]) for row in variants if row["last_seen_at"]
+                        ),
                         "source_variants": sorted(
                             {f"{row['source_mode']}:{row['source']}" for row in variants}
                         ),
@@ -472,49 +767,46 @@ class Database:
                 }
                 applications_by_family.setdefault(canonical_family, []).append(application)
 
-            for key, applications in applications_by_family.items():
-                selected_rows = [app["selected"] for app in applications]
-                preferred = min(selected_rows, key=_source_sort)
-                anchors = [app["target_anchor"] for app in applications]
-                target_anchor = max(anchors, key=_target_sort)
-                target = str(target_anchor["target_match"])
-                locations = sorted(
-                    {
-                        location
+            def family_rows() -> Iterable[tuple[object, ...]]:
+                for key, applications in applications_by_family.items():
+                    selected_rows = [app["selected"] for app in applications]
+                    preferred = min(selected_rows, key=_source_sort)
+                    anchors = [app["target_anchor"] for app in applications]
+                    target_anchor = max(anchors, key=_target_sort)
+                    target = str(target_anchor["target_match"])
+                    locations = sorted(
+                        {
+                            location
+                            for application in applications
+                            for location in application["locations"]
+                        }
+                    )
+                    openings = [application["opening"] for application in applications]
+                    openings.sort(key=lambda item: (item["location"], item["apply_url"]))
+                    employer_dates = sorted(
+                        date
                         for application in applications
-                        for location in application["locations"]
-                    }
-                )
-                openings = [application["opening"] for application in applications]
-                openings.sort(key=lambda item: (item["location"], item["apply_url"]))
-                employer_dates = sorted(
-                    date
-                    for application in applications
-                    for date in application["employer_dates"]
-                )
-                precisions = [
-                    precision
-                    for application in applications
-                    for precision in application["employer_precisions"]
-                ]
-                precision = (
-                    "timestamp"
-                    if "timestamp" in precisions
-                    else ("day" if "day" in precisions else "unknown")
-                )
-                variant_rows = [
-                    row for application in applications for row in application["variants"]
-                ]
-                first_seen = min(str(row["first_seen_at"]) for row in variant_rows)
-                last_seen = max(str(row["last_seen_at"]) for row in variant_rows)
-                independent_openings = sum(
-                    bool(app["independently_recovered"]) for app in applications
-                )
-                backstop_openings = len(applications) - independent_openings
-
-                db.execute(
-                    "INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
+                        for date in application["employer_dates"]
+                    )
+                    precisions = [
+                        precision
+                        for application in applications
+                        for precision in application["employer_precisions"]
+                    ]
+                    precision = (
+                        "timestamp"
+                        if "timestamp" in precisions
+                        else ("day" if "day" in precisions else "unknown")
+                    )
+                    variant_rows = [
+                        row for application in applications for row in application["variants"]
+                    ]
+                    first_seen = min(str(row["first_seen_at"]) for row in variant_rows)
+                    last_seen = max(str(row["last_seen_at"]) for row in variant_rows)
+                    independent_openings = sum(
+                        bool(app["independently_recovered"]) for app in applications
+                    )
+                    yield (
                         key,
                         preferred["company"],
                         preferred["title"],
@@ -532,9 +824,13 @@ class Database:
                         first_seen,
                         last_seen,
                         independent_openings,
-                        backstop_openings,
-                    ),
-                )
+                        len(applications) - independent_openings,
+                    )
+
+            db.executemany(
+                "INSERT INTO families VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                family_rows(),
+            )
 
     def list_families(
         self,
@@ -578,6 +874,7 @@ class Database:
 
     def coverage(self) -> dict[str, object]:
         with self.connect() as db:
+            tech_placeholders = ",".join("?" for _ in TECH_CATEGORIES)
             latest_run = db.execute(
                 "SELECT MAX(id) FROM sync_runs WHERE finished_at IS NOT NULL"
             ).fetchone()[0]
@@ -593,9 +890,17 @@ class Database:
                         (latest_run,),
                     )
                 ]
-            family_counts = dict(
+            benchmark_size = int(
                 db.execute(
                     """
+                    SELECT COUNT(*) FROM benchmark_cases
+                    WHERE version=(SELECT MAX(version) FROM benchmark_cases)
+                    """
+                ).fetchone()[0]
+            )
+            family_counts = dict(
+                db.execute(
+                    f"""
                     SELECT
                         COUNT(*) AS families,
                         COUNT(DISTINCT company) AS companies,
@@ -604,16 +909,21 @@ class Database:
                             AS backstop_only
                     FROM families
                     WHERE target_match IN ('exact','year_confirmed','source_confirmed')
-                    """
+                      AND category IN ({tech_placeholders})
+                    """,
+                    TECH_CATEGORIES,
                 ).fetchone()
             )
             posting_rows = db.execute(
-                """
-                SELECT canonical_apply_url, source, source_id, source_mode, company
+                f"""
+                SELECT canonical_apply_url, source, source_id, source_mode, company,
+                       normalized_title, posted_at
                 FROM postings
                 WHERE active=1
                   AND target_match IN ('exact','year_confirmed','source_confirmed')
-                """
+                  AND category IN ({tech_placeholders})
+                """,
+                TECH_CATEGORIES,
             ).fetchall()
 
         identities: dict[str, set[str]] = {
@@ -622,7 +932,10 @@ class Database:
             "verification": set(),
             "external-index": set(),
         }
+        identity_roles: dict[str, dict[str, set[str]]] = {mode: {} for mode in identities}
         companies_by_mode = {mode: set() for mode in identities}
+        productive_direct_sources: set[str] = set()
+        dated_direct_applications: set[str] = set()
         for row in posting_rows:
             mode = str(row["source_mode"])
             if mode not in identities:
@@ -633,14 +946,36 @@ class Database:
                 str(row["source_id"]),
             )
             identities[mode].add(identity)
+            if mode == "direct":
+                productive_direct_sources.add(str(row["source"]))
+                if row["posted_at"]:
+                    dated_direct_applications.add(identity)
+            role = coverage_role_signature(str(row["company"]), str(row["normalized_title"]))
+            identity_roles[mode].setdefault(identity, set()).add(role)
             companies_by_mode[mode].add(str(row["company"]))
 
-        independently_recovered = identities["direct"] | identities["verification"]
         registry_floor = identities["registry"]
-        direct_matches = registry_floor & identities["direct"]
-        independent_matches = registry_floor & independently_recovered
-        registry_only = registry_floor - independently_recovered
-        direct_only = identities["direct"] - registry_floor
+        direct_roles = set().union(*identity_roles["direct"].values())
+        independent_roles = direct_roles | set().union(*identity_roles["verification"].values())
+        direct_matches = {
+            identity
+            for identity in registry_floor
+            if identity in identities["direct"]
+            or bool(identity_roles["registry"][identity] & direct_roles)
+        }
+        independent_matches = {
+            identity
+            for identity in registry_floor
+            if identity in identities["direct"] | identities["verification"]
+            or bool(identity_roles["registry"][identity] & independent_roles)
+        }
+        registry_only = registry_floor - independent_matches
+        registry_roles = set().union(*identity_roles["registry"].values())
+        direct_only = {
+            identity
+            for identity in identities["direct"]
+            if not identity_roles["direct"][identity] & registry_roles
+        }
         mode_counts = Counter(str(row["mode"]) for row in health)
         status_counts = Counter(str(row.get("status") or "unknown") for row in health)
 
@@ -711,11 +1046,18 @@ class Database:
                 "registry_floor": len(registry_floor),
                 "direct_applications": len(identities["direct"]),
                 "verified_applications": len(identities["verification"]),
+                "productive_direct_sources": len(productive_direct_sources),
+                "direct_date_coverage_percent": round(
+                    100 * len(dated_direct_applications) / len(identities["direct"]), 1
+                )
+                if identities["direct"]
+                else None,
                 "direct_matches": len(direct_matches),
                 "independent_matches": len(independent_matches),
                 "registry_only": len(registry_only),
                 "direct_only": len(direct_only),
                 "registry_recall_percent": registry_recall,
+                "benchmark_size": benchmark_size,
             },
             "contract": {
                 "run_id": latest_run,

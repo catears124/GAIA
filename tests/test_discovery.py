@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from gaia.collectors import SchemaPageCollector
+from gaia.collectors import GreenhouseCollector, SchemaPageCollector
 from gaia.discovery import (
     _choose_apply_url,
     _document_postings,
@@ -132,6 +132,35 @@ def test_custom_page_leads_are_never_silently_dropped(monkeypatch):
     assert {lead.source_id for item in verifiers for lead in item.leads} == {
         str(index) for index in range(61)
     }
+
+
+def test_third_party_job_pages_never_become_employer_verification():
+    posting = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://jobright.ai/jobs/example",
+        source="market-index:test",
+        source_id="example",
+        source_mode="external-index",
+    )
+    collectors = collectors_from_registry([posting], settings={"release_canaries": {}})
+    verifier = next(item for item in collectors if isinstance(item, SchemaPageCollector))
+    assert verifier.source_mode == "verification-lead"
+
+
+def test_custom_greenhouse_job_url_infers_employer_board():
+    posting = Posting(
+        company="Akuna Capital",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://www.akunacapital.com/careers/job/8018847/?gh_jid=8018847",
+        source="registry:test",
+        source_id="8018847",
+        source_mode="registry",
+    )
+    collectors = collectors_from_registry([posting], settings={"release_canaries": {}})
+    board = next(item for item in collectors if isinstance(item, GreenhouseCollector))
+    assert board.board == "akunacapital"
+    assert board.company == "Akuna Capital"
 
 
 def test_deep_discovery_keeps_direct_verification_and_adds_domain_enumeration():

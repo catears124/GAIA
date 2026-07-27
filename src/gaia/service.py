@@ -13,16 +13,36 @@ from .collectors import Collector, CollectorResult
 from .config import load_sources
 from .db import Database
 from .discovery import collectors_from_registry, load_universe_seed_postings, registry_collectors
+from .link_validation import validate_application_links
 from .market_discovery import discover_github_market
 from .models import Posting
 from .native_collectors import GoogleInternshipCollector
 from .provider_discovery import provider_collectors_from_postings
+from .quality import canonical_source_name
 from .source_catalog import load_catalog, merge_catalog, save_catalog
 
 LOGGER = logging.getLogger("gaia")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 ENUMERATOR_MODES = {"board", "board-search", "domain"}
+
+
+def _refresh_catalog_collector(
+    collector: Collector,
+    *,
+    workday_names: set[str],
+    verification_names: set[str],
+    domain_names: set[str],
+) -> bool:
+    if collector.scope != "current":
+        return False
+    if collector.mode == "domain":
+        return collector.name in domain_names
+    if collector.mode == "verification":
+        return collector.name in verification_names
+    if collector.mode == "board-search":
+        return collector.name in workday_names
+    return True
 
 
 @dataclass(slots=True)
@@ -33,6 +53,8 @@ class SyncSummary:
     failed: int = 0
     universe_seeds: int = 0
     discovered_feeds: int = 0
+    links_checked: int = 0
+    links_closed: int = 0
     elapsed_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
@@ -152,23 +174,27 @@ class SyncService:
                         summary.universe_seeds = len(universe_seeds)
                         self._record_results(seed_health, summary, run_id)
 
-                    market_postings: list[Posting] = []
-                    if mode == "discover":
-                        self.progress.stage = "discovering live market feeds"
-                        market_postings, market_health = await discover_github_market(
-                            client,
-                            settings,
-                        )
-                        summary.discovered_feeds = sum(
-                            result.status == "indexed" for result in market_health
-                        )
-                        self._record_results(market_health, summary, run_id)
+                    self.progress.stage = "refreshing live market feeds"
+                    market_postings, market_health = await discover_github_market(
+                        client,
+                        settings,
+                    )
+                    summary.discovered_feeds = sum(
+                        result.status == "indexed" for result in market_health
+                    )
+                    self._record_results(market_health, summary, run_id)
 
                     discovery_postings = [
                         *registry_postings,
                         *universe_seeds,
                         *market_postings,
                     ]
+                    if mode == "refresh":
+                        discovery_postings = [
+                            posting
+                            for posting in discovery_postings
+                            if posting.target_match in TARGET_MATCHES
+                        ]
                     generated_collectors = self._install_native_collectors(
                         [
                             *collectors_from_registry(
@@ -180,17 +206,107 @@ class SyncService:
                         ]
                     )
                     generated_collectors = merge_catalog(generated_collectors)
+                    known_searches: set[str] = set()
+                    productive_searches: list[str] = []
+                    productive_verifications: set[str] = set()
+                    productive_domains: set[str] = set()
+                    if mode == "refresh":
+                        with self.db.connect() as connection:
+                            search_rows = connection.execute(
+                                """
+                                SELECT h.source,
+                                       EXISTS (
+                                           SELECT 1
+                                           FROM postings AS p
+                                           WHERE p.source=h.source
+                                             AND p.active=1
+                                             AND p.source_mode='direct'
+                                             AND p.target_match IN (
+                                                 'exact','year_confirmed','source_confirmed'
+                                             )
+                                       ) AS productive
+                                FROM source_health AS h
+                                WHERE h.mode='board-search'
+                                ORDER BY COALESCE(h.last_attempt_at, '')
+                                """
+                            )
+                            for row in search_rows:
+                                name = canonical_source_name(str(row["source"]))
+                                known_searches.add(name)
+                                if bool(row["productive"]):
+                                    productive_searches.append(name)
+                            verification_rows = connection.execute(
+                                """
+                                SELECT DISTINCT h.source
+                                FROM source_health AS h
+                                JOIN postings AS p ON p.source=h.source
+                                WHERE h.mode='verification'
+                                  AND p.active=1
+                                  AND p.source_mode='verification'
+                                  AND p.target_match IN (
+                                      'exact','year_confirmed','source_confirmed'
+                                  )
+                                """
+                            )
+                            productive_verifications = {
+                                str(row["source"]) for row in verification_rows
+                            }
+                            domain_rows = connection.execute(
+                                """
+                                SELECT DISTINCT h.source
+                                FROM source_health AS h
+                                JOIN postings AS p ON p.source=h.source
+                                WHERE h.mode='domain'
+                                  AND p.active=1
+                                  AND p.source_mode='verification'
+                                  AND p.target_match IN (
+                                      'exact','year_confirmed','source_confirmed'
+                                  )
+                                """
+                            )
+                            productive_domains = {str(row["source"]) for row in domain_rows}
                     catalog_collectors = load_catalog(self.db.path)
                     if mode == "refresh":
-                        generated_collectors = [
+                        quick_collectors = [
                             collector
                             for collector in generated_collectors
-                            if collector.scope == "current" and collector.mode != "domain"
+                            if collector.scope == "current"
+                            and collector.mode not in {"domain", "board-search"}
+                        ]
+                        workday_limit = max(
+                            0, int(os.getenv("GAIA_REFRESH_WORKDAY_LIMIT", "8"))
+                        )
+                        workday_refresh_names = set(productive_searches[:workday_limit])
+                        if len(workday_refresh_names) < workday_limit:
+                            new_searches = [
+                                collector
+                                for collector in generated_collectors
+                                if collector.scope == "current"
+                                and collector.mode == "board-search"
+                                and collector.name not in known_searches
+                            ][: workday_limit - len(workday_refresh_names)]
+                            workday_refresh_names.update(
+                                collector.name for collector in new_searches
+                            )
+                        generated_collectors = [
+                            *quick_collectors,
+                            *[
+                                collector
+                                for collector in generated_collectors
+                                if collector.scope == "current"
+                                and collector.mode == "board-search"
+                                and collector.name in workday_refresh_names
+                            ],
                         ]
                         catalog_collectors = [
                             collector
                             for collector in catalog_collectors
-                            if collector.scope == "current" and collector.mode != "domain"
+                            if _refresh_catalog_collector(
+                                collector,
+                                workday_names=workday_refresh_names,
+                                domain_names=productive_domains,
+                                verification_names=productive_verifications,
+                            )
                         ]
                     direct_collectors = merge_catalog(
                         generated_collectors,
@@ -208,6 +324,17 @@ class SyncService:
                             else "refreshing current internship sources"
                         ),
                     )
+                    self.progress.stage = "validating application links"
+                    link_summary = await validate_application_links(
+                        self.db,
+                        client,
+                        limit=max(0, int(os.getenv("GAIA_LINK_CHECK_LIMIT", "500"))),
+                        concurrency=max(
+                            1, int(os.getenv("GAIA_LINK_CHECK_CONCURRENCY", "20"))
+                        ),
+                    )
+                    summary.links_checked = link_summary.checked
+                    summary.links_closed = link_summary.closed
                     self.progress.stage = "rebuilding role families"
                     self.db.rebuild_families()
             except asyncio.CancelledError:
@@ -273,8 +400,8 @@ class SyncService:
                     result.status = "empty"
                     result.note = result.note or "internship query returned zero jobs"
                 else:
-                    result.status = "empty"
-                    result.note = result.note or "current source returned zero jobs"
+                    result.status = "dormant"
+                    result.note = result.note or "source currently exposes no jobs"
         return result
 
     @staticmethod
@@ -288,19 +415,19 @@ class SyncService:
                 status = "blocked"
                 error = None
                 note = f"source denied automated access with HTTP {code}"
-            elif collector.scope == "historical" and code in {404, 410}:
+            elif code in {404, 410} and collector.mode in ENUMERATOR_MODES:
                 status = "dormant"
                 error = None
-                note = f"historical source is no longer active (HTTP {code})"
+                note = f"source is no longer active (HTTP {code})"
         return CollectorResult(
             source=collector.name,
             postings=[],
-            complete=False,
+            complete=status == "dormant",
             mode=collector.mode,
             rows_scanned=0,
             error=error,
             status=status,
-            scope=collector.scope,
+            scope="historical" if status == "dormant" else collector.scope,
             note=note,
         )
 
@@ -346,6 +473,12 @@ class SyncService:
                             LOGGER.error("collector %s failed: %s", collector.name, result.error)
                     else:
                         self.db.apply_result(result, rebuild=False, run_id=run_id)
+                        if result.status == "dormant":
+                            with self.db.connect() as connection:
+                                connection.execute(
+                                    "UPDATE source_catalog SET scope='historical' WHERE source=?",
+                                    (result.source,),
+                                )
                         LOGGER.warning("collector %s: %s", collector.name, result.note)
                     return result
                 finally:

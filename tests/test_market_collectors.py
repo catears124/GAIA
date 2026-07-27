@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from gaia.market_collectors import SitemapDomainCollector, WorkdaySearchCollector
+from gaia.models import Posting
 from gaia.native_collectors import GoogleInternshipCollector
 
 
@@ -17,7 +18,7 @@ async def test_workday_search_never_scans_the_unfiltered_board():
         if request.method == "POST":
             payload = json.loads(request.content)
             requests.append(payload)
-            assert payload["searchText"] == "intern"
+            assert payload["searchText"] == "2027 intern"
             offset = int(payload["offset"])
             count = 20 if offset == 0 else 1
             jobs = [
@@ -164,7 +165,7 @@ async def test_sitemap_domain_recovers_unstructured_summer_2027_job_page():
     assert result.complete is True
     assert len(result.postings) == 1
     assert result.postings[0].title == "Machine Learning Intern"
-    assert result.postings[0].target_match == "source_confirmed"
+    assert result.postings[0].target_match == "exact"
 
 
 @pytest.mark.asyncio
@@ -186,7 +187,7 @@ async def test_google_recovers_embedded_job_urls_without_anchor_markup():
         if "120997883141857990" in request.url.path:
             return httpx.Response(200, text=detail)
         page = request.url.params.get("page")
-        assert request.url.params.get("q") == "intern"
+        assert request.url.params.get("q") == "2027 intern"
         return httpx.Response(200, text=search_html if page == "1" else "<html></html>")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -195,3 +196,27 @@ async def test_google_recovers_embedded_job_urls_without_anchor_markup():
     assert len(result.postings) == 1
     assert result.postings[0].target_match == "exact"
     assert result.postings[0].posted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_google_detail_heading_does_not_replace_search_result_title():
+    posting = Posting(
+        company="Google",
+        title="Software Developer Intern Bs Summer 2027",
+        apply_url="https://www.google.com/about/careers/applications/jobs/results/123-role",
+        source="google-careers",
+        source_id="123",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="<html><head><meta property='og:title' content='Correct role'></head>"
+            "<body><h1>job details</h1><p>Summer 2027 internship</p></body></html>",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        enriched = await GoogleInternshipCollector()._enrich(client, posting)
+
+    assert enriched.title == "Software Developer Intern Bs Summer 2027"
+    assert enriched.target_match == "exact"

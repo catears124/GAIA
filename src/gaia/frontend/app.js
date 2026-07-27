@@ -1,327 +1,512 @@
+"use strict";
+
 const state = {
   page: 1,
+  pageSize: 48,
   total: 0,
   items: [],
   controller: null,
   coverage: null,
+  view: "jobs",
+  healthTimer: null,
   wasRunning: false,
 };
+
 const $ = selector => document.querySelector(selector);
-const esc = value => String(value ?? "").replace(/[&<>'"]/g, char => ({
+const $$ = selector => [...document.querySelectorAll(selector)];
+const esc = value => String(value ?? "").replace(/[&<>'"]/g, character => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
-}[char]));
-const number = value => new Intl.NumberFormat().format(Number(value || 0));
+}[character]));
+const formatNumber = value => new Intl.NumberFormat().format(Number(value || 0));
+
+function readStorage(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
+  catch { return fallback; }
+}
+
+const savedSet = () => new Set(readStorage("gaia:saved", []));
+const trackingMap = () => readStorage("gaia:tracking", {});
+
+function safeUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
+  } catch {
+    return "#";
+  }
+}
 
 function relative(value, precision = "timestamp") {
   if (!value) return "Unknown";
-  const delta = Date.now() - new Date(value).getTime();
-  const minutes = Math.max(0, Math.round(delta / 60000));
-  if (precision === "day") {
-    const days = Math.max(1, Math.round(minutes / 1440));
-    return `~${days} ${days === 1 ? "day" : "days"} ago`;
-  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
+  if (precision === "day") return `~${Math.max(1, Math.round(minutes / 1440))}d ago`;
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  const days = Math.round(hours / 24);
+  return days < 60 ? `${days}d ago` : date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function exact(value) {
-  return value ? new Date(value).toLocaleString() : "Employer did not expose a publication date";
+  if (!value) return "Not provided by employer";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Not provided by employer" : date.toLocaleString();
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, { headers: { Accept: "application/json" }, ...options });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json();
 }
 
-function savedSet() {
-  return new Set(JSON.parse(localStorage.getItem("gaia:saved") || "[]"));
+function toast(message) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("show"), 1900);
 }
 
-function trackingMap() {
-  return JSON.parse(localStorage.getItem("gaia:tracking") || "{}");
+function monogram(company = "") {
+  return company.split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase() || "•";
 }
 
-function setTracking(key, value) {
-  const tracking = trackingMap();
-  if (value) tracking[key] = value;
-  else delete tracking[key];
-  localStorage.setItem("gaia:tracking", JSON.stringify(tracking));
-  renderJobs();
+function sourceBadge(item) {
+  return item.verified
+    ? '<span class="badge verified">Employer verified</span>'
+    : '<span class="badge lead">Lead to verify</span>';
 }
 
 function queryString() {
   return new URLSearchParams({
     page: state.page,
-    page_size: $("#page-size").value,
+    page_size: state.pageSize,
     q: $("#search").value.trim(),
     category: $("#category").value,
     target: $("#target").value,
     trust: $("#trust").value,
+    company: $("#company").value,
+    location: $("#location").value.trim(),
+    remote: $("#remote").checked,
+    posted_within: $("#posted-within").value,
+    sort: $("#sort").value,
   }).toString();
+}
+
+function hasFilters() {
+  return Boolean(
+    $("#search").value || $("#category").value || $("#company").value ||
+    $("#location").value || $("#remote").checked || $("#posted-within").value !== "0" ||
+    $("#target").value !== "default" || $("#trust").value !== "verified" ||
+    $("#sort").value !== "newest"
+  );
 }
 
 async function loadStats() {
   try {
     const data = await api("/api/stats");
-    $("#metric-active").textContent = number(data.active_listings);
-    $("#metric-new").textContent = number(data.new_24h);
-    $("#metric-companies").textContent = number(data.companies);
-    $("#metric-leads").textContent = number(data.leads);
+    $("#metric-active").textContent = formatNumber(data.active_listings);
+    $("#metric-companies").textContent = formatNumber(data.companies);
+    $("#metric-new").textContent = formatNumber(data.new_24h);
   } catch {
-    for (const id of ["#metric-active", "#metric-new", "#metric-companies", "#metric-leads"]) {
-      $(id).textContent = "—";
-    }
+    $$(".proof strong").forEach(node => { node.textContent = "—"; });
+  }
+}
+
+function skeletons(target = "#job-grid", count = 9) {
+  $(target).innerHTML = Array.from({ length: count }, () => '<div class="skeleton" aria-hidden="true"></div>').join("");
+  $(target).setAttribute("aria-busy", "true");
+}
+
+async function loadFacets() {
+  try {
+    const params = new URLSearchParams({ trust: $("#trust").value, target: $("#target").value });
+    const data = await api(`/api/facets?${params}`);
+    const selected = $("#company").value || new URLSearchParams(location.search).get("company") || "";
+    $("#company").innerHTML = '<option value="">All companies</option>' +
+      data.companies.map(item => `<option value="${esc(item.value)}">${esc(item.value)} (${formatNumber(item.count)})</option>`).join("");
+    $("#company").value = selected;
+  } catch {
+    // Company filtering is optional; the main feed remains available.
   }
 }
 
 async function loadJobs() {
   state.controller?.abort();
   state.controller = new AbortController();
-  const trust = $("#trust").value;
-  const label = trust === "leads" ? "Loading unresolved leads…" : "Loading verified internships…";
-  $("#jobs-body").innerHTML = `<tr><td colspan="8" class="empty">${label}</td></tr>`;
+  skeletons();
+  $("#empty-state").hidden = true;
   try {
-    const data = await api(`/api/families?${queryString()}`, {
-      signal: state.controller.signal,
-    });
+    history.replaceState(null, "", `${location.pathname}?${queryString()}`);
+    const data = await api(`/api/families?${queryString()}`, { signal: state.controller.signal });
     state.items = data.items;
     state.total = data.total;
     renderJobs();
   } catch (error) {
-    if (error.name !== "AbortError") {
-      $("#jobs-body").innerHTML = `<tr><td colspan="8" class="empty error">${esc(error.message)}</td></tr>`;
-    }
+    if (error.name === "AbortError") return;
+    $("#job-grid").innerHTML = "";
+    $("#job-grid").setAttribute("aria-busy", "false");
+    showEmpty("The index is taking a breather.", "We could not reach the opportunities service. Try again in a moment.", true);
   }
 }
 
-function dateCell(item) {
-  const verified = relative(item.last_verified_at || item.first_detected_at);
-  if (item.latest_posted_at) {
-    return `<strong title="${esc(exact(item.latest_posted_at))}">${esc(relative(item.latest_posted_at, item.posted_precision))}</strong><small class="date-detected">verified ${esc(verified)}</small>`;
-  }
-  if (item.verified) {
-    return `<span class="date-unavailable">Posted date unavailable</span><small class="date-detected">verified ${esc(verified)}</small>`;
-  }
-  return `<span class="date-unavailable">Unverified lead</span><small class="date-detected">detected ${esc(relative(item.first_detected_at))}</small>`;
-}
+function jobCard(item) {
+  const saved = savedSet().has(item.family_key);
+  const status = trackingMap()[item.family_key];
+  const locations = item.locations || [];
+  const location = locations.slice(0, 2).join(" · ") || "Location not stated";
+  const dateValue = item.latest_posted_at || item.first_detected_at;
+  const date = item.latest_posted_at
+    ? `Posted ${relative(item.latest_posted_at, item.posted_precision)}`
+    : `Found ${relative(item.first_detected_at)}`;
+  const title = item.title || "Untitled internship";
+  const company = item.company || "Unknown company";
 
-function qualityBadge(item) {
-  if (item.verified) return '<span class="quality verified">verified</span>';
-  return '<span class="quality lead">lead</span>';
+  return `<article class="job-card" data-key="${esc(item.family_key)}">
+    <div class="card-top">
+      <div class="company"><span class="company-monogram">${esc(monogram(company))}</span><div><strong>${esc(company)}</strong>${sourceBadge(item)}</div></div>
+      <button class="save-button ${saved ? "saved" : ""}" data-save="${esc(item.family_key)}" aria-label="${saved ? "Remove from saved" : "Save internship"}" title="${saved ? "Remove from saved" : "Save internship"}">${saved ? "♥" : "♡"}</button>
+    </div>
+    <h3><button data-open="${esc(item.family_key)}">${esc(title)}</button></h3>
+    <div class="card-tags">
+      <span class="tag">${esc(item.category || "technical")}</span>
+      <span class="tag">${formatNumber(item.opening_count)} ${item.opening_count === 1 ? "opening" : "openings"}</span>
+      ${status ? `<span class="tag">${esc(status)}</span>` : ""}
+    </div>
+    <div class="card-footer">
+      <p><strong title="${esc(exact(dateValue))}">${esc(date)}</strong>${esc(location)}${locations.length > 2 ? ` +${locations.length - 2}` : ""}</p>
+      <button class="open-button" data-open="${esc(item.family_key)}">View role →</button>
+    </div>
+  </article>`;
 }
 
 function renderJobs() {
-  const saved = savedSet();
-  const tracking = trackingMap();
+  $("#job-grid").innerHTML = state.items.map(jobCard).join("");
+  $("#job-grid").setAttribute("aria-busy", "false");
+  const trust = $("#trust").value;
+  const label = trust === "verified" ? "verified opportunities" : trust === "leads" ? "leads to verify" : "opportunities";
+  $("#result-count").textContent = `${formatNumber(state.total)} ${label}`;
+  $("#result-note").textContent = trust === "verified"
+    ? "Direct applications recovered from employer systems."
+    : trust === "leads"
+      ? "Useful signals that still need employer confirmation."
+      : "Every opportunity shows its source confidence.";
+  $("#clear-filters").hidden = !hasFilters();
+
   if (!state.items.length) {
-    const trust = $("#trust").value;
-    const message = trust === "verified"
-      ? "No verified internships match these filters. Try the lead queue or run Discover companies."
-      : "No leads match these filters.";
-    $("#jobs-body").innerHTML = `<tr><td colspan="8" class="empty">${message}</td></tr>`;
-  } else {
-    $("#jobs-body").innerHTML = state.items.map(item => {
-      const locationPreview = item.locations.slice(0, 2).join(" · ");
-      const extraLocations = Math.max(0, item.locations.length - 2);
-      const status = tracking[item.family_key] || "";
-      return `<tr data-key="${esc(item.family_key)}" class="${item.verified ? "row-verified" : "row-lead"}">
-        <td class="save-col"><button class="star ${saved.has(item.family_key) ? "saved" : ""}" data-save="${esc(item.family_key)}" aria-label="Save role">☆</button></td>
-        <td>${dateCell(item)}</td>
-        <td><strong>${esc(item.company)}</strong><small>${qualityBadge(item)}${status ? ` · ${esc(status)}` : ""}</small></td>
-        <td><button class="role-link" data-open="${esc(item.family_key)}">${esc(item.title)}</button><small>${esc(item.target_match.replaceAll("_", " "))}</small></td>
-        <td><strong>${number(item.opening_count)}</strong><small>${item.opening_count === 1 ? "application" : "applications"}</small></td>
-        <td>${esc(locationPreview || "Not stated")}${extraLocations ? `<small>+${extraLocations} more</small>` : ""}</td>
-        <td><span class="tag">${esc(item.category)}</span></td>
-        <td><button class="expand" data-open="${esc(item.family_key)}">View</button></td>
-      </tr>`;
-    }).join("");
+    showEmpty(
+      "No roles match those filters.",
+      trust === "verified" ? "Broaden your search or include clearly labeled leads." : "Try removing a filter."
+    );
   }
-  const size = Number($("#page-size").value);
-  const start = state.total ? (state.page - 1) * size + 1 : 0;
-  const end = Math.min(state.total, state.page * size);
-  $("#page-label").textContent = `${number(start)}–${number(end)} of ${number(state.total)} families`;
+
+  const start = state.total ? (state.page - 1) * state.pageSize + 1 : 0;
+  const end = Math.min(state.total, state.page * state.pageSize);
+  $("#page-label").textContent = `${formatNumber(start)}–${formatNumber(end)} of ${formatNumber(state.total)}`;
   $("#prev").disabled = state.page <= 1;
   $("#next").disabled = end >= state.total;
+  updateSavedCount();
+}
+
+function showEmpty(title, detail, retry = false) {
+  const node = $("#empty-state");
+  node.hidden = false;
+  node.innerHTML = `<strong>${esc(title)}</strong><p>${esc(detail)}</p>${retry ? '<button class="primary" data-retry>Try again</button>' : ""}`;
 }
 
 function toggleSaved(key) {
   const saved = savedSet();
-  saved.has(key) ? saved.delete(key) : saved.add(key);
+  const adding = !saved.has(key);
+  if (adding) saved.add(key); else saved.delete(key);
   localStorage.setItem("gaia:saved", JSON.stringify([...saved]));
+  updateSavedCount();
   renderJobs();
+  toast(adding ? "Saved to your shortlist" : "Removed from saved");
+  if (state.view === "saved") loadSaved();
+}
+
+function updateSavedCount() {
+  $("#saved-count").textContent = savedSet().size;
+}
+
+function setTracking(key, value) {
+  const tracking = trackingMap();
+  if (value) tracking[key] = value; else delete tracking[key];
+  localStorage.setItem("gaia:tracking", JSON.stringify(tracking));
+  renderJobs();
+  toast(value ? `Marked ${value}` : "Tracking cleared");
 }
 
 async function openFamily(key) {
-  const item = await api(`/api/families/${encodeURIComponent(key)}`);
-  const currentStatus = trackingMap()[key] || "";
-  const options = ["", "applied", "interview", "offer", "rejected", "ignored"]
-    .map(value => `<option value="${value}" ${value === currentStatus ? "selected" : ""}>${value || "Not tracked"}</option>`)
-    .join("");
-  const openings = item.openings.map((opening, index) => {
-    const locations = opening.location?.join(" · ") || "Location not stated";
-    const variants = (opening.source_variants || []).join(" · ");
-    const sourceMode = opening.source_mode === "registry" || opening.source_mode === "external-index"
-      ? "lead source"
-      : "employer source";
-    return `<article class="opening ${opening.source_mode === "registry" || opening.source_mode === "external-index" ? "lead" : "verified"}"><div><strong>Opening ${index + 1}</strong><p>${esc(locations)}</p><small>${esc(sourceMode)} · ${esc(opening.source)}${variants ? ` · ${esc(variants)}` : ""}</small></div><a href="${esc(opening.apply_url)}" target="_blank" rel="noopener">Apply ↗</a></article>`;
-  }).join("");
-  $("#drawer-content").innerHTML = `<p class="eyebrow">${esc(item.company)} · ${item.verified ? "verified" : "lead"}</p><h2>${esc(item.title)}</h2><div class="drawer-meta"><span>${number(item.opening_count)} openings</span><span>${number(item.location_count)} locations</span><span>${esc(item.category)}</span></div><dl><dt>Employer posted</dt><dd title="${esc(exact(item.latest_posted_at))}">${item.latest_posted_at ? esc(relative(item.latest_posted_at, item.posted_precision)) : "Unavailable from employer"}</dd><dt>First detected</dt><dd>${esc(relative(item.first_detected_at))}</dd><dt>Last verified</dt><dd>${esc(relative(item.last_verified_at))}</dd><dt>Tracking</dt><dd><select id="tracking-status" data-family="${esc(key)}">${options}</select></dd></dl><h3>Applications</h3>${openings}`;
-  $("#drawer").showModal();
+  const drawer = $("#drawer");
+  $("#drawer-content").innerHTML = '<div class="drawer-body"><div class="skeleton"></div></div>';
+  drawer.showModal();
+
+  try {
+    const trust = $("#trust").value;
+    const item = await api(`/api/families/${encodeURIComponent(key)}?trust=${encodeURIComponent(trust)}`);
+    const currentStatus = trackingMap()[key] || "";
+    const options = [
+      ["", "Not tracked"], ["applied", "Applied"], ["interview", "Interviewing"],
+      ["offer", "Offer"], ["rejected", "Rejected"], ["ignored", "Not interested"],
+    ].map(([value, label]) => `<option value="${value}" ${value === currentStatus ? "selected" : ""}>${label}</option>`).join("");
+
+    const openings = (item.openings || []).map((opening, index) => {
+      const lead = ["registry", "external-index"].includes(opening.source_mode);
+      const variants = (opening.source_variants || []).join(" · ");
+      const timestamp = opening.posted_at || opening.first_detected_at;
+      const timing = opening.posted_at ? `Employer posted ${exact(opening.posted_at)}` : `First found ${exact(opening.first_detected_at)}`;
+      const source = opening.source || "Unknown source";
+      const url = safeUrl(opening.apply_url);
+      return `<article class="opening"><div class="opening-head"><div>
+        <strong>Opening ${index + 1}</strong>
+        <p>${esc((opening.location || []).join(" · ") || "Location not stated")}</p>
+        <small>${esc(timing)} · ${lead ? "Index lead" : "Direct employer application"} · ${esc(source)}${variants ? ` · ${esc(variants)}` : ""}</small>
+      </div><a class="apply-link" href="${esc(url)}" title="${esc(exact(timestamp))}" target="_blank" rel="noopener noreferrer">View &amp; apply →</a></div></article>`;
+    }).join("");
+
+    const trustNote = item.verified
+      ? "This application came from the employer’s ATS or native jobs API. Check the employer page for final eligibility and availability."
+      : "This was found in a public index but has not yet been recovered from an employer source. Treat it as a lead and verify before applying.";
+
+    $("#drawer-content").innerHTML = `<div class="drawer-body">
+      <p class="eyebrow"><span></span>${esc(item.company)} · ${item.verified ? "Verified" : "Lead"}</p>
+      <h2 id="drawer-title">${esc(item.title)}</h2>
+      <div class="drawer-meta"><span class="tag">${esc(item.category)}</span><span class="tag">${formatNumber(item.opening_count)} openings</span><span class="tag">${formatNumber(item.location_count)} locations</span></div>
+      <div class="trust-note ${item.verified ? "" : "lead"}">${esc(trustNote)}</div>
+      <div class="fact-grid">
+        <div><span>Employer posted</span><strong>${item.latest_posted_at ? esc(exact(item.latest_posted_at)) : "Not published"}</strong></div>
+        <div><span>First detected</span><strong>${esc(exact(item.first_detected_at))}</strong></div>
+        <div><span>Last checked</span><strong>${esc(exact(item.last_verified_at))}</strong></div>
+      </div>
+      <label class="tracking-field"><span>Application status</span><select id="tracking-status" data-family="${esc(key)}">${options}</select></label>
+      <h3>Applications</h3>
+      ${openings || "<p>No application URL is currently available.</p>"}
+    </div>`;
+  } catch {
+    $("#drawer-content").innerHTML = '<div class="drawer-body"><h2>We could not load this role.</h2><p>Close the panel and try again.</p></div>';
+  }
+}
+
+async function loadSaved() {
+  const keys = [...savedSet()];
+  const grid = $("#saved-grid");
+  const empty = $("#saved-empty");
+  if (!keys.length) {
+    grid.innerHTML = "";
+    empty.hidden = false;
+    return;
+  }
+
+  empty.hidden = true;
+  skeletons("#saved-grid", Math.min(keys.length, 6));
+  const results = await Promise.all(keys.map(key => api(`/api/families/${encodeURIComponent(key)}?trust=all`).catch(() => null)));
+  const items = results.filter(Boolean);
+  grid.innerHTML = items.map(jobCard).join("");
+  grid.setAttribute("aria-busy", "false");
+  empty.hidden = items.length > 0;
+}
+
+function setView(view) {
+  state.view = view;
+  $$(".product-view").forEach(node => { node.hidden = node.id !== `${view}-view`; });
+  $$(".nav-link").forEach(node => node.classList.toggle("active", node.dataset.view === view));
+  $(".hero").hidden = view !== "jobs";
+  if (view === "saved") loadSaved();
+  if (view === "coverage") loadCoverage();
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function isActionable(source) {
-  if (source.last_error || ["broken", "truncated"].includes(source.status)) return true;
-  return source.status === "empty" && ["board", "domain"].includes(source.mode);
+  return (source.scope || "current") === "current" &&
+    ["board", "board-search", "domain"].includes(source.mode) &&
+    (source.last_error || ["broken", "truncated"].includes(source.status));
 }
 
-function sourceState(source) {
-  const mapping = {
-    ok: ["complete", "ok"], loaded: ["loaded", "ok"], verified: ["verified", "ok"],
-    indexed: ["external index", "warn"], blocked: ["access limited", "blocked"],
-    stale: ["closed/stale", "stale"], dormant: ["dormant watch", "dormant"],
-    unstructured: ["no structured data", "muted"], partial: ["partial", "warn"],
-    mixed: ["mixed", "warn"], truncated: ["truncated", "error"],
-    empty: source.mode === "board-search" ? ["no internships", "muted"] : ["suspiciously empty", "error"],
-    broken: ["broken", "error"],
-  };
-  return mapping[source.status] || [source.status || "unknown", source.complete ? "ok" : "warn"];
-}
-
-function sourceMatchesFilter(source, filter) {
-  const note = source.note || "";
+function matchesCoverage(source, filter) {
   if (filter === "all") return true;
-  if (filter === "actionable") return source.scope === "current" && isActionable(source);
-  if (filter === "access") return source.scope === "current" && (source.status === "blocked" || note.includes("access-blocked"));
-  if (filter === "stale") return source.scope === "current" && source.mode === "verification" && (source.status === "stale" || note.includes("stale/closed"));
-  if (filter === "historical") return source.scope === "historical";
-  return true;
+  if (filter === "actionable") return isActionable(source);
+  if (filter === "access") return source.status === "blocked";
+  if (filter === "stale") return ["stale", "unstructured"].includes(source.status);
+  return source.scope === "historical";
 }
 
-function renderCoverageSources() {
-  const filter = $("#coverage-filter").value;
-  const sources = [...(state.coverage?.sources || [])]
-    .filter(source => sourceMatchesFilter(source, filter))
-    .sort((left, right) => Number(isActionable(right)) - Number(isActionable(left)) || left.source.localeCompare(right.source));
-  $("#coverage-source-count").textContent = `${number(sources.length)} sources`;
-  if (!sources.length) {
-    $("#coverage-body").innerHTML = '<tr><td colspan="9" class="empty">No sources in this queue.</td></tr>';
-    return;
-  }
-  $("#coverage-body").innerHTML = sources.map(source => {
-    const [label, tone] = sourceState(source);
-    const detail = source.last_error || source.note || "—";
-    return `<tr><td><strong>${esc(source.source)}</strong></td><td>${esc(source.scope || "current")}</td><td>${esc(source.mode)}</td><td><span class="status ${tone}">${esc(label)}</span></td><td>${number(source.rows_scanned)}</td><td>${number(source.target_rows)}</td><td>${source.expected_rows == null ? "—" : number(source.expected_rows)}</td><td title="${esc(exact(source.last_attempt_at))}">${esc(relative(source.last_attempt_at))}</td><td class="source-detail" title="${esc(detail)}">${esc(detail.slice(0, 150))}</td></tr>`;
-  }).join("");
+function renderCoverage() {
+  if (!state.coverage) return;
+  const { summary, contract, sources } = state.coverage;
+  $("#coverage-summary").innerHTML = [
+    [summary.direct_applications, "direct applications"],
+    [`${summary.direct_date_coverage_percent}%`, "employer-dated"],
+    [summary.productive_direct_sources, "productive sources"],
+    [contract.actionable_anomalies, "source issues"],
+  ].map(([value, label]) => `<article class="coverage-stat"><strong>${esc(value)}</strong><span>${esc(label)}</span></article>`).join("");
+
+  const rows = sources.filter(source => matchesCoverage(source, $("#coverage-filter").value));
+  $("#coverage-source-count").textContent = `${formatNumber(rows.length)} sources`;
+  $("#coverage-benchmark").textContent = `${summary.registry_recall_percent}% benchmark recall · ${summary.independent_matches}/${summary.registry_floor} matches`;
+  $("#coverage-list").innerHTML = rows.length
+    ? rows.map(source => {
+      const bad = isActionable(source);
+      const warn = ["blocked", "stale", "dormant", "empty"].includes(source.status);
+      return `<article class="source-row">
+        <strong title="${esc(source.source)}">${esc(source.source)}</strong>
+        <span>${esc(source.mode)} · ${esc(source.scope)}</span>
+        <span>${formatNumber(source.rows_scanned)} scanned</span>
+        <span>${source.last_attempt_at ? esc(relative(source.last_attempt_at)) : "Never"}</span>
+        <span class="source-status ${bad ? "bad" : warn ? "warn" : ""}">${esc(source.status)}</span>
+      </article>`;
+    }).join("")
+    : '<div class="empty-state"><strong>Nothing here.</strong><p>No sources match this diagnostic view.</p></div>';
 }
 
 async function loadCoverage() {
-  const data = await api("/api/coverage");
-  state.coverage = data;
-  const summary = data.summary || {};
-  const contract = data.contract || {};
-  const recall = summary.registry_recall_percent;
-  const actionable = Number(contract.actionable_anomalies || 0);
-  const unresolved = Number(summary.registry_only || 0);
-  const trustworthy = unresolved === 0 && actionable === 0 && recall != null;
-  $("#coverage-grade").textContent = trustworthy ? "benchmark closed" : "known gaps";
-  $("#coverage-grade").className = `status ${trustworthy ? "ok" : "warn"}`;
-  $("#coverage-contract").classList.toggle("incomplete", !trustworthy);
-  $("#coverage-contract-text").textContent = recall == null
-    ? "No target benchmark is loaded yet, so GAIA cannot make a recall statement."
-    : `Verified feed is employer-recovered. Public indexes report ${number(summary.registry_floor)} benchmark apps; ${number(summary.registry_only)} are still leads. ${number(actionable)} current sources need engineering.`;
-  $("#coverage-summary").innerHTML = [
-    ["Verified applications", summary.direct_applications || 0, "employer-controlled source recovered"],
-    ["Lead applications", summary.registry_only || 0, "index rows awaiting verification"],
-    ["Benchmark recall", recall == null ? "—" : `${recall}%`, "independent recovery of public-index apps"],
-    ["Direct-only", summary.direct_only || 0, "found before or outside public indexes"],
-    ["Actionable gaps", actionable, "actual current crawler failures"],
-    ["Source universe", contract.configured_sources || 0, "latest run source records"],
-  ].map(([label, value, note]) => `<article><span>${esc(label)}</span><strong>${typeof value === "number" ? number(value) : esc(value)}</strong><small>${esc(note)}</small></article>`).join("");
-  renderCoverageSources();
+  try {
+    state.coverage = await api("/api/coverage");
+    renderCoverage();
+  } catch {
+    $("#coverage-list").innerHTML = '<div class="empty-state"><strong>Source health is unavailable.</strong><p>The diagnostics service did not respond.</p></div>';
+  }
 }
 
 function renderProgress(data) {
   const progress = data.progress || {};
-  const box = $("#sync-progress");
-  box.hidden = !data.running;
+  const node = $("#sync-progress");
+  node.hidden = !data.running;
   if (!data.running) return;
-  const total = Number(progress.total || 0);
-  const completed = Number(progress.completed || 0);
-  $("#progress-stage").textContent = progress.stage || "Working";
-  $("#progress-label").textContent = total ? `${number(completed)} / ${number(total)}` : `${Math.round(progress.elapsed_seconds || 0)}s`;
-  $("#progress-bar").max = Math.max(1, total);
-  $("#progress-bar").value = total ? completed : 0;
-  $("#progress-current").textContent = progress.current || `${Math.round(progress.elapsed_seconds || 0)} seconds elapsed`;
+  $("#progress-stage").textContent = progress.stage || "Refreshing sources";
+  $("#progress-label").textContent = `${formatNumber(progress.completed)} / ${formatNumber(progress.total)}`;
+  $("#progress-bar").max = Math.max(1, progress.total || 1);
+  $("#progress-bar").value = progress.completed || 0;
+  $("#progress-current").textContent = progress.current || "";
 }
 
 async function refreshHealth() {
+  clearTimeout(state.healthTimer);
   try {
     const data = await api("/api/health");
-    const pill = $("#health-pill");
-    pill.textContent = data.running ? (data.progress?.mode === "discover" ? "discovering" : "refreshing") : "live";
-    pill.className = `pill ${data.running ? "busy" : "ok"}`;
-    $("#sync-button").disabled = Boolean(data.running);
-    $("#discover-button").disabled = Boolean(data.running);
+    const last = data.data?.last_run?.finished_at || data.data?.last_success_at;
+    const age = last ? Date.now() - new Date(last).getTime() : Infinity;
+    const node = $("#freshness");
+    if (data.read_only) {
+      $$(".admin-actions").forEach(actions => { actions.hidden = true; });
+    }
+    node.className = `freshness ${data.running || age < 36 * 3600000 ? "fresh" : age < 7 * 86400000 ? "stale" : "failed"}`;
+    node.lastElementChild.textContent = data.running
+      ? "Refreshing sources…"
+      : data.read_only && last
+        ? `Snapshot updated ${relative(last)}`
+      : last
+        ? `Updated ${relative(last)}${data.data.failing_sources ? ` · ${data.data.failing_sources} issue${data.data.failing_sources === 1 ? "" : "s"}` : ""}`
+        : "No completed refresh";
     renderProgress(data);
     if (state.wasRunning && !data.running) {
       await Promise.all([loadJobs(), loadStats(), loadCoverage()]);
+      toast("Source refresh complete");
     }
-    state.wasRunning = Boolean(data.running);
+    state.wasRunning = data.running;
+    state.healthTimer = setTimeout(refreshHealth, data.running ? 1800 : 30000);
   } catch {
-    $("#health-pill").textContent = "offline";
-    $("#health-pill").className = "pill error";
+    const node = $("#freshness");
+    node.className = "freshness failed";
+    node.lastElementChild.textContent = "Index unavailable";
+    state.healthTimer = setTimeout(refreshHealth, 10000);
   }
 }
 
 async function startSync(path) {
-  await api(path, { method: "POST" });
-  state.wasRunning = true;
-  await refreshHealth();
+  const buttons = [$("#sync-button"), $("#discover-button")];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const data = await api(path, { method: "POST" });
+    if (!data.started && data.running) toast("A refresh is already running");
+    else toast(path.endsWith("discover") ? "Employer discovery started" : "Source refresh started");
+    state.wasRunning = Boolean(data.running);
+    renderProgress(data);
+    refreshHealth();
+  } catch {
+    toast("Could not start the refresh");
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+  }
 }
 
-let searchTimer;
-$("#search").addEventListener("input", () => {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => { state.page = 1; loadJobs(); }, 180);
-});
-for (const id of ["#category", "#target", "#trust", "#page-size"]) {
-  $(id).addEventListener("change", () => { state.page = 1; loadJobs(); });
+function clearFilters() {
+  $("#search").value = "";
+  $("#category").value = "";
+  $("#company").value = "";
+  $("#location").value = "";
+  $("#remote").checked = false;
+  $("#posted-within").value = "0";
+  $("#target").value = "default";
+  $("#trust").value = "verified";
+  $("#sort").value = "newest";
+  state.page = 1;
+  loadFacets();
+  loadJobs();
 }
-$("#coverage-filter").addEventListener("change", renderCoverageSources);
-$("#prev").addEventListener("click", () => { state.page--; loadJobs(); });
-$("#next").addEventListener("click", () => { state.page++; loadJobs(); });
-$("#jobs-body").addEventListener("click", event => {
-  const save = event.target.closest("[data-save]");
-  const open = event.target.closest("[data-open]");
-  if (save) toggleSaved(save.dataset.save);
-  if (open) openFamily(open.dataset.open);
+
+const initial = new URLSearchParams(location.search);
+for (const id of ["search", "category", "location", "target", "trust", "sort", "posted-within"]) {
+  const key = id === "search" ? "q" : id.replace("-", "_");
+  if (initial.has(key) && $(`#${id}`)) $(`#${id}`).value = initial.get(key);
+}
+$("#remote").checked = initial.get("remote") === "true";
+state.page = Math.max(1, Number(initial.get("page") || 1));
+
+let searchTimer;
+for (const selector of ["#search", "#location"]) {
+  $(selector).addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { state.page = 1; loadJobs(); }, 260);
+  });
+}
+for (const selector of ["#trust", "#category", "#company", "#target", "#sort", "#posted-within"]) {
+  $(selector).addEventListener("change", () => {
+    state.page = 1;
+    if (["#trust", "#target"].includes(selector)) loadFacets();
+    loadJobs();
+  });
+}
+
+$("#remote").addEventListener("change", () => { state.page = 1; loadJobs(); });
+$("#density-toggle").addEventListener("click", () => {
+  const compact = $("#job-grid").classList.toggle("compact");
+  $("#density-toggle").setAttribute("aria-pressed", String(compact));
+  $("#density-toggle").textContent = compact ? "Card view" : "Compact view";
 });
+$("#clear-filters").addEventListener("click", clearFilters);
+$("#prev").addEventListener("click", () => { state.page -= 1; loadJobs(); $("#results").scrollIntoView(); });
+$("#next").addEventListener("click", () => { state.page += 1; loadJobs(); $("#results").scrollIntoView(); });
+$("#drawer-close").addEventListener("click", () => $("#drawer").close());
+$("#drawer").addEventListener("click", event => { if (event.target === $("#drawer")) $("#drawer").close(); });
 $("#drawer").addEventListener("change", event => {
   if (event.target.matches("#tracking-status")) setTracking(event.target.dataset.family, event.target.value);
 });
-$("#drawer-close").addEventListener("click", () => $("#drawer").close());
+$("#coverage-filter").addEventListener("change", renderCoverage);
 $("#sync-button").addEventListener("click", () => startSync("/api/sync"));
 $("#discover-button").addEventListener("click", () => startSync("/api/discover"));
-for (const tab of document.querySelectorAll(".tab")) {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item === tab));
-    const coverage = tab.dataset.view === "coverage";
-    $("#jobs-view").hidden = coverage;
-    $("#coverage-view").hidden = !coverage;
-    if (coverage) loadCoverage();
-  });
-}
+
+document.addEventListener("click", event => {
+  const save = event.target.closest("[data-save]");
+  const open = event.target.closest("[data-open]");
+  const view = event.target.closest("[data-view]");
+  if (save) toggleSaved(save.dataset.save);
+  else if (open) openFamily(open.dataset.open);
+  else if (view) setView(view.dataset.view);
+  else if (event.target.matches("[data-retry]")) loadJobs();
+});
+
 document.addEventListener("keydown", event => {
-  if (event.key === "/" && document.activeElement !== $("#search")) {
+  if (event.key === "/" && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) {
     event.preventDefault();
     $("#search").focus();
   }
   if (event.key === "Escape" && $("#drawer").open) $("#drawer").close();
 });
 
-Promise.all([loadJobs(), loadStats(), loadCoverage(), refreshHealth()]);
-setInterval(refreshHealth, 1500);
+updateSavedCount();
+skeletons();
+Promise.all([loadFacets(), loadJobs(), loadStats(), refreshHealth()]);

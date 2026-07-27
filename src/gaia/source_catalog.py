@@ -15,8 +15,16 @@ from .collectors import (
 from .market_collectors import SitemapDomainCollector, WorkdaySearchCollector
 from .models import Posting
 from .native_collectors import GoogleInternshipCollector
-from .provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
-from .quality import canonical_source_name
+from .provider_collectors import (
+    ICIMSCollector,
+    JobviteCollector,
+    OracleCloudCollector,
+    RecruiteeCollector,
+    SmartRecruitersCollector,
+    SuccessFactorsCollector,
+    WorkableCollector,
+)
+from .quality import canonical_source_name, is_actionable_application_url
 
 
 def _install_scope_promotion(connection: sqlite3.Connection) -> None:
@@ -26,33 +34,37 @@ def _install_scope_promotion(connection: sqlite3.Connection) -> None:
     if not has_health:
         return
 
-    # Backfill databases created before promotion triggers existed.
+    # Only proven productive sources are promoted into the hot refresh set.
     connection.execute(
         """
         UPDATE source_catalog
         SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-        WHERE scope='historical'
-          AND source IN (SELECT source FROM source_health WHERE scope='current')
+        WHERE source IN (
+            SELECT source FROM source_health WHERE lifecycle='productive'
+        )
         """
     )
     connection.executescript(
         """
-        CREATE TRIGGER IF NOT EXISTS source_catalog_promote_current_insert
+        DROP TRIGGER IF EXISTS source_catalog_promote_current_insert;
+        DROP TRIGGER IF EXISTS source_catalog_promote_current_update;
+
+        CREATE TRIGGER source_catalog_promote_current_insert
         AFTER INSERT ON source_health
-        WHEN NEW.scope='current'
+        WHEN NEW.lifecycle='productive'
         BEGIN
             UPDATE source_catalog
             SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-            WHERE source=NEW.source AND scope='historical';
+            WHERE source=NEW.source;
         END;
 
-        CREATE TRIGGER IF NOT EXISTS source_catalog_promote_current_update
-        AFTER UPDATE OF scope ON source_health
-        WHEN NEW.scope='current' AND OLD.scope<>'current'
+        CREATE TRIGGER source_catalog_promote_current_update
+        AFTER UPDATE OF lifecycle ON source_health
+        WHEN NEW.lifecycle='productive' AND OLD.lifecycle<>'productive'
         BEGIN
             UPDATE source_catalog
             SET scope='current', last_discovered_at=CURRENT_TIMESTAMP
-            WHERE source=NEW.source AND scope='historical';
+            WHERE source=NEW.source;
         END;
         """
     )
@@ -109,6 +121,22 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
             "company": collector.company,
             "subdomain": collector.subdomain,
         }
+    if isinstance(collector, JobviteCollector):
+        return "jobvite", {"company": collector.company, "slug": collector.slug}
+    if isinstance(collector, ICIMSCollector):
+        return "icims", {"company": collector.company, "host": collector.host}
+    if isinstance(collector, OracleCloudCollector):
+        return "oracle-cloud", {
+            "company": collector.company,
+            "origin": collector.origin,
+            "site": collector.site,
+        }
+    if isinstance(collector, SuccessFactorsCollector):
+        return "successfactors", {
+            "company": collector.company,
+            "origin": collector.origin,
+            "company_id": collector.company_id,
+        }
     if isinstance(collector, SitemapDomainCollector):
         return "domain", {
             "company": collector.company,
@@ -119,6 +147,7 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
         return "verification", {
             "company": collector.company,
             "urls": collector.urls,
+            "trusted": collector.source_mode == "verification",
             "leads": [
                 {
                     "title": item.title,
@@ -191,6 +220,18 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
         return RecruiteeCollector(str(spec["company"]), str(spec["subdomain"]))
     if kind == "workable":
         return WorkableCollector(str(spec["company"]), str(spec["subdomain"]))
+    if kind == "jobvite":
+        return JobviteCollector(str(spec["company"]), str(spec["slug"]))
+    if kind == "icims":
+        return ICIMSCollector(str(spec["company"]), str(spec["host"]))
+    if kind == "oracle-cloud":
+        return OracleCloudCollector(
+            str(spec["company"]), str(spec["origin"]), str(spec["site"])
+        )
+    if kind == "successfactors":
+        return SuccessFactorsCollector(
+            str(spec["company"]), str(spec["origin"]), str(spec["company_id"])
+        )
     if kind == "domain":
         return SitemapDomainCollector(
             str(spec["company"]),
@@ -217,6 +258,8 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
             [str(url) for url in spec.get("urls") or []],
             name=canonical_source_name(str(spec.get("name") or "")) or None,
             leads=leads,
+            trusted=bool(spec.get("trusted", True))
+            and all(is_actionable_application_url(str(url)) for url in spec.get("urls") or []),
         )
     if kind == "google-careers":
         return GoogleInternshipCollector()
@@ -225,9 +268,25 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
 
 def load_catalog(path: Path) -> list[Collector]:
     with _connect(path) as database:
-        rows = database.execute(
-            "SELECT source, kind, scope, spec_json FROM source_catalog ORDER BY source"
-        ).fetchall()
+        has_health = database.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_health'"
+        ).fetchone()
+        if has_health:
+            rows = database.execute(
+                """
+                SELECT c.source, c.kind, c.scope, c.spec_json, h.lifecycle
+                FROM source_catalog AS c
+                LEFT JOIN source_health AS h ON h.source=c.source
+                ORDER BY c.source
+                """
+            ).fetchall()
+        else:
+            rows = database.execute(
+                """
+                SELECT source, kind, scope, spec_json, NULL AS lifecycle
+                FROM source_catalog ORDER BY source
+                """
+            ).fetchall()
     merged: dict[str, Collector] = {}
     for row in rows:
         try:
@@ -237,6 +296,8 @@ def load_catalog(path: Path) -> list[Collector]:
         if collector is None:
             continue
         collector.scope = str(row["scope"])
+        if str(row["lifecycle"] or "") == "quarantined":
+            collector.scope = "historical"
         key = canonical_source_name(collector.name)
         existing = merged.get(key)
         if existing is None or (existing.scope == "historical" and collector.scope == "current"):

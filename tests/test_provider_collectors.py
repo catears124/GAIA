@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from gaia.models import Posting
-from gaia.provider_collectors import RecruiteeCollector, SmartRecruitersCollector, WorkableCollector
+from gaia.provider_collectors import (
+    ICIMSCollector,
+    JobviteCollector,
+    OracleCloudCollector,
+    RecruiteeCollector,
+    SmartRecruitersCollector,
+    SuccessFactorsCollector,
+    WorkableCollector,
+)
 from gaia.provider_discovery import provider_collectors_from_postings
 
 
@@ -121,4 +131,92 @@ async def test_workable_public_account_jobs_are_complete():
         result = await WorkableCollector("Example", "example").collect(client)
     assert result.complete is True
     assert result.postings[0].category == "security"
+    assert result.postings[0].posted_at is not None
+
+
+def test_urls_promote_into_new_native_provider_collectors():
+    urls = [
+        ("Jobvite", "https://jobs.jobvite.com/example/job/oAbc/software-intern"),
+        ("iCIMS", "https://careers-example.icims.com/jobs/123/software-intern/job"),
+        (
+            "Oracle",
+            "https://example.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/456",
+        ),
+        (
+            "SuccessFactors",
+            "https://career5.successfactors.eu/career?company=example"
+            "&career_ns=job_listing&career_job_req_id=789",
+        ),
+    ]
+    postings = [
+        Posting(company=company, title="Software Intern", apply_url=url, source="registry:test", source_id=str(index), source_mode="registry")
+        for index, (company, url) in enumerate(urls)
+    ]
+    names = {collector.name for collector in provider_collectors_from_postings(postings)}
+    assert names == {
+        "jobvite:example",
+        "icims:careers-example.icims.com",
+        "oracle:example.fa.us2.oraclecloud.com:cx",
+        "successfactors:career5.successfactors.eu:example",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("collector", "detail_path"),
+    [
+        (JobviteCollector("Example", "example"), "/example/job/oAbc/software-intern"),
+        (ICIMSCollector("Example", "careers-example.icims.com"), "/jobs/123/software-intern/job"),
+        (
+            OracleCloudCollector(
+                "Example", "https://example.fa.us2.oraclecloud.com", "CX"
+            ),
+            "/hcmUI/CandidateExperience/en/sites/CX/job/456",
+        ),
+        (
+            SuccessFactorsCollector(
+                "Example", "https://career5.successfactors.eu", "example"
+            ),
+            "/career",
+        ),
+    ],
+)
+async def test_html_native_providers_recover_job_schema(collector, detail_path):
+    job_url = f"https://{collector.name.split(':')[1] if collector.name.startswith('icims:') else 'example.test'}{detail_path}"
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Software Engineer Intern, Summer 2027",
+        "url": job_url,
+        "identifier": {"value": "123"},
+        "hiringOrganization": {"name": "Example"},
+        "datePosted": "2026-07-20T12:00:00Z",
+    }
+    detail = f'<script type="application/ld+json">{json.dumps(schema)}</script>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        is_detail = request.url.path == detail_path and (
+            "career_job_req_id" in request.url.query.decode()
+            or detail_path != "/career"
+        )
+        if is_detail:
+            return httpx.Response(200, text=detail)
+        if isinstance(collector, JobviteCollector):
+            href = f"https://jobs.jobvite.com{detail_path}"
+        elif isinstance(collector, ICIMSCollector):
+            href = f"https://careers-example.icims.com{detail_path}"
+        elif isinstance(collector, OracleCloudCollector):
+            href = f"https://example.fa.us2.oraclecloud.com{detail_path}"
+        else:
+            href = (
+                "https://career5.successfactors.eu/career?company=example"
+                "&career_ns=job_listing&career_job_req_id=789"
+            )
+        return httpx.Response(200, text=f'<a href="{href}">Intern</a>')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await collector.collect(client)
+    assert result.complete is True
+    assert len(result.postings) == 1
+    assert result.postings[0].target_match == "exact"
     assert result.postings[0].posted_at is not None

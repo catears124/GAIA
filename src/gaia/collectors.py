@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,12 +24,12 @@ def parse_date(value: Any) -> datetime | None:
         stamp = float(value)
         if stamp > 10_000_000_000:
             stamp /= 1000
-        return datetime.fromtimestamp(stamp, tz=timezone.utc)
+        return datetime.fromtimestamp(stamp, tz=UTC)
     try:
         parsed = date_parser.parse(str(value))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -317,9 +316,11 @@ class SchemaPageCollector(Collector):
         name: str | None = None,
         *,
         leads: list[Posting] | None = None,
+        trusted: bool = True,
     ) -> None:
         self.company = company
         self.leads = list(leads or [])
+        self.source_mode = "verification" if trusted else "verification-lead"
         lead_urls = [item.apply_url for item in self.leads]
         self.urls = list(dict.fromkeys([*(urls or []), *lead_urls]))
         if not self.urls:
@@ -356,7 +357,7 @@ class SchemaPageCollector(Collector):
                         parsed = posting_from_schema(
                             job,
                             source=self.name,
-                            source_mode="verification",
+                            source_mode=self.source_mode,
                         )
                         if parsed:
                             parsed.company = self.company
@@ -373,6 +374,7 @@ class SchemaPageCollector(Collector):
                     lead=lead,
                 )
                 if fallback:
+                    fallback.source_mode = self.source_mode
                     return "verified", [fallback], None, None
                 return "unstructured", [], None, None
 

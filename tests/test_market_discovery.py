@@ -33,13 +33,17 @@ def github_handler(readme: str):
                     "items": [
                         {
                             "full_name": "community/internships-2027",
+                            "default_branch": "main",
                             "pushed_at": "2026-07-20T12:00:00Z",
                             "stargazers_count": 100,
                         }
                     ]
                 },
             )
-        if request.url.path == "/repos/community/internships-2027/readme":
+        if request.url.path in {
+            "/repos/community/internships-2027/readme",
+            "/community/internships-2027/main/README.md",
+        }:
             return httpx.Response(200, text=readme)
         raise AssertionError(str(request.url))
 
@@ -95,7 +99,7 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
     assert loaded[0].name == collector.name
     assert loaded[0].scope == "historical"
     assert isinstance(loaded[0], WorkdaySearchCollector)
-    assert loaded[0].terms == ("intern", "co-op")
+    assert loaded[0].terms == ("2027 intern", "2027 co-op")
 
 
 def test_source_catalog_persists_verification_lead_evidence(tmp_path):
@@ -124,6 +128,31 @@ def test_source_catalog_persists_verification_lead_evidence(tmp_path):
     assert loaded[0].leads[0].title == lead.title
     assert loaded[0].leads[0].locations == lead.locations
     assert loaded[0].urls == [lead.apply_url]
+
+
+def test_source_catalog_never_restores_aggregators_as_trusted_verification(tmp_path):
+    path = tmp_path / "gaia.db"
+    lead = Posting(
+        company="Example",
+        title="Software Engineer Intern, Summer 2027",
+        apply_url="https://jobright.ai/jobs/example",
+        source="registry:test",
+        source_id="example",
+        source_mode="registry",
+    )
+    collector = SchemaPageCollector(
+        "Example",
+        [lead.apply_url],
+        name="schema:jobright.ai:Example",
+        leads=[lead],
+        trusted=True,
+    )
+
+    save_catalog(path, [collector])
+    loaded = load_catalog(path)
+
+    assert len(loaded) == 1
+    assert loaded[0].source_mode == "verification-lead"
 
 
 def test_current_discovery_overrides_historical_catalog_copy():

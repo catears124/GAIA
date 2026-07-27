@@ -13,7 +13,7 @@ from .collectors import Collector, json_ld_jobs, posting_from_schema
 from .models import CollectorResult, Posting
 
 GOOGLE_JOB_RE = re.compile(
-    r"/about/careers/applications/jobs/results/(\d+)(?:-([^?#\"'<>\\]+))?",
+    r"(?:/about/careers/applications/)?jobs/results/(\d+)(?:-([^?#\"'<>\\]+))?",
     re.I,
 )
 GENERIC_ANCHOR_TEXT = {"learn more", "apply", "share", "details"}
@@ -35,6 +35,7 @@ class GoogleInternshipCollector(Collector):
     name = "google-careers"
     mode = "board-search"
     base = "https://www.google.com/about/careers/applications/jobs/results/"
+    root = "https://www.google.com/about/careers/applications/"
 
     def __init__(self, pages: int = 10) -> None:
         self.pages = pages
@@ -66,7 +67,7 @@ class GoogleInternshipCollector(Collector):
             source_id: Posting(
                 company="Google",
                 title=titles[source_id],
-                apply_url=urljoin(GoogleInternshipCollector.base, hrefs[source_id]),
+                apply_url=urljoin(GoogleInternshipCollector.root, hrefs[source_id]),
                 source=GoogleInternshipCollector.name,
                 source_id=source_id,
             )
@@ -87,9 +88,13 @@ class GoogleInternshipCollector(Collector):
                 parsed.source_id = posting.source_id
                 return classify(parsed)
         soup = BeautifulSoup(response.text, "html.parser")
-        heading = soup.find(["h1", "h2"])
-        if heading:
-            posting.title = " ".join(heading.get_text(" ", strip=True).split())
+        if posting.title == "Google internship":
+            title_meta = soup.find("meta", property="og:title")
+            heading = soup.find(["h1", "h2"])
+            if title_meta and title_meta.get("content"):
+                posting.title = str(title_meta["content"]).strip()
+            elif heading:
+                posting.title = " ".join(heading.get_text(" ", strip=True).split())
         posting.description = " ".join(soup.get_text(" ", strip=True).split())[:30000]
         return classify(posting)
 
@@ -99,7 +104,7 @@ class GoogleInternshipCollector(Collector):
         for page in range(1, self.pages + 1):
             response = await client.get(
                 self.base,
-                params={"q": "intern", "sort_by": "date", "page": page},
+                params={"q": "2027 intern", "sort_by": "date", "page": page},
             )
             response.raise_for_status()
             page_postings = self._page_postings(response.text)
@@ -118,7 +123,7 @@ class GoogleInternshipCollector(Collector):
                 rows_scanned=0,
                 status="broken",
                 error="Google Careers search returned no parseable job identities",
-                note="searched q=intern and inspected anchors plus embedded page data",
+                note="searched q=2027 intern and inspected anchors plus embedded page data",
             )
 
         semaphore = asyncio.Semaphore(8)

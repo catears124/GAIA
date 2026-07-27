@@ -5,6 +5,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 SPACE_RE = re.compile(r"\s+")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+MARKDOWN_WRAPPER_RE = re.compile(r"^\[(.+)\]\(https?://[^)]+\)$", re.I)
 HTML_TAG_RE = re.compile(r"<\s*br\s*/?\s*>|</p>|</div>|</li>", re.I)
 TAG_RE = re.compile(r"<[^>]+>")
 FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
@@ -12,12 +13,13 @@ EMOJI_RE = re.compile(
     "["
     "\U0001F300-\U0001FAFF"
     "\U00002700-\U000027BF"
+    "\U00002B00-\U00002BFF"
     "]+",
     re.UNICODE,
 )
 LOCATION_COUNT_RE = re.compile(r"^\s*\d+\s+locations?\s*\*+\s*", re.I)
 STATE_RE = re.compile(
-    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)\b"
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY)(?=$|[\s,;|·—–]|[A-Z][a-z])"
 )
 COUNTRY_HINTS = {
     "united states",
@@ -32,6 +34,51 @@ COUNTRY_HINTS = {
     "india",
 }
 EMPTY_LOCATION_VALUES = {"", "—", "-", "–", "not stated", "location not stated", "n/a"}
+NON_LOCATION_VALUES = {"(multiple us)", "multiple u.s. locations", "multiple us locations"}
+ISO_DATE_LOCATION_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TECH_CATEGORIES = ("software", "ml-ai", "data", "security", "hardware", "quant", "product")
+NON_APPLICATION_HOSTS = {
+    "github.com",
+    "www.github.com",
+    "simplify.jobs",
+    "www.simplify.jobs",
+    "speedyapply.com",
+    "www.speedyapply.com",
+    "discord.gg",
+    "www.linkedin.com",
+    "jobright.ai",
+    "www.jobright.ai",
+    "workopia.io",
+    "www.workopia.io",
+    "visasponsor.jobs",
+    "www.visasponsor.jobs",
+}
+
+
+def is_actionable_application_url(url: str) -> bool:
+    parts = urlsplit(url)
+    return parts.scheme in {"http", "https"} and parts.netloc.lower() not in NON_APPLICATION_HOSTS
+
+
+def is_specific_application_url(url: str) -> bool:
+    """Reject employer home/search pages that cannot open the advertised requisition."""
+    if not is_actionable_application_url(url):
+        return False
+    parts = urlsplit(url)
+    if re.search(r"(?:^|&)gh_jid=\d+(?:&|$)", parts.query, re.I):
+        return True
+    path = parts.path.rstrip("/").casefold()
+    if path in {
+        "",
+        "/careers",
+        "/jobs",
+        "/open-positions",
+        "/about/careers/applications/jobs/results",
+    }:
+        return False
+    return not path.endswith(("/careers", "/jobs", "/search", "/jobs/results"))
+
+
 COMPANY_ALIASES = {
     "alphabet": "Google",
     "google": "Google",
@@ -69,10 +116,11 @@ ORG_SUFFIX_RE = re.compile(
 def clean_text(value: object) -> str:
     text = str(value or "")
     text = HTML_TAG_RE.sub(" | ", text)
+    text = MARKDOWN_WRAPPER_RE.sub(r"\1", text)
     text = MARKDOWN_LINK_RE.sub(r"\1", text)
     text = TAG_RE.sub(" ", text)
     text = text.replace("&amp;", "&").replace("&nbsp;", " ")
-    text = text.replace("\u00a0", " ")
+    text = text.replace("\u00a0", " ").replace("\ufe0f", "")
     text = FLAG_RE.sub("", text)
     text = EMOJI_RE.sub("", text)
     return SPACE_RE.sub(" ", text).strip(" *\t|·-—–")
@@ -121,8 +169,10 @@ def normalize_locations(values: object) -> list[str]:
     output: list[str] = []
     for raw in raw_values:
         value = clean_text(raw)
-        if value.casefold() in EMPTY_LOCATION_VALUES:
+        if value.casefold() in EMPTY_LOCATION_VALUES or ISO_DATE_LOCATION_RE.fullmatch(value):
             continue
+        if value.casefold() in NON_LOCATION_VALUES:
+            value = "United States"
         value = LOCATION_COUNT_RE.sub("", value)
         value = re.sub(r"\b\d+\s+locations?\b", " ", value, flags=re.I)
         value = value.replace("Remote-Friendly", "Remote")
@@ -156,7 +206,7 @@ def canonical_source_name(source: str) -> str:
     if source.startswith("workday:"):
         parts = source.split(":")
         if len(parts) >= 3:
-            return ":".join([parts[0], parts[1].casefold(), parts[2]])
+            return ":".join([parts[0], parts[1].casefold(), parts[2].casefold()])
     return source
 
 
@@ -172,4 +222,4 @@ def is_independent_mode(mode: str) -> bool:
 
 
 def is_index_mode(mode: str) -> bool:
-    return mode in {"registry", "external-index"}
+    return mode in {"registry", "external-index", "verification-lead"}

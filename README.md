@@ -118,6 +118,23 @@ python scripts/run_local.py
 
 Open `http://127.0.0.1:8501`.
 
+## Deploy to Vercel
+
+GAIA ships a compact, read-only index snapshot with the FastAPI application.
+This keeps the public deployment fast and useful while the stateful crawler
+continues to run outside Vercel's ephemeral function filesystem.
+
+```bash
+python scripts/build_deploy_snapshot.py
+vercel
+```
+
+Production deploys are also automated by `.github/workflows/deploy.yml`. Add
+`VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID` as GitHub repository
+secrets, then push to `main` or run the workflow manually. Pull requests and
+pushes continue to run the Python lint and test matrix before production work
+is eligible to ship.
+
 Commands:
 
 ```bash
