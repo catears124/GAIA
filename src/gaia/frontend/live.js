@@ -6,7 +6,15 @@ const liveParams = new URLSearchParams(location.search);
 if (!liveParams.has("target")) $("#target").value = "";
 if (!liveParams.has("trust")) $("#trust").value = "all";
 
-const baseJobCard = jobCard;
+hasFilters = function liveHasFilters() {
+  return Boolean(
+    $("#search").value || $("#category").value || $("#company").value ||
+    $("#location").value || $("#remote").checked || $("#posted-within").value !== "0" ||
+    $("#target").value !== "" || $("#trust").value !== "all" ||
+    $("#sort").value !== "newest"
+  );
+};
+
 jobCard = function liveJobCard(item) {
   const saved = savedSet().has(item.family_key);
   const status = trackingMap()[item.family_key];
@@ -38,8 +46,8 @@ jobCard = function liveJobCard(item) {
   </article>`;
 };
 
-// Replace snapshot-oriented health polling with source-level progress and refresh the
-// visible feed whenever the underlying inventory advances.
+// Replace snapshot-oriented health polling with source-level progress. The visible feed
+// reloads only when a source actually finishes, so live updates do not flash the UI.
 refreshHealth = async function liveRefreshHealth() {
   clearTimeout(state.healthTimer);
   try {
@@ -51,6 +59,7 @@ refreshHealth = async function liveRefreshHealth() {
     const overdue = Number(inventory.overdue || 0);
     const degraded = Number(inventory.degraded || 0);
     const never = Number(inventory.never_completed || 0);
+    const activity = inventory.latest_activity_at || null;
 
     if (data.read_only) $$(".admin-actions").forEach(actions => { actions.hidden = true; });
     node.className = `freshness ${data.ok ? "fresh" : degraded ? "failed" : "stale"}`;
@@ -61,8 +70,11 @@ refreshHealth = async function liveRefreshHealth() {
         : `${formatNumber(fresh)} / ${formatNumber(total)} sources fresh · ${formatNumber(overdue + never)} catching up${degraded ? ` · ${formatNumber(degraded)} degraded` : ""}`;
 
     renderProgress(data);
-    await Promise.all([loadJobs(), loadStats()]);
-    if (state.view === "coverage") await loadCoverage();
+    if (state.inventoryActivity !== activity) {
+      state.inventoryActivity = activity;
+      await Promise.all([loadJobs(), loadStats()]);
+      if (state.view === "coverage") await loadCoverage();
+    }
     state.wasRunning = data.running;
     state.healthTimer = setTimeout(refreshHealth, data.running || !data.ok ? 10000 : 30000);
   } catch {
@@ -76,6 +88,7 @@ refreshHealth = async function liveRefreshHealth() {
 // The original deferred script already started one load with HTML defaults. Re-run once
 // with live defaults, then polling above keeps the open page synchronized automatically.
 state.page = 1;
+state.inventoryActivity = undefined;
 Promise.all([loadFacets(), loadJobs(), loadStats(), refreshHealth()]);
 
 $("#clear-filters").addEventListener("click", () => {
