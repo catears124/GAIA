@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS postings (
     link_status TEXT NOT NULL DEFAULT 'unchecked'
 );
 
+ALTER TABLE postings ADD COLUMN IF NOT EXISTS removed_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_postings_family_active
     ON postings (family_key) WHERE active;
 CREATE INDEX IF NOT EXISTS idx_postings_target_active
@@ -59,6 +61,10 @@ CREATE INDEX IF NOT EXISTS idx_postings_company_trgm
     ON postings USING GIN (lower(company) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_postings_locations_gin
     ON postings USING GIN (locations);
+CREATE INDEX IF NOT EXISTS idx_postings_first_seen
+    ON postings (first_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_postings_removed_at
+    ON postings (removed_at DESC) WHERE removed_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS families (
     family_key TEXT PRIMARY KEY,
@@ -140,6 +146,70 @@ CREATE INDEX IF NOT EXISTS idx_source_health_run
     ON source_health (last_run_id, scope, status);
 CREATE INDEX IF NOT EXISTS idx_source_health_lifecycle
     ON source_health (lifecycle, scope);
+
+CREATE TABLE IF NOT EXISTS crawl_targets (
+    source TEXT PRIMARY KEY REFERENCES source_catalog(source) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    priority SMALLINT NOT NULL DEFAULT 100,
+    interval_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (interval_seconds >= 60),
+    next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    last_started_at TIMESTAMPTZ,
+    last_finished_at TIMESTAMPTZ,
+    last_complete_at TIMESTAMPTZ,
+    last_status TEXT NOT NULL DEFAULT 'pending',
+    last_rows INTEGER NOT NULL DEFAULT 0 CHECK (last_rows >= 0),
+    expected_rows INTEGER CHECK (expected_rows IS NULL OR expected_rows >= 0),
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawl_targets_due
+    ON crawl_targets (priority, next_run_at)
+    WHERE enabled;
+CREATE INDEX IF NOT EXISTS idx_crawl_targets_lease
+    ON crawl_targets (lease_expires_at)
+    WHERE lease_expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_crawl_targets_complete
+    ON crawl_targets (last_complete_at DESC);
+
+CREATE TABLE IF NOT EXISTS source_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    source TEXT NOT NULL REFERENCES source_catalog(source) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL,
+    complete BOOLEAN NOT NULL,
+    rows_scanned INTEGER NOT NULL CHECK (rows_scanned >= 0),
+    expected_rows INTEGER CHECK (expected_rows IS NULL OR expected_rows >= 0),
+    target_rows INTEGER NOT NULL DEFAULT 0 CHECK (target_rows >= 0),
+    new_rows INTEGER NOT NULL DEFAULT 0 CHECK (new_rows >= 0),
+    removed_rows INTEGER NOT NULL DEFAULT 0 CHECK (removed_rows >= 0),
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_snapshots_source_finished
+    ON source_snapshots (source, finished_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_snapshots_finished
+    ON source_snapshots (finished_at DESC);
+
+CREATE TABLE IF NOT EXISTS worker_tasks (
+    task_key TEXT PRIMARY KEY,
+    next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    last_started_at TIMESTAMPTZ,
+    last_finished_at TIMESTAMPTZ,
+    last_status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_due
+    ON worker_tasks (next_run_at);
 
 CREATE OR REPLACE FUNCTION promote_source_catalog_scope()
 RETURNS TRIGGER
