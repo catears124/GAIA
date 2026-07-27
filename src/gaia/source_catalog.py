@@ -100,7 +100,13 @@ def _spec(collector: Collector) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
-def save_catalog(database: Database, collectors: list[Collector]) -> int:
+def save_candidates(
+    database: Database,
+    collectors: list[Collector],
+    *,
+    origin: str,
+) -> int:
+    """Record source evidence without allowing it into the production crawler."""
     rows = []
     for collector in collectors:
         described = _spec(collector)
@@ -113,6 +119,7 @@ def save_catalog(database: Database, collectors: list[Collector]) -> int:
                 kind,
                 collector.scope,
                 Jsonb(spec),
+                origin,
             )
         )
     if not rows:
@@ -120,8 +127,59 @@ def save_catalog(database: Database, collectors: list[Collector]) -> int:
     with database.connect() as connection:
         connection.executemany(
             """
-            INSERT INTO source_catalog(source, kind, scope, spec)
-            VALUES (%s,%s,%s,%s)
+            INSERT INTO source_candidates(source, kind, scope, spec, origin)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT(source) DO UPDATE SET
+                kind=excluded.kind,
+                scope=CASE
+                    WHEN source_candidates.scope='current' THEN 'current'
+                    ELSE excluded.scope
+                END,
+                spec=excluded.spec,
+                origin=excluded.origin,
+                evidence_count=source_candidates.evidence_count + 1,
+                last_seen_at=now(),
+                status=CASE
+                    WHEN source_candidates.status='validated' THEN 'validated'
+                    ELSE 'candidate'
+                END
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def save_catalog(
+    database: Database,
+    collectors: list[Collector],
+    *,
+    validated: bool = False,
+    origin: str = "unspecified",
+) -> int:
+    """Persist collectors; production callers must explicitly validate them first."""
+    rows = []
+    for collector in collectors:
+        described = _spec(collector)
+        if described is None:
+            continue
+        kind, spec = described
+        rows.append(
+            (
+                canonical_source_name(collector.name),
+                kind,
+                collector.scope,
+                Jsonb(spec),
+                validated,
+                origin,
+            )
+        )
+    if not rows:
+        return 0
+    with database.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO source_catalog(source, kind, scope, spec, validated, origin)
+            VALUES (%s,%s,%s,%s,%s,%s)
             ON CONFLICT(source) DO UPDATE SET
                 kind=excluded.kind,
                 scope=CASE
@@ -129,6 +187,11 @@ def save_catalog(database: Database, collectors: list[Collector]) -> int:
                     ELSE excluded.scope
                 END,
                 spec=excluded.spec,
+                validated=source_catalog.validated OR excluded.validated,
+                origin=CASE
+                    WHEN excluded.validated THEN excluded.origin
+                    ELSE source_catalog.origin
+                END,
                 last_discovered_at=now()
             """,
             rows,
@@ -219,6 +282,7 @@ def load_catalog(database: Database) -> list[Collector]:
             SELECT c.source, c.kind, c.scope, c.spec, h.lifecycle
             FROM source_catalog AS c
             LEFT JOIN source_health AS h ON h.source=c.source
+            WHERE c.validated
             ORDER BY c.source
             """
         ).fetchall()
