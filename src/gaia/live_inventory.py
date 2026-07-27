@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 from .collectors import CollectorResult
-from .db import Database
+from .db import Database, _PsycopgConnectionAdapter
 from .inventory import ClaimedTarget
 from .inventory_runtime import (
     InventoryWorker as RuntimeInventoryWorker,
     RuntimeInventoryStore,
 )
+
+
+class LiveDatabase(Database):
+    """Worker database connection that pipelines independent PostgreSQL writes."""
+
+    @contextmanager
+    def connect(self) -> Iterator[_PsycopgConnectionAdapter]:
+        # apply_result historically issues one upsert per listing. Pipeline mode keeps
+        # its transaction semantics while collapsing thousands of network round trips.
+        with Database.connect(self) as adapter:
+            with adapter._connection.pipeline():
+                yield adapter
 
 
 class LiveInventoryStore(RuntimeInventoryStore):
