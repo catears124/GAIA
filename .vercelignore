@@ -1,0 +1,11 @@
+# Local crawler state is not part of the Vercel deployment.
+data/
+
+# Local environments and caches.
+.venv/
+venv/
+.pytest_cache/
+.pytest-validation/
+.ruff_cache/
+**/__pycache__/
+*.py[cod]
