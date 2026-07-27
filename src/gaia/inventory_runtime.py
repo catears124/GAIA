@@ -69,6 +69,20 @@ class RuntimeInventoryStore(InventoryStore):
             )
         return len(payload)
 
+    def ensure_task(self, key: str) -> None:
+        # Existing employer boards are the first priority after deployment. Broad market
+        # discovery starts shortly afterward; the heavier historical census starts later.
+        initial_delay = 3600 if key == "universe-discovery" else 300
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO worker_tasks(task_key, next_run_at)
+                VALUES (%s, now() + (%s * interval '1 second'))
+                ON CONFLICT(task_key) DO NOTHING
+                """,
+                (key, initial_delay),
+            )
+
 
 class InventoryWorker(BaseInventoryWorker):
     """Production worker with stable source identities and a filtered source queue."""
