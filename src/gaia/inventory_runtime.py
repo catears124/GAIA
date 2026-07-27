@@ -43,11 +43,18 @@ class RuntimeInventoryStore(InventoryStore):
                             PARTITION BY lower(catalog.source)
                             ORDER BY
                                 (catalog.scope='current') DESC,
+                                (
+                                    health.complete
+                                    AND health.last_success_at IS NOT NULL
+                                    AND health.status <> ALL(%s)
+                                ) DESC NULLS LAST,
+                                health.last_success_at DESC NULLS LAST,
                                 (catalog.source=lower(catalog.source)) DESC,
                                 catalog.last_discovered_at DESC,
                                 catalog.source
                         ) AS rank
                     FROM source_catalog AS catalog
+                    LEFT JOIN source_health AS health USING(source)
                     WHERE catalog.kind = ANY(%s)
                 )
                 SELECT source, kind, scope
@@ -55,7 +62,7 @@ class RuntimeInventoryStore(InventoryStore):
                 WHERE rank=1
                 ORDER BY source
                 """,
-                (sorted(SUPPORTED_CATALOG_KINDS),),
+                (sorted(BAD_COMPLETION_STATUSES), sorted(SUPPORTED_CATALOG_KINDS)),
             ).fetchall()
 
             # `enabled` now means "required for the public coverage contract".
