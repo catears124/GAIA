@@ -1,49 +1,48 @@
 # GAIA
 
-**Great, Another Internship Aggregator** is a local-first index for verified Summer 2027 computer-science internships.
-
-## v3 product contract
+**Great, Another Internship Aggregator** is a verified index of Summer 2027 computer-science internships.
 
 > Every CS internship. Only when it is real.
 
-GAIA discovers leads from public indexes, historical archives, employer career systems, robots/sitemaps and supported ATS providers. The default product feed is stricter: a listing appears as a normal internship only after GAIA recovers it from an employer-controlled source.
+GAIA discovers leads from public indexes, historical archives, employer career systems, robots/sitemaps, and supported ATS providers. The public feed is stricter: an application appears as verified only after GAIA recovers it from an employer-controlled source.
 
-Public indexes are useful, but they are leads. They do not get to dominate the homepage merely because a README said “Summer 2027.”
+## Product contract
 
-## What appears in the default feed
+The default feed requires all of the following:
 
-The default feed includes only role families that satisfy all of the following:
+- a technical role family: software, ML/AI, data, security, hardware, quant, or product;
+- defensible Summer 2027 evidence;
+- at least one employer-controlled source, such as a native ATS/API result or structured employer page.
 
-- technical category: software, ML/AI, data, security, hardware, quant or product;
-- confirmed 2027 evidence;
-- at least one employer-controlled source variant, either a native ATS/API result or a verified structured employer page.
+Index-only records remain visible as leads. Registry timestamps never become employer publication dates, and an HTTP 200 response does not count as complete coverage unless GAIA actually traversed the declared search surface.
 
-Index-only records move to the **Lead queue**. They remain searchable and visible, but they are no longer treated as ready-to-apply product rows.
+## Architecture
 
-## Two-plane crawler design
+```text
+Employer ATSs, sitemaps, indexes, archives
+                    |
+                    v
+          GAIA crawler / discovery worker
+                    |
+                    v
+          Supabase PostgreSQL database
+                    |
+                    v
+             FastAPI on Vercel
+```
 
-### Refresh jobs
+PostgreSQL is the only persistence layer. The crawler and public API use the same schema, while the Vercel deployment is read-only. GAIA no longer packages a SQLite snapshot into the serverless function.
 
-The normal startup and **Refresh jobs** action poll only current sources already known to expose relevant internships.
+The database model uses:
 
-- Greenhouse, Lever, Ashby, SmartRecruiters, Recruitee and Workable boards are enumerated directly.
-- Workday is traversed inside its public `intern` and `co-op` search surfaces; GAIA does not scan the whole employer board during interactive refresh.
-- Google Careers uses its public internship search and extracts job identities from links and embedded page data.
-- Current custom pages are independently verified.
-- Progress is visible in the UI and source logs are concise by default.
+- `TIMESTAMPTZ` for observed, posted, and verification times;
+- `TEXT[]` for normalized locations;
+- `JSONB` for the nested family-opening read model and source specifications;
+- a unique partial index to enforce one active sync run;
+- trigram and GIN indexes for company, title, location, and JSON search paths;
+- PostgreSQL constraints for lifecycle, scope, counts, and derived-family invariants.
 
-### Discover companies
-
-The explicit **Discover companies** action expands the monitored market.
-
-- Current 2027 internship indexes seed application URLs and employers.
-- Recently active internship repositories are discovered dynamically through GitHub repository search.
-- Historical 2025–2026 internship archives seed ATS boards that may reopen for 2027.
-- Known URLs promote automatically into provider-level boards.
-- Custom employer domains expand through `robots.txt`, sitemap indexes and structured `JobPosting` pages.
-- Discovered source specifications persist in SQLite, so future refreshes no longer depend on the original index that revealed them.
-
-The heavy discovery sweep is intentionally separate from the fast interactive refresh.
+Psycopg prepared statements are disabled deliberately so Supabase's PgBouncer transaction pooler can safely serve Vercel functions.
 
 ## Supported source families
 
@@ -57,9 +56,145 @@ Native enumeration currently covers:
 - SmartRecruiters Posting API
 - Recruitee Careers Site API
 - Workable public account jobs
+- Jobvite, iCIMS, Oracle Cloud, and SuccessFactors
 - employer sitemaps and Schema.org `JobPosting` pages
 
 Unsupported or access-limited domains remain explicit coverage work; they are never silently treated as complete.
+
+## Local setup
+
+Python 3.11 or newer:
+
+```bash
+python -m venv .venv
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+python -m pip install -e ".[dev]"
+copy .env.example .env
+```
+
+Create a Supabase project, then copy the **transaction pooler** connection string from:
+
+```text
+Supabase Dashboard -> Project Settings -> Database -> Connection string
+```
+
+Put it in `.env`:
+
+```text
+GAIA_DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres?sslmode=require
+```
+
+Do not use the browser-facing Supabase URL or anon key. GAIA connects directly to PostgreSQL, and the database URL must remain server-side.
+
+Initialize the schema:
+
+```bash
+gaia migrate
+```
+
+Run GAIA:
+
+```bash
+# Fast current-source refresh
+gaia sync
+
+# Heavy employer/feed/sitemap discovery sweep
+gaia discover
+
+# Local web application
+gaia serve
+```
+
+Open `http://127.0.0.1:8501`.
+
+## Import the existing SQLite database
+
+The migration script preserves crawler history, source health, catalog state, benchmark cases, and postings, then rebuilds role families under the PostgreSQL model.
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py --source data/gaia.db
+```
+
+The importer truncates the target GAIA tables by default. To upsert without clearing them:
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py --source data/gaia.db --keep-target
+```
+
+After import, verify:
+
+```bash
+gaia serve
+```
+
+Then inspect:
+
+```text
+/api/health
+/api/stats
+/api/families
+/api/coverage
+```
+
+Keep the SQLite file until the imported row counts and public UI are correct. It is no longer read by GAIA after migration.
+
+## Deploy to Vercel
+
+Add this environment variable to the Vercel project for Production, Preview, and Development:
+
+```text
+GAIA_DATABASE_URL=<Supabase transaction-pooler connection string>
+```
+
+Recommended deployment values are already enforced by `app.py` on Vercel:
+
+```text
+GAIA_READ_ONLY=1
+GAIA_INITIAL_SYNC=0
+GAIA_AUTO_MIGRATE=0
+```
+
+Run the schema migration and SQLite import locally before the first production deployment. Vercel should query the database; it should not create schemas or run crawlers.
+
+Deploy:
+
+```bash
+vercel --prod
+```
+
+The repository workflow also verifies against a real PostgreSQL 16 service before production deployment. Configure these GitHub repository secrets:
+
+```text
+VERCEL_TOKEN
+VERCEL_ORG_ID
+VERCEL_PROJECT_ID
+```
+
+## Refresh and discovery planes
+
+### Refresh jobs
+
+The normal sync polls current sources already known to expose relevant internships.
+
+- Greenhouse, Lever, Ashby, SmartRecruiters, Recruitee, and Workable boards are enumerated directly.
+- Workday is traversed inside public `intern` and `co-op` search surfaces.
+- Google Careers uses its public internship search and extracts stable job identities.
+- Current custom pages are independently verified.
+- Link validation closes applications that are actually gone without treating protected pages as dead.
+
+### Discover companies
+
+The heavier discovery path expands the monitored market.
+
+- Current internship indexes seed application URLs and employers.
+- Recently active internship repositories are discovered dynamically through GitHub search.
+- Historical internship archives seed ATS boards that may reopen for 2027.
+- Known URLs promote into provider-level boards.
+- Custom employer domains expand through `robots.txt`, sitemap indexes, and structured `JobPosting` pages.
+- Productive sources persist in PostgreSQL and are promoted into the hot refresh set.
 
 ## Date contract
 
@@ -69,88 +204,10 @@ GAIA exposes separate time concepts:
 - **First detected** is when GAIA first observed the application.
 - **Last verified** is when GAIA most recently confirmed it.
 - Registry timestamps never become employer publication dates.
-- Workday relative values such as `Posted 1 Day Ago` remain approximate and render as `~1 day ago`.
-- When an employer exposes no defensible publication date, GAIA says so and still shows verification time. It does not invent precision.
+- Approximate source values remain approximate.
+- When an employer exposes no defensible publication date, GAIA says so instead of inventing precision.
 
-## Canonicalization
-
-v3 adds a product-quality layer:
-
-- company aliases and flags are normalized for display and grouping;
-- `D. E. Shaw`, `DE Shaw`, and related variants merge;
-- `BAE Systems 🇺🇸` displays as `BAE Systems`;
-- glued registry location strings such as `4 locations**Nashua, NHHudson, NH...` are repaired before display;
-- persisted source identities are deduplicated without destroying case-sensitive provider IDs.
-
-## Coverage contract
-
-Coverage is an engineering diagnostic, not the product headline. GAIA reports:
-
-- verified employer applications;
-- unresolved lead applications;
-- benchmark applications from independent 2027 indexes;
-- benchmark applications still lead-only;
-- employer applications found before or outside the benchmark;
-- complete source traversals;
-- genuine current crawler failures;
-- access-limited sources;
-- stale pages and dormant historical watches.
-
-A source is not healthy merely because it returned HTTP 200. Pagination or the declared search surface must finish. Historical failures do not inflate the current failure count, and query-scoped Workday sources returning zero internships are not mislabeled as broken global boards.
-
-## Run locally
-
-Python 3.11 or newer:
-
-```bash
-python -m venv .venv
-
-# Windows cmd
-.venv\Scripts\activate.bat
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-
-python -m pip install -e ".[dev]"
-pytest -q
-python scripts/run_local.py
-```
-
-Open `http://127.0.0.1:8501`.
-
-## Deploy to Vercel
-
-GAIA ships a compact, read-only index snapshot with the FastAPI application.
-This keeps the public deployment fast and useful while the stateful crawler
-continues to run outside Vercel's ephemeral function filesystem.
-
-```bash
-python scripts/build_deploy_snapshot.py
-vercel
-```
-
-Production deploys are also automated by `.github/workflows/deploy.yml`. Add
-`VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID` as GitHub repository
-secrets, then push to `main` or run the workflow manually. Pull requests and
-pushes continue to run the Python lint and test matrix before production work
-is eligible to ship.
-
-Commands:
-
-```bash
-# Fast current-source refresh
-gaia sync
-
-# Heavy employer/feed/sitemap discovery sweep
-gaia discover
-
-# Web application
-gaia serve
-```
-
-The SQLite database defaults to `data/gaia.db`. Override it with `GAIA_DB`.
-
-Useful tuning variables:
+## Useful tuning variables
 
 ```text
 GAIA_CONCURRENCY=16
@@ -159,35 +216,17 @@ GAIA_DETAIL_CONCURRENCY=8
 GAIA_WORKDAY_MAX_PER_TERM=4000
 GAIA_DOMAIN_CONCURRENCY=12
 GAIA_DOMAIN_MAX_URLS=500
+GAIA_LINK_CHECK_LIMIT=500
+GAIA_LINK_CHECK_CONCURRENCY=20
 GAIA_GITHUB_TOKEN=<optional token for higher discovery rate limits>
 GAIA_DEBUG_COLLECTORS=1
 ```
 
-## Adding a provider
-
-A collector must declare:
-
-- its coverage mode and current/historical scope;
-- whether its declared surface was fully traversed;
-- rows scanned and expected rows where available;
-- publication-date provenance and precision;
-- a stable application identity;
-- regression fixtures for pagination, empty results and malformed responses.
-
-Provider discovery should be URL-pattern based. Employer names belong in discovered data and the persisted source catalog, not in Python branches.
-
 ## Validation
 
-The test suite covers:
+```bash
+ruff check .
+pytest -q
+```
 
-- Workday query-scoped pagination and the prohibition on empty search text;
-- concurrent page traversal and duplicate-term reconciliation;
-- Google extraction from anchors and embedded page data;
-- SmartRecruiters, Recruitee and Workable promotion and enumeration;
-- dynamic GitHub market-feed discovery;
-- sitemap expansion and structured publication dates;
-- persisted source-catalog behavior;
-- strict Summer 2027 classification;
-- application deduplication and conservative role-family grouping;
-- source status, latest-run scoping and benchmark recall accounting;
-- v3 company/source/location canonicalization.
+The suite covers provider pagination, classification, canonicalization, application reconciliation, family materialization, link validation, source lifecycle, coverage accounting, and PostgreSQL concurrency behavior.
