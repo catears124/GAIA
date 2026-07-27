@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -50,7 +51,15 @@ from .db_write import WriteMixin  # noqa: E402
 
 
 class _PsycopgConnectionAdapter(ConnectionAdapter):
-    """Connection adapter with psycopg3 cursor-backed bulk execution."""
+    """Psycopg3 adapter for legacy SQL and cursor-backed bulk execution."""
+
+    @staticmethod
+    def _query(query: str) -> str:
+        translated = ConnectionAdapter._query(query)
+        # Psycopg treats every percent sign in a parameterized query as part of
+        # its placeholder grammar. Preserve supported placeholders and already
+        # escaped percents, while escaping SQL literals such as ILIKE '%remote%'.
+        return re.sub(r"(?<!%)%(?![sbt%])", "%%", translated)
 
     def executemany(self, query: str, params_seq: Any) -> None:
         with self._connection.cursor() as cursor:
