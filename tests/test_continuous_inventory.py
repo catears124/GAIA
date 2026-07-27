@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from gaia.classify import classify
 from gaia.inventory import InventoryStore
+from gaia.inventory_runtime import COVERAGE_KINDS, FALLBACK_KINDS, SUPPORTED_CATALOG_KINDS
 from gaia.models import Posting
 
 
@@ -46,3 +47,10 @@ def test_source_cadence_is_independent_and_dormant_sources_still_run() -> None:
     assert InventoryStore._default_interval("workday-search", "current") == 30 * 60
     assert InventoryStore._default_interval("domain", "current") == 6 * 3600
     assert InventoryStore._default_interval("greenhouse", "historical") == 24 * 3600
+
+
+def test_fallbacks_are_scheduled_but_do_not_define_market_coverage() -> None:
+    assert FALLBACK_KINDS == {"domain", "verification"}
+    assert FALLBACK_KINDS <= SUPPORTED_CATALOG_KINDS
+    assert FALLBACK_KINDS.isdisjoint(COVERAGE_KINDS)
+    assert {"greenhouse", "lever", "ashby", "workday-search"} <= COVERAGE_KINDS
