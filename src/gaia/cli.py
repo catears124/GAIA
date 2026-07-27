@@ -14,6 +14,7 @@ from .service import SyncService
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="gaia")
     sub = root.add_subparsers(dest="command", required=True)
+    sub.add_parser("migrate", help="create or upgrade the PostgreSQL schema")
     sub.add_parser("sync", help="refresh current internship sources")
     sub.add_parser(
         "discover",
@@ -37,7 +38,10 @@ def main() -> None:
         level=os.getenv("GAIA_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    if args.command == "sync":
+    if args.command == "migrate":
+        Database(migrate=True)
+        print("PostgreSQL schema is ready.")
+    elif args.command == "sync":
         asyncio.run(run_sync("refresh"))
     elif args.command == "discover":
         asyncio.run(run_sync("discover"))
