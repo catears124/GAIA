@@ -7,7 +7,7 @@ import os
 
 import uvicorn
 
-from .db import Database
+from .db import Database, _normalize_database_url
 from .inventory_runtime import InventoryWorker
 
 
@@ -40,6 +40,30 @@ async def run_worker(*, once: bool, budget_seconds: float | None, concurrency: i
     print(summary.as_dict())
 
 
+def run_migration() -> None:
+    """Run DDL on a direct/admin connection without the request query timeout."""
+    migration_url = (
+        os.getenv("GAIA_MIGRATION_DATABASE_URL")
+        or os.getenv("GAIA_ADMIN_DATABASE_URL")
+        or os.getenv("POSTGRES_URL_NON_POOLING")
+    )
+    if migration_url:
+        migration_url = _normalize_database_url(migration_url)
+
+    previous_pgoptions = os.environ.get("PGOPTIONS")
+    options = previous_pgoptions or ""
+    if "statement_timeout" not in options:
+        options = f"{options} -c statement_timeout=0".strip()
+    os.environ["PGOPTIONS"] = options
+    try:
+        Database(url=migration_url, migrate=True)
+    finally:
+        if previous_pgoptions is None:
+            os.environ.pop("PGOPTIONS", None)
+        else:
+            os.environ["PGOPTIONS"] = previous_pgoptions
+
+
 def main() -> None:
     args = parser().parse_args()
     logging.basicConfig(
@@ -47,7 +71,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     if args.command == "migrate":
-        Database(migrate=True)
+        run_migration()
         print("PostgreSQL schema is ready.")
     elif args.command == "worker":
         asyncio.run(
