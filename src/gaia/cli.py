@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 
 import psycopg
@@ -11,7 +12,9 @@ import uvicorn
 from psycopg import sql
 
 from .db import Database, _normalize_database_url
-from .inventory_runtime import InventoryWorker
+from .live_inventory import InventoryWorker
+
+LOGGER = logging.getLogger("gaia.cli")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -25,22 +28,47 @@ def parser() -> argparse.ArgumentParser:
     worker.add_argument(
         "--concurrency",
         type=int,
-        default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "12")),
+        default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "24")),
     )
 
-    serve = sub.add_parser("serve", help="serve the local web application")
+    serve = sub.add_parser("serve", help="serve the app and continuously refresh inventory")
     serve.add_argument("--host", default=os.getenv("GAIA_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.getenv("GAIA_PORT", "8501")))
+    serve.add_argument(
+        "--no-worker",
+        action="store_true",
+        help="serve read-only without starting the local continuous worker",
+    )
+    serve.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "24")),
+    )
     return root
 
 
 async def run_worker(*, once: bool, budget_seconds: float | None, concurrency: int) -> None:
-    database = Database(migrate=True)
+    # Schema changes are explicit through `gaia migrate`; workers stay on the normal
+    # pooled connection and never attempt long-running DDL during startup.
+    database = Database(migrate=False)
     summary = await InventoryWorker(database, concurrency=max(1, concurrency)).run(
         once=once,
         budget_seconds=budget_seconds,
     )
-    print(summary.as_dict())
+    if once:
+        print(summary.as_dict())
+
+
+def start_embedded_worker(concurrency: int) -> threading.Thread:
+    def target() -> None:
+        try:
+            asyncio.run(run_worker(once=False, budget_seconds=None, concurrency=concurrency))
+        except Exception:
+            LOGGER.exception("embedded inventory worker stopped")
+
+    thread = threading.Thread(target=target, name="gaia-inventory", daemon=True)
+    thread.start()
+    return thread
 
 
 def run_migration() -> None:
@@ -62,8 +90,6 @@ def run_migration() -> None:
         prepare_threshold=None,
         options="-c statement_timeout=0 -c lock_timeout=0",
     ) as connection:
-        # Set these explicitly after connecting as well. This wins over role/database
-        # defaults and makes the migration behavior independent of inherited PGOPTIONS.
         connection.execute("SET statement_timeout TO 0")
         connection.execute("SET lock_timeout TO 0")
         connection.execute(
@@ -93,7 +119,9 @@ def main() -> None:
             )
         )
     elif args.command == "serve":
-        uvicorn.run("gaia.api:app", host=args.host, port=args.port, reload=False)
+        if not args.no_worker:
+            start_embedded_worker(max(1, args.concurrency))
+        uvicorn.run("gaia.product_api:app", host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":
