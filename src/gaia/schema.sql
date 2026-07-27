@@ -119,9 +119,18 @@ CREATE TABLE IF NOT EXISTS source_catalog (
     kind TEXT NOT NULL,
     scope TEXT NOT NULL CHECK (scope IN ('current', 'historical')),
     spec JSONB NOT NULL,
+    validated BOOLEAN NOT NULL DEFAULT FALSE,
+    origin TEXT NOT NULL DEFAULT 'legacy',
     first_discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_discovered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE source_catalog
+    ADD COLUMN IF NOT EXISTS validated BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE source_catalog
+    ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS idx_source_catalog_validated
+    ON source_catalog (validated, scope, kind);
 
 CREATE TABLE IF NOT EXISTS source_health (
     source TEXT PRIMARY KEY,
@@ -146,6 +155,32 @@ CREATE INDEX IF NOT EXISTS idx_source_health_run
     ON source_health (last_run_id, scope, status);
 CREATE INDEX IF NOT EXISTS idx_source_health_lifecycle
     ON source_health (lifecycle, scope);
+
+CREATE TABLE IF NOT EXISTS source_candidates (
+    source TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('current', 'historical')),
+    spec JSONB NOT NULL,
+    origin TEXT NOT NULL,
+    evidence_count INTEGER NOT NULL DEFAULT 1 CHECK (evidence_count >= 1),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    next_probe_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    last_probe_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'candidate'
+        CHECK (status IN ('candidate', 'retry', 'validated', 'rejected')),
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_candidates_due
+    ON source_candidates (status, next_probe_at, evidence_count DESC)
+    WHERE status IN ('candidate', 'retry');
+CREATE INDEX IF NOT EXISTS idx_source_candidates_lease
+    ON source_candidates (lease_expires_at)
+    WHERE lease_expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS crawl_targets (
     source TEXT PRIMARY KEY REFERENCES source_catalog(source) ON DELETE CASCADE,
@@ -215,6 +250,56 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_due
     ON worker_tasks (next_run_at);
+
+-- Bootstrap the validated catalog from sources that have already proved they can enumerate
+-- an employer system, or that already own direct postings in the inventory.
+UPDATE source_catalog AS catalog
+SET validated=TRUE,
+    origin=CASE WHEN catalog.origin='legacy' THEN 'legacy-validated' ELSE catalog.origin END
+WHERE EXISTS (
+    SELECT 1
+    FROM source_health AS health
+    WHERE health.source=catalog.source
+      AND health.complete
+      AND health.last_success_at IS NOT NULL
+      AND health.status NOT IN ('broken','blocked','truncated','partial')
+) OR EXISTS (
+    SELECT 1
+    FROM postings AS posting
+    WHERE posting.source=catalog.source
+      AND posting.source_mode='direct'
+);
+
+-- Collapse legacy case-only duplicates before exposing source counts.
+WITH ranked AS (
+    SELECT source,
+           ROW_NUMBER() OVER (
+               PARTITION BY lower(source)
+               ORDER BY validated DESC, (scope='current') DESC, last_discovered_at DESC, source
+           ) AS rank
+    FROM source_catalog
+)
+UPDATE source_catalog AS catalog
+SET validated=FALSE
+FROM ranked
+WHERE catalog.source=ranked.source AND ranked.rank>1;
+
+-- Preserve noisy historical guesses as evidence, but remove them from the production catalog.
+INSERT INTO source_candidates(source, kind, scope, spec, origin, evidence_count)
+SELECT source, kind, scope, spec, origin, 1
+FROM source_catalog
+WHERE NOT validated
+ON CONFLICT(source) DO UPDATE SET
+    kind=excluded.kind,
+    scope=CASE
+        WHEN source_candidates.scope='current' THEN 'current'
+        ELSE excluded.scope
+    END,
+    spec=excluded.spec,
+    origin=excluded.origin,
+    last_seen_at=now();
+
+DELETE FROM source_catalog WHERE NOT validated;
 
 CREATE OR REPLACE FUNCTION promote_source_catalog_scope()
 RETURNS TRIGGER
