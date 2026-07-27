@@ -8,7 +8,7 @@ import os
 import uvicorn
 
 from .db import Database
-from .inventory import InventoryWorker
+from .inventory_runtime import InventoryWorker
 
 
 def parser() -> argparse.ArgumentParser:
