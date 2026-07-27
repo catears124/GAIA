@@ -1,8 +1,12 @@
 """Import the former GAIA SQLite database into PostgreSQL/Supabase.
 
-Run once after setting GAIA_DATABASE_URL to the Supabase transaction-pooler URL:
+Run once after configuring a PostgreSQL connection:
 
     python scripts/migrate_sqlite_to_postgres.py --source data/gaia.db
+
+The importer deliberately enforces the current PostgreSQL persistence contract.
+Malformed legacy rows are skipped and reported instead of weakening database
+constraints or aborting the entire migration.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from gaia.db import Database  # noqa: E402
+from gaia.grouping import normalize_title  # noqa: E402
+from gaia.models import canonical_url  # noqa: E402
+from gaia.quality import normalize_locations  # noqa: E402
+
+VALID_SYNC_STATUSES = {"running", "ok", "partial", "cancelled"}
+VALID_SCOPES = {"current", "historical"}
+VALID_LIFECYCLES = {"candidate", "productive", "quarantined"}
 
 
 def chunks(rows: Iterable[Sequence[Any]], size: int) -> Iterator[list[Sequence[Any]]]:
@@ -62,7 +74,44 @@ def parsed_json(raw: Any, default: Any) -> Any:
         return default
 
 
-def insert_batches(database: Database, query: str, rows: Iterable[Sequence[Any]], size: int) -> int:
+def clean_text(raw: Any, default: str = "") -> str:
+    if raw is None:
+        return default
+    return str(raw).strip()
+
+
+def nonnegative_int(raw: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def optional_nonnegative_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def optional_year(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    try:
+        year = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return year if -32768 <= year <= 32767 else None
+
+
+def insert_batches(
+    database: Database,
+    query: str,
+    rows: Iterable[Sequence[Any]],
+    size: int,
+) -> int:
     total = 0
     with database.connect() as target:
         for batch in chunks(rows, size):
@@ -71,12 +120,120 @@ def insert_batches(database: Database, query: str, rows: Iterable[Sequence[Any]]
     return total
 
 
-def import_database(source_path: Path, database: Database, *, batch_size: int, truncate: bool) -> None:
+def posting_records(
+    rows: Iterable[sqlite3.Row],
+    available: set[str],
+    stats: dict[str, Any],
+) -> Iterator[Sequence[Any]]:
+    for row in rows:
+        stats["seen"] += 1
+
+        posting_key = clean_text(row["posting_key"])
+        family_key = clean_text(row["family_key"])
+        company = clean_text(row["company"])
+        title = clean_text(row["title"])
+        apply_url = clean_text(row["apply_url"])
+        canonical_apply_url = clean_text(row["canonical_apply_url"])
+        source = clean_text(row["source"])
+        source_id = clean_text(row["source_id"])
+
+        missing = [
+            name
+            for name, item in (
+                ("posting_key", posting_key),
+                ("family_key", family_key),
+                ("company", company),
+                ("title", title),
+                ("apply_url", apply_url),
+                ("canonical_apply_url", canonical_apply_url),
+                ("source", source),
+                ("source_id", source_id),
+            )
+            if not item
+        ]
+        if missing:
+            stats["skipped"] += 1
+            if len(stats["examples"]) < 10:
+                stats["examples"].append(
+                    f"{posting_key or '<unknown>'}: missing {', '.join(missing)}"
+                )
+            continue
+
+        first_seen_at = (
+            row["first_seen_at"]
+            or row["last_seen_at"]
+            or row["posted_at"]
+            or row["updated_at"]
+        )
+        last_seen_at = row["last_seen_at"] or first_seen_at
+        if first_seen_at is None or last_seen_at is None:
+            stats["skipped"] += 1
+            if len(stats["examples"]) < 10:
+                stats["examples"].append(
+                    f"{posting_key}: missing first_seen_at/last_seen_at"
+                )
+            continue
+
+        raw_locations = parsed_json(row["locations_json"], [])
+        if not isinstance(raw_locations, list):
+            raw_locations = []
+        locations = normalize_locations(
+            [clean_text(item) for item in raw_locations if clean_text(item)]
+        )
+
+        normalized = clean_text(row["normalized_title"]) or normalize_title(title)
+        canonical_apply_url = canonical_apply_url or canonical_url(apply_url)
+        target_match = clean_text(row["target_match"], "unknown")
+        description = clean_text(row["description"])
+        if target_match not in {"exact", "year_confirmed", "source_confirmed"}:
+            description = ""
+
+        yield (
+            posting_key,
+            family_key,
+            company,
+            title,
+            normalized,
+            locations,
+            apply_url,
+            canonical_apply_url,
+            source,
+            source_id,
+            clean_text(row["source_mode"], "direct"),
+            description,
+            clean_text(row["employment_type"]),
+            row["posted_at"],
+            row["updated_at"],
+            row["posted_raw"],
+            clean_text(row["posted_precision"], "unknown"),
+            clean_text(row["posted_confidence"], "unknown"),
+            first_seen_at,
+            last_seen_at,
+            bool(row["active"]),
+            clean_text(row["category"], "other"),
+            row["season"],
+            optional_year(row["year"]),
+            target_match,
+            value(row, available, "link_checked_at"),
+            optional_nonnegative_int(value(row, available, "link_http_status")),
+            value(row, available, "link_final_url"),
+            clean_text(value(row, available, "link_status"), "unchecked"),
+        )
+
+
+def import_database(
+    source_path: Path,
+    database: Database,
+    *,
+    batch_size: int,
+    truncate: bool,
+) -> None:
     if not source_path.exists():
         raise SystemExit(f"source database does not exist: {source_path}")
 
     source = sqlite3.connect(source_path)
     source.row_factory = sqlite3.Row
+    imported_at = datetime.now(UTC)
     try:
         if truncate:
             with database.connect() as target:
@@ -98,6 +255,32 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                 """
             ).fetchall()
             run_ids = {int(row["id"]) for row in sync_rows}
+            running_ids = [
+                int(row["id"])
+                for row in sync_rows
+                if clean_text(row["status"]) == "running"
+            ]
+            current_running_id = max(running_ids) if running_ids else None
+
+            def normalized_sync_rows() -> Iterator[Sequence[Any]]:
+                for row in sync_rows:
+                    status = clean_text(row["status"], "partial")
+                    if status not in VALID_SYNC_STATUSES:
+                        status = "partial"
+                    finished_at = row["finished_at"]
+                    if status == "running" and int(row["id"]) != current_running_id:
+                        status = "cancelled"
+                        finished_at = finished_at or row["started_at"]
+                    yield (
+                        row["id"],
+                        row["started_at"],
+                        finished_at,
+                        status,
+                        nonnegative_int(row["sources"]),
+                        nonnegative_int(row["postings"]),
+                        nonnegative_int(row["failed"]),
+                    )
+
             sync_count = insert_batches(
                 database,
                 """
@@ -111,18 +294,7 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                     postings=excluded.postings,
                     failed=excluded.failed
                 """,
-                (
-                    (
-                        row["id"],
-                        row["started_at"],
-                        row["finished_at"],
-                        row["status"],
-                        row["sources"],
-                        row["postings"],
-                        row["failed"],
-                    )
-                    for row in sync_rows
-                ),
+                normalized_sync_rows(),
                 batch_size,
             )
             with database.connect() as target:
@@ -137,6 +309,7 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                 )
 
         posting_count = 0
+        posting_stats: dict[str, Any] = {"seen": 0, "skipped": 0, "examples": []}
         if table_exists(source, "postings"):
             available = columns(source, "postings")
             posting_rows = source.execute("SELECT * FROM postings")
@@ -183,46 +356,34 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                     link_final_url=excluded.link_final_url,
                     link_status=excluded.link_status
                 """,
-                (
-                    (
-                        row["posting_key"],
-                        row["family_key"],
-                        row["company"],
-                        row["title"],
-                        row["normalized_title"],
-                        parsed_json(row["locations_json"], []),
-                        row["apply_url"],
-                        row["canonical_apply_url"],
-                        row["source"],
-                        row["source_id"],
-                        row["source_mode"],
-                        row["description"],
-                        row["employment_type"],
-                        row["posted_at"],
-                        row["updated_at"],
-                        row["posted_raw"],
-                        row["posted_precision"],
-                        row["posted_confidence"],
-                        row["first_seen_at"],
-                        row["last_seen_at"],
-                        bool(row["active"]),
-                        row["category"],
-                        row["season"],
-                        row["year"],
-                        row["target_match"],
-                        value(row, available, "link_checked_at"),
-                        value(row, available, "link_http_status"),
-                        value(row, available, "link_final_url"),
-                        value(row, available, "link_status", "unchecked"),
-                    )
-                    for row in posting_rows
-                ),
+                posting_records(posting_rows, available, posting_stats),
                 batch_size,
             )
 
         catalog_count = 0
         if table_exists(source, "source_catalog"):
             catalog_rows = source.execute("SELECT * FROM source_catalog")
+
+            def catalog_records() -> Iterator[Sequence[Any]]:
+                for row in catalog_rows:
+                    source_name = clean_text(row["source"])
+                    kind = clean_text(row["kind"], "unknown")
+                    if not source_name:
+                        continue
+                    scope = clean_text(row["scope"], "historical")
+                    if scope not in VALID_SCOPES:
+                        scope = "historical"
+                    first = row["first_discovered_at"] or row["last_discovered_at"] or imported_at
+                    last = row["last_discovered_at"] or first
+                    yield (
+                        source_name,
+                        kind,
+                        scope,
+                        Jsonb(parsed_json(row["spec_json"], {})),
+                        first,
+                        last,
+                    )
+
             catalog_count = insert_batches(
                 database,
                 """
@@ -236,17 +397,7 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                     first_discovered_at=excluded.first_discovered_at,
                     last_discovered_at=excluded.last_discovered_at
                 """,
-                (
-                    (
-                        row["source"],
-                        row["kind"],
-                        row["scope"],
-                        Jsonb(parsed_json(row["spec_json"], {})),
-                        row["first_discovered_at"],
-                        row["last_discovered_at"],
-                    )
-                    for row in catalog_rows
-                ),
+                catalog_records(),
                 batch_size,
             )
 
@@ -254,6 +405,50 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
         if table_exists(source, "source_health"):
             available = columns(source, "source_health")
             health_rows = source.execute("SELECT * FROM source_health")
+
+            def health_records() -> Iterator[Sequence[Any]]:
+                for row in health_rows:
+                    source_name = clean_text(row["source"])
+                    mode = clean_text(row["mode"], "unknown")
+                    if not source_name:
+                        continue
+                    scope = clean_text(value(row, available, "scope"), "current")
+                    if scope not in VALID_SCOPES:
+                        scope = "current"
+                    lifecycle = clean_text(
+                        value(row, available, "lifecycle"), "candidate"
+                    )
+                    if lifecycle not in VALID_LIFECYCLES:
+                        lifecycle = "candidate"
+                    last_attempt = (
+                        row["last_attempt_at"] or row["last_success_at"] or imported_at
+                    )
+                    raw_run_id = value(row, available, "last_run_id")
+                    last_run_id = (
+                        int(raw_run_id)
+                        if raw_run_id is not None and int(raw_run_id) in run_ids
+                        else None
+                    )
+                    yield (
+                        source_name,
+                        mode,
+                        bool(row["complete"]),
+                        nonnegative_int(row["rows_scanned"]),
+                        optional_nonnegative_int(row["expected_rows"]),
+                        nonnegative_int(row["target_rows"]),
+                        last_attempt,
+                        row["last_success_at"],
+                        row["last_error"],
+                        clean_text(value(row, available, "status"), "unknown"),
+                        scope,
+                        value(row, available, "note"),
+                        last_run_id,
+                        lifecycle,
+                        nonnegative_int(
+                            value(row, available, "consecutive_failures", 0)
+                        ),
+                    )
+
             health_count = insert_batches(
                 database,
                 """
@@ -278,36 +473,32 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                     lifecycle=excluded.lifecycle,
                     consecutive_failures=excluded.consecutive_failures
                 """,
-                (
-                    (
-                        row["source"],
-                        row["mode"],
-                        bool(row["complete"]),
-                        row["rows_scanned"],
-                        row["expected_rows"],
-                        row["target_rows"],
-                        row["last_attempt_at"],
-                        row["last_success_at"],
-                        row["last_error"],
-                        value(row, available, "status", "unknown"),
-                        value(row, available, "scope", "current"),
-                        value(row, available, "note"),
-                        (
-                            int(value(row, available, "last_run_id"))
-                            if value(row, available, "last_run_id") in run_ids
-                            else None
-                        ),
-                        value(row, available, "lifecycle", "candidate"),
-                        int(value(row, available, "consecutive_failures", 0) or 0),
-                    )
-                    for row in health_rows
-                ),
+                health_records(),
                 batch_size,
             )
 
         benchmark_count = 0
         if table_exists(source, "benchmark_cases"):
             benchmark_rows = source.execute("SELECT * FROM benchmark_cases")
+
+            def benchmark_records() -> Iterator[Sequence[Any]]:
+                for row in benchmark_rows:
+                    version = clean_text(row["version"])
+                    posting_key = clean_text(row["posting_key"])
+                    if not version or not posting_key:
+                        continue
+                    yield (
+                        version,
+                        posting_key,
+                        clean_text(row["company"]),
+                        clean_text(row["title"]),
+                        clean_text(row["employment_type"]),
+                        clean_text(row["source_mode"]),
+                        clean_text(row["expected_category"]),
+                        clean_text(row["expected_target_match"]),
+                        row["captured_at"] or imported_at,
+                    )
+
             benchmark_count = insert_batches(
                 database,
                 """
@@ -324,28 +515,15 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
                     expected_target_match=excluded.expected_target_match,
                     captured_at=excluded.captured_at
                 """,
-                (
-                    (
-                        row["version"],
-                        row["posting_key"],
-                        row["company"],
-                        row["title"],
-                        row["employment_type"],
-                        row["source_mode"],
-                        row["expected_category"],
-                        row["expected_target_match"],
-                        row["captured_at"],
-                    )
-                    for row in benchmark_rows
-                ),
+                benchmark_records(),
                 batch_size,
             )
 
         database.rebuild_families()
         with database.connect() as target:
-            family_count = target.execute("SELECT COUNT(*) AS count FROM families").fetchone()[
-                "count"
-            ]
+            family_count = target.execute(
+                "SELECT COUNT(*) AS count FROM families"
+            ).fetchone()["count"]
 
         print(
             "Imported "
@@ -353,6 +531,13 @@ def import_database(source_path: Path, database: Database, *, batch_size: int, t
             f"{catalog_count:,} catalog sources, {health_count:,} health rows, "
             f"{benchmark_count:,} benchmark cases; rebuilt {int(family_count):,} families."
         )
+        if posting_stats["skipped"]:
+            print(
+                f"Skipped {posting_stats['skipped']:,} of {posting_stats['seen']:,} "
+                "legacy postings that violated the current persistence contract."
+            )
+            for example in posting_stats["examples"]:
+                print(f"  - {example}")
     finally:
         source.close()
 
