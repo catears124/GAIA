@@ -12,7 +12,7 @@ import uvicorn
 from psycopg import sql
 
 from .db import Database, _normalize_database_url
-from .live_inventory import InventoryWorker
+from .live_inventory import InventoryWorker, LiveDatabase
 
 LOGGER = logging.getLogger("gaia.cli")
 
@@ -50,7 +50,7 @@ def parser() -> argparse.ArgumentParser:
 async def run_worker(*, once: bool, budget_seconds: float | None, concurrency: int) -> None:
     # Schema changes are explicit through `gaia migrate`; workers stay on the normal
     # pooled connection and never attempt long-running DDL during startup.
-    database = Database(migrate=False)
+    database = LiveDatabase(migrate=False)
     summary = await InventoryWorker(database, concurrency=max(1, concurrency)).run(
         once=once,
         budget_seconds=budget_seconds,
