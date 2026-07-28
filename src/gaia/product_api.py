@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from fastapi import HTTPException, Query
 from fastapi.routing import APIRoute
 
 from . import api as legacy
@@ -40,7 +41,7 @@ def _remove_get_routes(*paths: str) -> None:
 
 
 legacy._order_clause = _live_order_clause
-_remove_get_routes("/api/health", "/api/stats")
+_remove_get_routes("/api/health", "/api/stats", "/api/families", "/api/facets")
 
 
 @app.get("/api/health")
@@ -79,6 +80,47 @@ def live_health() -> dict[str, object]:
         },
         "inventory": inventory,
     }
+
+
+@app.get("/api/families")
+def live_families(
+    q: str = Query("", max_length=200),
+    category: str = "",
+    target: str = "",
+    track: str = "tech",
+    trust: str = "all",
+    location: str = Query("", max_length=100),
+    sort: str = "newest",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(48, ge=12, le=100),
+    company: str = Query("", max_length=100),
+    remote: bool = False,
+    posted_within: int = Query(0, ge=0, le=365),
+) -> dict[str, object]:
+    trust = trust.strip() or "all"
+    if trust not in {"verified", "leads", "all"}:
+        raise HTTPException(status_code=400, detail="trust must be verified, leads, or all")
+    if sort not in {"newest", "verified", "company"}:
+        raise HTTPException(status_code=400, detail="sort must be newest, verified, or company")
+    return legacy._list_families(
+        query=q.strip(),
+        category=category.strip(),
+        target=target.strip(),
+        track=track.strip(),
+        trust=trust,
+        location=location.strip(),
+        sort=sort,
+        page=page,
+        page_size=page_size,
+        company=company.strip(),
+        remote=remote,
+        posted_within=posted_within,
+    )
+
+
+@app.get("/api/facets")
+def live_facets(trust: str = "all", target: str = "") -> dict[str, object]:
+    return legacy.facets(trust=trust, target=target)
 
 
 @app.get("/api/stats")
