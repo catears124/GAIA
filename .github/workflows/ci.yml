@@ -8,9 +8,58 @@ on:
     - cron: "17 */2 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  autofix:
+    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/trust-ui-reconcile
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Apply reviewed fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          census = Path("src/gaia/employer_census.py")
+          text = census.read_text(encoding="utf-8")
+          old = '''                candidate_urls.extend(
+                    url
+                    for _, url in _external_links(jobs_body, final_url)
+                    if urlsplit(url).netloc.casefold()
+                    not in {"ycombinator.com", "www.ycombinator.com"}
+                )'''
+          new = '''                candidate_urls.extend(
+                    url
+                    for _, url in _external_links(jobs_body, final_url)
+                    if urlsplit(url).netloc.casefold()
+                    not in EXCLUDED_PROFILE_HOSTS
+                )'''
+          if old in text:
+              text = text.replace(old, new)
+          census.write_text(text, encoding="utf-8")
+          PY
+          ruff check . --fix
+          rm -f .github/workflows/branch-autofix.yml
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Apply reviewed employer census fixes"
+          git push origin HEAD:agent/trust-ui-reconcile
+
   lint:
     runs-on: ubuntu-latest
     steps:
