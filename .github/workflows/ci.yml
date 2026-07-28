@@ -26,15 +26,13 @@ jobs:
       - name: Apply reviewed hardening
         run: |
           python .github/harden_employer_universe.py
-          ruff check . --fix
-          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
-          rm .github/harden_employer_universe.py
-      - name: Commit hardening
+          ruff check src/gaia/employer_census.py tests/test_hosted_inventory.py tests/test_employer_universe.py --fix
+      - name: Commit code and tests
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Harden employer census and reconciliation"
+          git add src/gaia/employer_census.py tests/test_hosted_inventory.py tests/test_employer_universe.py
+          git commit -m "Harden employer census behavior"
           git push origin HEAD:agent/trust-ui-reconcile
 
   lint:
