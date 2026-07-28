@@ -183,6 +183,7 @@ jobs:
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "900"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
