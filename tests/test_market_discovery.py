@@ -94,7 +94,7 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
         terms=("intern", "co-op"),
     )
     collector.scope = "historical"
-    assert save_catalog(db, [collector]) == 1
+    assert save_catalog(db, [collector], validated=True, origin="test") == 1
     loaded = load_catalog(db)
     assert len(loaded) == 1
     assert loaded[0].name == collector.name
@@ -120,7 +120,7 @@ def test_source_catalog_persists_verification_lead_evidence(tmp_path):
         leads=[lead],
     )
 
-    assert save_catalog(db, [collector]) == 1
+    assert save_catalog(db, [collector], validated=True, origin="test") == 1
     loaded = load_catalog(db)
 
     assert len(loaded) == 1
@@ -149,7 +149,7 @@ def test_source_catalog_never_restores_aggregators_as_trusted_verification(tmp_p
         trusted=True,
     )
 
-    save_catalog(db, [collector])
+    save_catalog(db, [collector], validated=True, origin="test")
     loaded = load_catalog(db)
 
     assert len(loaded) == 1
