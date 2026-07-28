@@ -9,32 +9,55 @@ on:
   workflow_dispatch:
     inputs:
       budget_seconds:
-        description: "Maximum crawler runtime for this catch-up run"
+        description: "Maximum runtime per crawler lane"
         required: false
         default: "3000"
-      concurrency:
-        description: "Concurrent employer boards"
-        required: false
-        default: "24"
-
-concurrency:
-  group: gaia-production-inventory
-  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  crawl:
+  inventory:
+    name: Inventory · ${{ matrix.lane }}
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 58
     environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        include:
+          # Three jobs share the large low-latency ATS queue. PostgreSQL SKIP LOCKED
+          # assigns a different board to every async worker across all three runners.
+          - lane: fast-a
+            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
+            workers: 24
+          - lane: fast-b
+            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
+            workers: 24
+          - lane: fast-c
+            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
+            workers: 24
+          - lane: enterprise-a
+            kinds: jobvite,icims,oracle-cloud,successfactors
+            workers: 8
+          - lane: enterprise-b
+            kinds: jobvite,icims,oracle-cloud,successfactors
+            workers: 8
+          # Workday is intentionally isolated and conservative because one board can
+          # require many paginated requests and provider-wide pacing must stay polite.
+          - lane: workday
+            kinds: workday-search
+            workers: 2
+          - lane: fallback
+            kinds: domain,verification
+            workers: 8
     env:
-      # Supabase transaction-pooler URL. The worker disables prepared statements.
       GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_READ_ONLY: "0"
-      GAIA_WORKER_CONCURRENCY: "24"
+      GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_WORKER_KINDS: ${{ matrix.kinds }}
       GAIA_WORKDAY_FULL_INVENTORY: "1"
       GAIA_WORKDAY_MAX_PER_TERM: "20000"
       GAIA_WORKDAY_GLOBAL_CONCURRENCY: "1"
@@ -59,17 +82,39 @@ jobs:
         shell: bash
         run: |
           case "${{ github.event_name }}" in
-            workflow_dispatch)
-              budget="${{ inputs.budget_seconds }}"
-              concurrency="${{ inputs.concurrency }}"
-              ;;
-            push)
-              budget="1800"
-              concurrency="24"
-              ;;
-            *)
-              budget="720"
-              concurrency="24"
-              ;;
+            workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
+            push) budget="3000" ;;
+            *) budget="660" ;;
           esac
-          gaia worker --once --budget-seconds "$budget" --concurrency "$concurrency"
+          gaia worker \
+            --once \
+            --budget-seconds "$budget" \
+            --concurrency "${{ matrix.workers }}"
+
+  discovery:
+    name: Candidate discovery and validation
+    needs: inventory
+    if: ${{ always() && needs.inventory.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_READ_ONLY: "0"
+      GAIA_ENABLE_DISCOVERY: "1"
+      # No catalog kind has this name, so this runner only executes the globally
+      # leased discovery task after all currently due employer boards are drained.
+      GAIA_WORKER_KINDS: __discovery_only__
+      GAIA_CANDIDATE_PROBE_LIMIT: "64"
+      GAIA_HTTP_TIMEOUT: "45"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Refresh evidence and validate candidate boards
+        run: gaia worker --once --budget-seconds 600 --concurrency 16
