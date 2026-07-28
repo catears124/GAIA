@@ -5,7 +5,9 @@ import asyncio
 import json
 import logging
 import os
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import uvicorn
@@ -143,6 +145,16 @@ def run_reconcile() -> dict[str, int]:
             )
 
 
+def _json_default(value: Any) -> str:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
+def _render_json(value: Any) -> str:
+    return json.dumps(value, indent=2, sort_keys=True, default=_json_default)
+
+
 def run_check(args: argparse.Namespace) -> int:
     database = Database(migrate=False)
     report = production_report(
@@ -153,7 +165,7 @@ def run_check(args: argparse.Namespace) -> int:
         require_healthy=bool(args.require_healthy),
         require_universe=bool(args.require_universe),
     )
-    rendered = json.dumps(report, indent=2, sort_keys=True)
+    rendered = _render_json(report)
     print(rendered)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
