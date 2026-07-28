@@ -5,9 +5,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 
+import httpx
+
 from .collectors import CollectorResult
 from .db import Database, _PsycopgConnectionAdapter
-from .inventory import ClaimedTarget
+from .inventory import ClaimedTarget, WorkerSummary
 from .inventory_runtime import (
     InventoryWorker as RuntimeInventoryWorker,
     RuntimeInventoryStore,
@@ -144,20 +146,29 @@ class InventoryWorker(RuntimeInventoryWorker):
         super().__init__(database, concurrency=concurrency)
         self.store = LiveInventoryStore(database, self.store.worker_id)
 
-    async def run(self, *, once: bool = False, budget_seconds: float | None = None):
+    async def run(
+        self,
+        *,
+        once: bool = False,
+        budget_seconds: float | None = None,
+    ) -> WorkerSummary:
         if os.getenv("GAIA_SKIP_CATALOG_SYNC", "0") != "1":
             return await super().run(once=once, budget_seconds=budget_seconds)
 
         # The workflow's prepare job already reconciled source_catalog into crawl_targets.
         # Skip repeating that full-table transaction in every parallel provider lane.
         original_sync = self.store.sync_catalog
-        self.store.sync_catalog = lambda: 0  # type: ignore[method-assign]
+
+        def skip_catalog_sync() -> int:
+            return 0
+
+        self.store.sync_catalog = skip_catalog_sync  # type: ignore[method-assign]
         try:
             return await super().run(once=once, budget_seconds=budget_seconds)
         finally:
             self.store.sync_catalog = original_sync  # type: ignore[method-assign]
 
-    async def _run_discovery_if_due(self, client) -> bool:
+    async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
         if os.getenv("GAIA_ENABLE_DISCOVERY", "1") != "1":
             return False
         return await super()._run_discovery_if_due(client)
