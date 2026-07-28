@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 
+from fastapi import HTTPException, Query
 from fastapi.routing import APIRoute
 
 from . import api as legacy
 from .health import inventory_state
+from .universe import universe_summary
 
 app = legacy.app
 
@@ -15,12 +17,14 @@ def _live_order_clause(sort: str) -> str:
         return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
-    # "Newest" means newly discovered by GAIA. Employer-published dates remain
-    # visible metadata, but they must not bury a role that entered the inventory now.
+    # Employer-published chronology is the trustworthy primary order. Within the
+    # same published time, timestamp precision beats day precision. Roles whose
+    # employer did not publish a date fall back to GAIA's first-detected time.
     return (
-        "first_detected_at DESC, "
-        "COALESCE(latest_posted_at, first_detected_at) DESC, "
-        "last_verified_at DESC, family_key"
+        "(latest_posted_at IS NOT NULL) DESC, "
+        "latest_posted_at DESC NULLS LAST, "
+        "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
+        "first_detected_at DESC, last_verified_at DESC, family_key"
     )
 
 
@@ -38,7 +42,7 @@ def _remove_get_routes(*paths: str) -> None:
 
 
 legacy._order_clause = _live_order_clause
-_remove_get_routes("/api/health", "/api/stats")
+_remove_get_routes("/api/health", "/api/stats", "/api/families", "/api/facets")
 
 
 @app.get("/api/health")
@@ -79,8 +83,49 @@ def live_health() -> dict[str, object]:
     }
 
 
+@app.get("/api/families")
+def live_families(
+    q: str = Query("", max_length=200),
+    category: str = "",
+    target: str = "",
+    track: str = "tech",
+    trust: str = "all",
+    location: str = Query("", max_length=100),
+    sort: str = "newest",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(48, ge=12, le=100),
+    company: str = Query("", max_length=100),
+    remote: bool = False,
+    posted_within: int = Query(0, ge=0, le=365),
+) -> dict[str, object]:
+    trust = trust.strip() or "all"
+    if trust not in {"verified", "leads", "all"}:
+        raise HTTPException(status_code=400, detail="trust must be verified, leads, or all")
+    if sort not in {"newest", "verified", "company"}:
+        raise HTTPException(status_code=400, detail="sort must be newest, verified, or company")
+    return legacy._list_families(
+        query=q.strip(),
+        category=category.strip(),
+        target=target.strip(),
+        track=track.strip(),
+        trust=trust,
+        location=location.strip(),
+        sort=sort,
+        page=page,
+        page_size=page_size,
+        company=company.strip(),
+        remote=remote,
+        posted_within=posted_within,
+    )
+
+
+@app.get("/api/facets")
+def live_facets(trust: str = "all", target: str = "") -> dict[str, object]:
+    return legacy.facets(trust=trust, target=target)
+
+
 @app.get("/api/stats")
-def live_stats() -> dict[str, int]:
+def live_stats() -> dict[str, object]:
     with legacy.db.connect() as connection:
         row = connection.execute(
             """
@@ -139,6 +184,8 @@ def live_stats() -> dict[str, int]:
             """
         ).fetchone()
 
+    census = universe_summary(legacy.db, limit=1)
+    census_summary = dict(census.get("summary") or {})
     new_today = int(movement["new_today"] or 0)
     removed_today = int(movement["removed_today"] or 0)
     return {
@@ -152,7 +199,16 @@ def live_stats() -> dict[str, int]:
         "new_families_24h": int(row["new_families_today"]),
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
-        "sources": int(source_row["count"] or 0),
+        "validated_sources": int(source_row["count"] or 0),
+        "known_employers": int(census_summary.get("known_employers") or 0),
+        "enumerated_employers": int(census_summary.get("enumerated_employers") or 0),
+        "unresolved_employers": int(census_summary.get("unresolved_employers") or 0),
+        "blind_spots": int(census_summary.get("blind_spots") or 0),
         "leads": int(lead_row["leads"]),
         "lead_apps": int(lead_row["lead_apps"]),
     }
+
+
+@app.get("/api/universe")
+def employer_universe(limit: int = 80) -> dict[str, object]:
+    return universe_summary(legacy.db, limit=max(1, min(limit, 250)))

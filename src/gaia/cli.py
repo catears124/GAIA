@@ -12,14 +12,26 @@ import uvicorn
 from psycopg import sql
 
 from .db import Database, _normalize_database_url
+from .employer_census import (
+    ECOSYSTEM_SCHEMA_STATEMENTS,
+    merge_observations_into_universe,
+)
 from .health import production_report
 from .live_inventory import InventoryWorker, LiveDatabase
+from .universe import (
+    UNIVERSE_SCHEMA_STATEMENTS,
+    rebuild_employer_universe,
+)
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="gaia")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="create or upgrade the PostgreSQL schema")
+    sub.add_parser(
+        "reconcile",
+        help="serialize derived role families and the employer-universe census",
+    )
 
     worker = sub.add_parser("worker", help="run a bounded production inventory batch")
     worker.add_argument("--once", action="store_true", help="drain currently due work, then exit")
@@ -50,6 +62,11 @@ def parser() -> argparse.ArgumentParser:
         "--require-healthy",
         action="store_true",
         default=os.getenv("GAIA_CHECK_REQUIRE_HEALTHY", "0") == "1",
+    )
+    check.add_argument(
+        "--require-universe",
+        action="store_true",
+        default=os.getenv("GAIA_CHECK_REQUIRE_UNIVERSE", "0") == "1",
     )
     check.add_argument("--output", type=Path, default=None)
 
@@ -99,6 +116,31 @@ def run_migration() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(database.schema))
         )
         connection.execute(schema_sql)
+        for statement in (*UNIVERSE_SCHEMA_STATEMENTS, *ECOSYSTEM_SCHEMA_STATEMENTS):
+            connection.execute(statement)
+
+
+def run_reconcile() -> dict[str, int]:
+    """Build all global read models once after horizontally scaled collectors finish."""
+    database = Database(migrate=False)
+    with database.connect() as lock:
+        lock.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            ("gaia:global-reconcile",),
+        )
+        try:
+            database.rebuild_families()
+            posting_census = rebuild_employer_universe(database)
+            ecosystem_census = merge_observations_into_universe(database)
+            return {
+                **posting_census,
+                **{f"ecosystem_{key}": value for key, value in ecosystem_census.items()},
+            }
+        finally:
+            lock.execute(
+                "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                ("gaia:global-reconcile",),
+            )
 
 
 def run_check(args: argparse.Namespace) -> int:
@@ -109,6 +151,7 @@ def run_check(args: argparse.Namespace) -> int:
         min_sources=max(1, args.min_sources),
         min_active_listings=max(1, args.min_active_listings),
         require_healthy=bool(args.require_healthy),
+        require_universe=bool(args.require_universe),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     print(rendered)
@@ -127,6 +170,8 @@ def main() -> int:
     if args.command == "migrate":
         run_migration()
         print("PostgreSQL schema is ready.")
+    elif args.command == "reconcile":
+        print(json.dumps(run_reconcile(), sort_keys=True))
     elif args.command == "worker":
         asyncio.run(
             run_worker(

@@ -31,6 +31,7 @@ jobs:
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_DEFER_FAMILY_REBUILD: "1"
       GAIA_WORKER_KINDS: __prepare_only__
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -112,6 +113,7 @@ jobs:
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
       GAIA_SKIP_CATALOG_SYNC: "1"
+      GAIA_DEFER_FAMILY_REBUILD: "1"
       GAIA_WORKER_KINDS: ${{ matrix.kinds }}
       GAIA_WORKDAY_FULL_INVENTORY: "1"
       GAIA_WORKDAY_MAX_PER_TERM: "20000"
@@ -130,7 +132,7 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="660" ;;
+            *) budget="360" ;;
           esac
           gaia worker \
             --once \
@@ -138,7 +140,7 @@ jobs:
             --concurrency "${{ matrix.workers }}"
 
   discovery:
-    name: Candidate discovery and validation
+    name: Employer census and source validation
     needs: inventory
     if: ${{ always() && needs.inventory.result == 'success' }}
     runs-on: ubuntu-latest
@@ -150,8 +152,10 @@ jobs:
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "1"
+      GAIA_DEFER_FAMILY_REBUILD: "1"
       GAIA_WORKER_KINDS: __discovery_only__
       GAIA_CANDIDATE_PROBE_LIMIT: "64"
+      GAIA_EMPLOYER_PROFILE_PROBE_LIMIT: "24"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -160,12 +164,40 @@ jobs:
           cache: pip
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Refresh evidence and validate candidate boards
-        run: gaia worker --once --budget-seconds 600 --concurrency 16
+      - name: Refresh evidence and validate candidate sources
+        shell: bash
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch) budget="600" ;;
+            *) budget="180" ;;
+          esac
+          gaia worker --once --budget-seconds "$budget" --concurrency 16
+
+  reconcile:
+    name: Rebuild role and employer read models
+    needs: [inventory, discovery]
+    if: ${{ always() && needs.inventory.result == 'success' && needs.discovery.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "900"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Serialize global reconciliation
+        run: gaia reconcile
 
   health:
     name: Verify production inventory
-    needs: [prepare, inventory, discovery]
+    needs: [prepare, inventory, discovery, reconcile]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -176,6 +208,7 @@ jobs:
       GAIA_CHECK_MAX_ACTIVITY_MINUTES: "90"
       GAIA_CHECK_MIN_SOURCES: "100"
       GAIA_CHECK_MIN_ACTIVE_LISTINGS: "25"
+      GAIA_CHECK_REQUIRE_UNIVERSE: "1"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -186,7 +219,7 @@ jobs:
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - id: production_check
-        name: Check Supabase inventory and product read model
+        name: Check Supabase inventory and employer census
         continue-on-error: true
         run: gaia check --output production-health.json
       - name: Publish health report
@@ -214,12 +247,14 @@ jobs:
         shell: bash
         run: |
           state=success
-          description="Inventory healthy"
+          description="Inventory and employer census healthy"
           if [ "${{ needs.prepare.result }}" != "success" ] || \
              [ "${{ needs.inventory.result }}" != "success" ] || \
+             [ "${{ needs.discovery.result }}" != "success" ] || \
+             [ "${{ needs.reconcile.result }}" != "success" ] || \
              [ "${{ steps.production_check.outcome }}" != "success" ]; then
             state=failure
-            description="Inventory, migration, or health check failed"
+            description="Inventory, discovery, reconciliation, or health failed"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -244,6 +279,14 @@ jobs:
           fi
           if [ "${{ needs.inventory.result }}" != "success" ]; then
             echo "One or more inventory lanes failed." >&2
+            exit 1
+          fi
+          if [ "${{ needs.discovery.result }}" != "success" ]; then
+            echo "Employer census discovery failed." >&2
+            exit 1
+          fi
+          if [ "${{ needs.reconcile.result }}" != "success" ]; then
+            echo "Global reconciliation failed." >&2
             exit 1
           fi
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then

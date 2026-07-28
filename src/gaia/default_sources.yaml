@@ -20,6 +20,29 @@ universe_seeds:
   - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/README-Off-Season.md
   - https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/archived/README-2025.md
 
+# Employer ecosystems add organizations, not job listings. Each profile is resolved through
+# the organization's official site, and any hiring surface remains a candidate until GAIA
+# successfully enumerates it. This deliberately reaches companies omitted by prestige lists.
+employer_ecosystems:
+  - kind: yc-directory
+    name: yc-hard-tech
+    url: https://www.ycombinator.com/companies/industry/hard-tech
+    sectors: [hard-tech, hardware, robotics, aerospace, energy]
+    internship_signal: 0.30
+    technical_signal: 0.94
+  - kind: yc-directory
+    name: yc-artificial-intelligence
+    url: https://www.ycombinator.com/companies/industry/artificial-intelligence
+    sectors: [artificial-intelligence, machine-learning, data]
+    internship_signal: 0.30
+    technical_signal: 0.92
+  - kind: yc-directory
+    name: yc-enterprise-software
+    url: https://www.ycombinator.com/companies/industry/enterprise-software
+    sectors: [enterprise-software, developer-tools, infrastructure]
+    internship_signal: 0.26
+    technical_signal: 0.84
+
 # Provider-level sources are allowed here; employers are discovered from data, not named in code.
 native_sources:
   - kind: google-careers

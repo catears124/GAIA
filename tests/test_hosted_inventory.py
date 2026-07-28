@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from gaia.db import Database
 from gaia.health import inventory_state, production_report
-from gaia.live_inventory import LiveDatabase, LiveInventoryStore
+from gaia.inventory import WorkerSummary
+from gaia.inventory_runtime import InventoryWorker as RuntimeInventoryWorker
+from gaia.live_inventory import (
+    InventoryWorker as LiveInventoryWorker,
+)
+from gaia.live_inventory import (
+    LiveDatabase,
+    LiveInventoryStore,
+)
 
 
 def add_target(
@@ -166,3 +176,34 @@ def test_production_checker_rejects_stalled_inventory(tmp_path) -> None:
     assert report["ok"] is False
     assert any("activity is" in error for error in report["errors"])
     assert "no validated current source is fresh" in report["errors"]
+
+
+@pytest.mark.asyncio
+async def test_live_lane_defers_global_family_rebuild(tmp_path, monkeypatch) -> None:
+    database = Database(tmp_path / "deferred-rebuild.db")
+    rebuilds = 0
+
+    def rebuild() -> None:
+        nonlocal rebuilds
+        rebuilds += 1
+
+    async def fake_runtime_run(
+        worker: RuntimeInventoryWorker,
+        *,
+        once: bool = False,
+        budget_seconds: float | None = None,
+    ) -> WorkerSummary:
+        del once, budget_seconds
+        worker.database.rebuild_families()
+        return WorkerSummary()
+
+    monkeypatch.setattr(database, "rebuild_families", rebuild)
+    monkeypatch.setattr(RuntimeInventoryWorker, "run", fake_runtime_run)
+    monkeypatch.setenv("GAIA_DEFER_FAMILY_REBUILD", "1")
+
+    worker = LiveInventoryWorker(database, concurrency=1)
+    await worker.run(once=True, budget_seconds=1)
+
+    assert rebuilds == 0
+    database.rebuild_families()
+    assert rebuilds == 1

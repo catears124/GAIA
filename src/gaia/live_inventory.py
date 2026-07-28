@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,13 +10,18 @@ import httpx
 
 from .collectors import CollectorResult
 from .db import Database, _PsycopgConnectionAdapter
+from .employer_census import refresh_employer_ecosystems
 from .inventory import ClaimedTarget, WorkerSummary
+from .inventory import InventoryWorker as BaseInventoryWorker
 from .inventory_runtime import (
     InventoryWorker as RuntimeInventoryWorker,
 )
 from .inventory_runtime import (
     RuntimeInventoryStore,
 )
+from .source_catalog import _collector, save_catalog
+
+LOGGER = logging.getLogger("gaia.inventory.live")
 
 
 class LiveDatabase(Database):
@@ -142,7 +148,7 @@ class LiveInventoryStore(RuntimeInventoryStore):
 
 
 class InventoryWorker(RuntimeInventoryWorker):
-    """Horizontally scalable worker with safe retirement for vanished boards."""
+    """Horizontally scalable worker with safe retirement and census expansion."""
 
     def __init__(self, database: Database, *, concurrency: int = 24) -> None:
         super().__init__(database, concurrency=concurrency)
@@ -154,23 +160,113 @@ class InventoryWorker(RuntimeInventoryWorker):
         once: bool = False,
         budget_seconds: float | None = None,
     ) -> WorkerSummary:
-        if os.getenv("GAIA_SKIP_CATALOG_SYNC", "0") != "1":
-            return await super().run(once=once, budget_seconds=budget_seconds)
-
-        # The workflow's prepare job already reconciled source_catalog into crawl_targets.
-        # Skip repeating that full-table transaction in every parallel provider lane.
+        # Provider lanes may mutate independent postings concurrently, but global
+        # materialized read models must be rebuilt exactly once by `gaia reconcile`.
+        skip_sync = os.getenv("GAIA_SKIP_CATALOG_SYNC", "0") == "1"
+        defer_rebuild = os.getenv("GAIA_DEFER_FAMILY_REBUILD", "0") == "1"
         original_sync = self.store.sync_catalog
+        original_rebuild = self.database.rebuild_families
 
-        def skip_catalog_sync() -> int:
-            return 0
-
-        self.store.sync_catalog = skip_catalog_sync  # type: ignore[method-assign]
+        if skip_sync:
+            self.store.sync_catalog = lambda: 0  # type: ignore[method-assign]
+        if defer_rebuild:
+            self.database.rebuild_families = lambda: None  # type: ignore[method-assign]
         try:
             return await super().run(once=once, budget_seconds=budget_seconds)
         finally:
             self.store.sync_catalog = original_sync  # type: ignore[method-assign]
+            self.database.rebuild_families = original_rebuild  # type: ignore[method-assign]
 
     async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
         if os.getenv("GAIA_ENABLE_DISCOVERY", "1") != "1":
             return False
+        if self.store.allowed_kinds == ["__discovery_only__"]:
+            # A dedicated discovery lane must not be starved by an unrelated board
+            # backlog. It owns no source kinds, so it cannot duplicate inventory work.
+            return await BaseInventoryWorker._run_discovery_if_due(self, client)
         return await super()._run_discovery_if_due(client)
+
+    async def _refresh_market(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        include_universe: bool,
+    ) -> None:
+        await super()._refresh_market(client, include_universe=include_universe)
+        outcome = await refresh_employer_ecosystems(
+            client,
+            self.database,
+            self.settings,
+            refresh_feeds=include_universe,
+            worker_id=self.store.worker_id,
+            lease_seconds=self.lease_seconds,
+        )
+        LOGGER.info("employer ecosystem refresh %s", outcome)
+
+    async def _probe_candidate(
+        self,
+        client: httpx.AsyncClient,
+        target: ClaimedTarget,
+    ) -> bool:
+        collector = _collector(target.kind, target.spec)
+        if collector is None:
+            self.store.finish_candidate(
+                target,
+                promoted=False,
+                status="broken",
+                error=f"unsupported source kind: {target.kind}",
+            )
+            return False
+        collector.scope = target.scope
+        collector.name = target.source
+        try:
+            result = self._normalize_result(collector, await collector.collect(client))
+        except Exception as exc:
+            result = self._failure_result(collector, exc)
+
+        valid = (
+            result.error is None
+            and result.complete
+            and result.status in {"ok", "empty"}
+            and result.mode in {"board", "board-search", "domain"}
+        )
+        if valid:
+            try:
+                self.database.apply_result(result, rebuild=False)
+                save_catalog(
+                    self.database,
+                    [collector],
+                    validated=True,
+                    origin="validated-candidate-probe",
+                )
+            except Exception as exc:
+                LOGGER.exception("candidate persistence failed for %s", target.source)
+                self.store.finish_candidate(
+                    target,
+                    promoted=False,
+                    status="broken",
+                    error=repr(exc),
+                )
+                return False
+            self.store.finish_candidate(
+                target,
+                promoted=True,
+                status=result.status,
+                error=None,
+            )
+            LOGGER.info(
+                "promoted source candidate %s rows=%s",
+                target.source,
+                result.rows_scanned,
+            )
+            return True
+
+        if result.error:
+            self.database.record_failure(result)
+        self.store.finish_candidate(
+            target,
+            promoted=False,
+            status=result.status,
+            error=result.error or result.note,
+        )
+        return False
