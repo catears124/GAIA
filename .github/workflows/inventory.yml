@@ -16,9 +16,42 @@ on:
 permissions:
   contents: read
 
+env:
+  GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+  GAIA_AUTO_MIGRATE: "0"
+  GAIA_READ_ONLY: "0"
+  GAIA_HTTP_TIMEOUT: "45"
+
 jobs:
+  prepare:
+    name: Prepare distributed source queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_WORKER_KINDS: __prepare_only__
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          if [ -z "$GAIA_DATABASE_URL" ]; then
+            echo "Missing production secret GAIA_DATABASE_URL (or POSTGRES_URL)." >&2
+            exit 1
+          fi
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Reconcile validated sources into the crawl queue
+        run: gaia worker --once --budget-seconds 1 --concurrency 1
+
   inventory:
     name: Inventory · ${{ matrix.lane }}
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 58
     environment: production
@@ -53,29 +86,19 @@ jobs:
             kinds: domain,verification
             workers: 8
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_READ_ONLY: "0"
       GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_SKIP_CATALOG_SYNC: "1"
       GAIA_WORKER_KINDS: ${{ matrix.kinds }}
       GAIA_WORKDAY_FULL_INVENTORY: "1"
       GAIA_WORKDAY_MAX_PER_TERM: "20000"
       GAIA_WORKDAY_GLOBAL_CONCURRENCY: "1"
       GAIA_WORKDAY_MIN_INTERVAL: "1.0"
-      GAIA_HTTP_TIMEOUT: "45"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connection
-        shell: bash
-        run: |
-          if [ -z "$GAIA_DATABASE_URL" ]; then
-            echo "Missing production secret GAIA_DATABASE_URL (or POSTGRES_URL)." >&2
-            exit 1
-          fi
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - name: Drain due employer boards
@@ -99,15 +122,11 @@ jobs:
     timeout-minutes: 12
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_READ_ONLY: "0"
       GAIA_ENABLE_DISCOVERY: "1"
       # No catalog kind has this name, so this runner only executes the globally
       # leased discovery task after all currently due employer boards are drained.
       GAIA_WORKER_KINDS: __discovery_only__
       GAIA_CANDIDATE_PROBE_LIMIT: "64"
-      GAIA_HTTP_TIMEOUT: "45"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
