@@ -16,6 +16,8 @@ from .discovery import (
 from .inventory import (
     ClaimedTarget,
     InventoryStore,
+)
+from .inventory import (
     InventoryWorker as BaseInventoryWorker,
 )
 from .provider_discovery import provider_collectors_from_postings

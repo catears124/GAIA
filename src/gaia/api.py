@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from .db import Database
 from .quality import (
     TECH_CATEGORIES as BASE_TECH_CATEGORIES,
+)
+from .quality import (
     canonical_company,
     is_index_mode,
     normalize_locations,

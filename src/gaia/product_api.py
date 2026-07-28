@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from fastapi.routing import APIRoute
 
 from . import api as legacy
+from .health import inventory_state
 
 app = legacy.app
 
@@ -21,18 +24,59 @@ def _live_order_clause(sort: str) -> str:
     )
 
 
-legacy._order_clause = _live_order_clause
+def _remove_get_routes(*paths: str) -> None:
+    removed = set(paths)
+    app.router.routes[:] = [
+        route
+        for route in app.router.routes
+        if not (
+            isinstance(route, APIRoute)
+            and route.path in removed
+            and "GET" in route.methods
+        )
+    ]
 
-# Replace only the old stats endpoint; all existing query and presentation helpers remain shared.
-app.router.routes[:] = [
-    route
-    for route in app.router.routes
-    if not (
-        isinstance(route, APIRoute)
-        and route.path == "/api/stats"
-        and "GET" in route.methods
-    )
-]
+
+legacy._order_clause = _live_order_clause
+_remove_get_routes("/api/health", "/api/stats")
+
+
+@app.get("/api/health")
+def live_health() -> dict[str, object]:
+    inventory = inventory_state(legacy.db)
+    fully_initialized = int(inventory["never_completed"]) == 0 and int(inventory["total"]) > 0
+    watermark = inventory.get("coverage_watermark") if fully_initialized else None
+    failing = int(inventory["unhealthy"])
+    running = int(inventory["running"]) > 0
+    return {
+        "ok": bool(inventory["healthy"]),
+        "read_only": os.getenv("GAIA_READ_ONLY", "0") == "1",
+        "running": running,
+        "progress": {
+            "mode": "continuous-inventory",
+            "stage": "crawling" if running else "scheduled",
+            "completed": int(inventory["fresh"]),
+            "total": int(inventory["total"]),
+            "current": None,
+            "started_at": None,
+            "elapsed_seconds": 0,
+        },
+        "last_summary": None,
+        "data": {
+            "last_run": (
+                {
+                    "finished_at": watermark,
+                    "status": "ok" if inventory["healthy"] else "degraded",
+                }
+                if watermark
+                else None
+            ),
+            "last_success_at": watermark,
+            "sources": int(inventory["total"]),
+            "failing_sources": failing,
+        },
+        "inventory": inventory,
+    }
 
 
 @app.get("/api/stats")
@@ -88,7 +132,10 @@ def live_stats() -> dict[str, int]:
             SELECT COUNT(*) AS count
             FROM crawl_targets AS target
             JOIN source_catalog AS catalog USING(source)
-            WHERE target.enabled AND target.scheduled AND catalog.validated
+            WHERE target.enabled
+              AND target.scheduled
+              AND catalog.validated
+              AND catalog.scope='current'
             """
         ).fetchone()
 

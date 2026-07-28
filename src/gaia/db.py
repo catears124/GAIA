@@ -4,6 +4,7 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -23,6 +24,20 @@ def _normalize_database_url(value: str) -> str:
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
     )
+
+
+def _is_legacy_path(value: str | Path | None) -> bool:
+    if isinstance(value, Path):
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip().casefold()
+    return (
+        candidate == ":memory:"
+        or candidate.endswith((".db", ".sqlite", ".sqlite3"))
+        or "/" in candidate
+        or "\\" in candidate
+    ) and "://" not in candidate
 
 
 # Vercel's Supabase integration provides POSTGRES_URL automatically. Normalize it
@@ -68,6 +83,21 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
 
 class Database(WriteMixin, ReadMixin, BaseDatabase):
     """GAIA's PostgreSQL repository and query service."""
+
+    def __init__(
+        self,
+        url: str | Path | None = None,
+        *,
+        schema: str | None = None,
+        migrate: bool | None = None,
+    ) -> None:
+        # The pre-PostgreSQL test suite passes a unique temporary path to request
+        # an isolated database. BaseDatabase maps that path to a deterministic
+        # PostgreSQL schema; force its idempotent migration even when CI disables
+        # automatic production migrations globally.
+        if migrate is None and _is_legacy_path(url):
+            migrate = True
+        super().__init__(url, schema=schema, migrate=migrate)
 
     @contextmanager
     def connect(self) -> Iterator[_PsycopgConnectionAdapter]:

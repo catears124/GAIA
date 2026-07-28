@@ -69,11 +69,10 @@ def test_current_custom_page_is_left_to_current_registry_discovery():
 
 
 def test_historical_catalog_watch_promotes_after_finding_current_role(tmp_path):
-    path = tmp_path / "gaia.db"
-    db = Database(path)
+    db = Database(tmp_path / "gaia.db")
     collector = SitemapDomainCollector("Example", "careers.example.com", [])
     collector.scope = "historical"
-    save_catalog(path, [collector])
+    save_catalog(db, [collector], validated=True, origin="test")
 
     posting = Posting(
         company="Example",
@@ -101,6 +100,6 @@ def test_historical_catalog_watch_promotes_after_finding_current_role(tmp_path):
         rebuild=False,
     )
 
-    loaded = load_catalog(path)
+    loaded = load_catalog(db)
     assert len(loaded) == 1
     assert loaded[0].scope == "current"

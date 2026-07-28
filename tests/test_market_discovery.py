@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from gaia.collectors import SchemaPageCollector
+from gaia.db import Database
 from gaia.market_collectors import WorkdaySearchCollector
 from gaia.market_discovery import discover_github_market
 from gaia.models import Posting
@@ -84,7 +85,7 @@ async def test_dynamic_feed_cannot_infer_missing_2027_year():
 
 
 def test_source_catalog_persists_discovered_collectors(tmp_path):
-    path = tmp_path / "gaia.db"
+    db = Database(tmp_path / "gaia.db")
     collector = WorkdaySearchCollector(
         "Example",
         "https://example.wd5.myworkdayjobs.com",
@@ -93,8 +94,8 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
         terms=("intern", "co-op"),
     )
     collector.scope = "historical"
-    assert save_catalog(path, [collector]) == 1
-    loaded = load_catalog(path)
+    assert save_catalog(db, [collector], validated=True, origin="test") == 1
+    loaded = load_catalog(db)
     assert len(loaded) == 1
     assert loaded[0].name == collector.name
     assert loaded[0].scope == "historical"
@@ -103,7 +104,7 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
 
 
 def test_source_catalog_persists_verification_lead_evidence(tmp_path):
-    path = tmp_path / "gaia.db"
+    db = Database(tmp_path / "gaia.db")
     lead = Posting(
         company="Example",
         title="Software Engineer Intern, Summer 2027",
@@ -119,8 +120,8 @@ def test_source_catalog_persists_verification_lead_evidence(tmp_path):
         leads=[lead],
     )
 
-    assert save_catalog(path, [collector]) == 1
-    loaded = load_catalog(path)
+    assert save_catalog(db, [collector], validated=True, origin="test") == 1
+    loaded = load_catalog(db)
 
     assert len(loaded) == 1
     assert isinstance(loaded[0], SchemaPageCollector)
@@ -131,7 +132,7 @@ def test_source_catalog_persists_verification_lead_evidence(tmp_path):
 
 
 def test_source_catalog_never_restores_aggregators_as_trusted_verification(tmp_path):
-    path = tmp_path / "gaia.db"
+    db = Database(tmp_path / "gaia.db")
     lead = Posting(
         company="Example",
         title="Software Engineer Intern, Summer 2027",
@@ -148,8 +149,8 @@ def test_source_catalog_never_restores_aggregators_as_trusted_verification(tmp_p
         trusted=True,
     )
 
-    save_catalog(path, [collector])
-    loaded = load_catalog(path)
+    save_catalog(db, [collector], validated=True, origin="test")
+    loaded = load_catalog(db)
 
     assert len(loaded) == 1
     assert loaded[0].source_mode == "verification-lead"
