@@ -159,9 +159,10 @@ def test_ecosystem_only_employer_enters_unresolved_frontier(tmp_path) -> None:
 def test_recent_order_prefers_employer_date_then_precision_then_detection() -> None:
     order = _live_order_clause("newest")
 
-    assert order.startswith("COALESCE(latest_posted_at, first_detected_at) DESC")
-    assert "latest_posted_at IS NOT NULL" in order
+    assert order.startswith("(latest_posted_at IS NOT NULL) DESC")
+    assert "latest_posted_at DESC NULLS LAST" in order
     assert "CASE posted_precision" in order
+    assert order.index("latest_posted_at DESC") < order.index("CASE posted_precision")
     assert order.index("CASE posted_precision") < order.index("first_detected_at DESC")
 
 
