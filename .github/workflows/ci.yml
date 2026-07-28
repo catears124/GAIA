@@ -30,20 +30,11 @@ jobs:
 
           census = Path("src/gaia/employer_census.py")
           text = census.read_text(encoding="utf-8")
-          old = '''                candidate_urls.extend(
-                    url
-                    for _, url in _external_links(jobs_body, final_url)
-                    if urlsplit(url).netloc.casefold()
-                    not in {"ycombinator.com", "www.ycombinator.com"}
-                )'''
-          new = '''                candidate_urls.extend(
-                    url
-                    for _, url in _external_links(jobs_body, final_url)
-                    if urlsplit(url).netloc.casefold()
-                    not in EXCLUDED_PROFILE_HOSTS
-                )'''
-          if old in text:
-              text = text.replace(old, new)
+          text = text.replace(
+              'not in {"ycombinator.com", "www.ycombinator.com"}',
+              "not in EXCLUDED_PROFILE_HOSTS",
+          )
+          text = text.replace('.encode("utf-8")', ".encode()")
           census.write_text(text, encoding="utf-8")
           PY
           ruff check . --fix
