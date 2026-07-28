@@ -12,7 +12,9 @@
   <meta name="twitter:card" content="summary_large_image">
   <title>GAIA — Technical internships</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <script src="/assets/theme.js?v=1.0.0"></script>
   <link rel="stylesheet" href="/assets/product-v2.css?v=8.0.0">
+  <link rel="stylesheet" href="/assets/dark-mode.css?v=1.0.0">
 </head>
 <body>
   <a class="skip-link" href="#results">Skip to results</a>
@@ -24,9 +26,14 @@
       <button class="nav-link" data-view="saved">Saved <span id="saved-count" class="count">0</span></button>
       <button class="nav-link" data-view="universe">Universe</button>
     </nav>
-    <div id="freshness" class="freshness" aria-live="polite">
-      <span class="status-dot" aria-hidden="true"></span>
-      <span>Checking inventory…</span>
+    <div class="topbar-actions">
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
+        <span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark</span>
+      </button>
+      <div id="freshness" class="freshness" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>Checking inventory…</span>
+      </div>
     </div>
   </header>
 
