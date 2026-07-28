@@ -1,4 +1,4 @@
-name: Vercel
+name: Verify Vercel application
 
 on:
   push:
@@ -7,15 +7,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: vercel-${{ github.ref }}
+  group: verify-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-
-env:
-  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
 jobs:
   verify:
@@ -38,6 +34,8 @@ jobs:
       GAIA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/gaia_test
       GAIA_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/gaia_test
       GAIA_INITIAL_SYNC: "0"
+      GAIA_READ_ONLY: "1"
+      GAIA_AUTO_MIGRATE: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,52 +46,10 @@ jobs:
       - run: gaia migrate
       - run: ruff check .
       - run: pytest -q
-      - name: Smoke-test the deployment entrypoint
+      - name: Smoke-test Vercel entrypoint
         env:
           VERCEL: "1"
         run: python -c "from app import app; assert app.title == 'GAIA'"
 
-  migrate-production:
-    if: github.event_name != 'pull_request'
-    needs: verify
-    runs-on: ubuntu-latest
-    environment: production
-    env:
-      # Supabase direct/non-pooling URL for DDL and data migrations.
-      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.GAIA_MIGRATION_DATABASE_URL || secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Require Supabase migration connection
-        shell: bash
-        run: |
-          if [ -z "$GAIA_MIGRATION_DATABASE_URL" ]; then
-            echo "Missing production secret GAIA_MIGRATION_DATABASE_URL (or POSTGRES_URL_NON_POOLING)." >&2
-            exit 1
-          fi
-      - run: python -m pip install --disable-pip-version-check -e .
-      - run: gaia migrate
-
-  deploy:
-    if: github.event_name != 'pull_request'
-    needs: [verify, migrate-production]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Install Vercel CLI
-        run: npm install --global vercel@latest
-      - name: Pull project settings
-        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
-      - name: Build
-        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
-      - name: Deploy
-        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"
+# Production deployment is handled by Vercel's GitHub integration. No Vercel token,
+# organization ID, or project ID is required in GitHub Actions.
