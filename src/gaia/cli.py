@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import uvicorn
 from psycopg import sql
 
 from .db import Database, _normalize_database_url
+from .health import production_report
 from .live_inventory import InventoryWorker, LiveDatabase
 
 
@@ -27,6 +29,29 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "24")),
     )
+
+    check = sub.add_parser("check", help="verify hosted inventory health and progress")
+    check.add_argument(
+        "--max-activity-minutes",
+        type=int,
+        default=int(os.getenv("GAIA_CHECK_MAX_ACTIVITY_MINUTES", "90")),
+    )
+    check.add_argument(
+        "--min-sources",
+        type=int,
+        default=int(os.getenv("GAIA_CHECK_MIN_SOURCES", "100")),
+    )
+    check.add_argument(
+        "--min-active-listings",
+        type=int,
+        default=int(os.getenv("GAIA_CHECK_MIN_ACTIVE_LISTINGS", "25")),
+    )
+    check.add_argument(
+        "--require-healthy",
+        action="store_true",
+        default=os.getenv("GAIA_CHECK_REQUIRE_HEALTHY", "0") == "1",
+    )
+    check.add_argument("--output", type=Path, default=None)
 
     serve = sub.add_parser("serve", help="preview the read-only product API locally")
     serve.add_argument("--host", default=os.getenv("GAIA_HOST", "127.0.0.1"))
@@ -76,7 +101,24 @@ def run_migration() -> None:
         connection.execute(schema_sql)
 
 
-def main() -> None:
+def run_check(args: argparse.Namespace) -> int:
+    database = Database(migrate=False)
+    report = production_report(
+        database,
+        max_activity_minutes=max(1, args.max_activity_minutes),
+        min_sources=max(1, args.min_sources),
+        min_active_listings=max(1, args.min_active_listings),
+        require_healthy=bool(args.require_healthy),
+    )
+    rendered = json.dumps(report, indent=2, sort_keys=True)
+    print(rendered)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    return 0 if report["ok"] else 1
+
+
+def main() -> int:
     args = parser().parse_args()
     logging.basicConfig(
         level=os.getenv("GAIA_LOG_LEVEL", "INFO"),
@@ -93,9 +135,12 @@ def main() -> None:
                 concurrency=args.concurrency,
             )
         )
+    elif args.command == "check":
+        return run_check(args)
     elif args.command == "serve":
         uvicorn.run("gaia.product_api:app", host=args.host, port=args.port, reload=False)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
