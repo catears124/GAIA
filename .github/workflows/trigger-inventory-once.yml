@@ -18,6 +18,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          echo "Dispatching production inventory verification."
           curl --fail --silent --show-error \
             -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
