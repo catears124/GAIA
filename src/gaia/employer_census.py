@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
@@ -20,6 +21,8 @@ from .provider_discovery import provider_collectors_from_postings
 from .quality import canonical_company
 from .source_catalog import _spec, merge_catalog, save_candidates
 from .universe import _employer_key
+
+LOGGER = logging.getLogger("gaia.employer-census")
 
 ECOSYSTEM_SCHEMA_STATEMENTS = (
     """
@@ -446,23 +449,26 @@ async def refresh_employer_ecosystems(
             url = str(item.get("url") or "")
             if kind != "yc-directory" or not url:
                 continue
-            response = await client.get(url)
-            response.raise_for_status()
             source = str(item.get("name") or url)
-            observations = _yc_observations(
-                response.text,
-                url=url,
-                source=source,
-                sectors=[str(value) for value in item.get("sectors") or []],
-            )
-            observed += _upsert_observations(
-                database,
-                source=f"yc:{source}",
-                evidence_type="startup-ecosystem",
-                internship_signal=float(item.get("internship_signal") or 0.32),
-                technical_signal=float(item.get("technical_signal") or 0.86),
-                observations=observations,
-            )
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                observations = _yc_observations(
+                    response.text,
+                    url=url,
+                    source=source,
+                    sectors=[str(value) for value in item.get("sectors") or []],
+                )
+                observed += _upsert_observations(
+                    database,
+                    source=f"yc:{source}",
+                    evidence_type="startup-ecosystem",
+                    internship_signal=float(item.get("internship_signal") or 0.32),
+                    technical_signal=float(item.get("technical_signal") or 0.86),
+                    observations=observations,
+                )
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                LOGGER.warning("employer ecosystem feed failed: %s: %r", source, exc)
 
     limit = max(1, int(os.getenv("GAIA_EMPLOYER_PROFILE_PROBE_LIMIT", "24")))
     claimed = _claim_observations(

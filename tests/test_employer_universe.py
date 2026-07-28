@@ -9,6 +9,7 @@ from gaia.employer_census import (
     ensure_ecosystem_schema,
     merge_observations_into_universe,
 )
+from gaia.health import production_report
 from gaia.models import CollectorResult, Posting
 from gaia.product_api import _live_order_clause
 from gaia.universe import (
@@ -190,3 +191,17 @@ def test_universe_timestamps_are_timezone_aware(tmp_path) -> None:
 
     assert row["first_seen_at"].tzinfo is not None
     assert row["last_seen_at"].tzinfo is not None
+
+
+def test_production_checker_can_require_employer_universe(tmp_path) -> None:
+    database = Database(tmp_path / "missing-universe.db")
+
+    report = production_report(
+        database,
+        min_sources=1,
+        min_active_listings=1,
+        require_universe=True,
+    )
+
+    assert report["ok"] is False
+    assert "employer universe read model is missing" in report["errors"]
