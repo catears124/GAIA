@@ -6,6 +6,7 @@ from fastapi.routing import APIRoute
 
 from . import api as legacy
 from .health import inventory_state
+from .universe import universe_summary
 
 app = legacy.app
 
@@ -15,12 +16,13 @@ def _live_order_clause(sort: str) -> str:
         return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
-    # "Newest" means newly discovered by GAIA. Employer-published dates remain
-    # visible metadata, but they must not bury a role that entered the inventory now.
+    # Recent means the newest meaningful event. Employer-published dates are preferred,
+    # higher-precision dates break ties, and GAIA's first-detected time is the fallback.
     return (
-        "first_detected_at DESC, "
         "COALESCE(latest_posted_at, first_detected_at) DESC, "
-        "last_verified_at DESC, family_key"
+        "(latest_posted_at IS NOT NULL) DESC, "
+        "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
+        "first_detected_at DESC, last_verified_at DESC, family_key"
     )
 
 
@@ -80,7 +82,7 @@ def live_health() -> dict[str, object]:
 
 
 @app.get("/api/stats")
-def live_stats() -> dict[str, int]:
+def live_stats() -> dict[str, object]:
     with legacy.db.connect() as connection:
         row = connection.execute(
             """
@@ -139,6 +141,8 @@ def live_stats() -> dict[str, int]:
             """
         ).fetchone()
 
+    census = universe_summary(legacy.db, limit=1)
+    census_summary = dict(census.get("summary") or {})
     new_today = int(movement["new_today"] or 0)
     removed_today = int(movement["removed_today"] or 0)
     return {
@@ -152,7 +156,16 @@ def live_stats() -> dict[str, int]:
         "new_families_24h": int(row["new_families_today"]),
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
-        "sources": int(source_row["count"] or 0),
+        "validated_sources": int(source_row["count"] or 0),
+        "known_employers": int(census_summary.get("known_employers") or 0),
+        "enumerated_employers": int(census_summary.get("enumerated_employers") or 0),
+        "unresolved_employers": int(census_summary.get("unresolved_employers") or 0),
+        "blind_spots": int(census_summary.get("blind_spots") or 0),
         "leads": int(lead_row["leads"]),
         "lead_apps": int(lead_row["lead_apps"]),
     }
+
+
+@app.get("/api/universe")
+def employer_universe(limit: int = 80) -> dict[str, object]:
+    return universe_summary(legacy.db, limit=max(1, min(limit, 250)))
