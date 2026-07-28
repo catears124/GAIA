@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   harden-hidden-market:
-    if: github.event_name == 'push' && github.ref_name == 'agent/hidden-market-expansion' && github.actor != 'github-actions[bot]'
+    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
