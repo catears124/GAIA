@@ -1,12 +1,24 @@
-name: Continuous inventory fallback
+name: Production inventory
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Offset from the top of the hour to reduce GitHub scheduler congestion.
+    - cron: "2,17,32,47 * * * *"
+  push:
+    branches: ["main"]
   workflow_dispatch:
+    inputs:
+      budget_seconds:
+        description: "Maximum crawler runtime for this catch-up run"
+        required: false
+        default: "3000"
+      concurrency:
+        description: "Concurrent employer boards"
+        required: false
+        default: "24"
 
 concurrency:
-  group: gaia-continuous-inventory
+  group: gaia-production-inventory
   cancel-in-progress: false
 
 permissions:
@@ -15,20 +27,49 @@ permissions:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 55
+    environment: production
     env:
+      # Supabase transaction-pooler URL. The worker disables prepared statements.
       GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
-      GAIA_GITHUB_TOKEN: ${{ secrets.GAIA_GITHUB_TOKEN || github.token }}
-      GAIA_WORKER_CONCURRENCY: "12"
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_READ_ONLY: "0"
+      GAIA_WORKER_CONCURRENCY: "24"
       GAIA_WORKDAY_FULL_INVENTORY: "1"
       GAIA_WORKDAY_MAX_PER_TERM: "20000"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "1"
+      GAIA_WORKDAY_MIN_INTERVAL: "1.0"
+      GAIA_HTTP_TIMEOUT: "45"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
-      - run: python -m pip install -e .
-      - run: gaia migrate
-      - name: Drain due inventory work
-        run: gaia worker --once --budget-seconds 720
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          if [ -z "$GAIA_DATABASE_URL" ]; then
+            echo "Missing production secret GAIA_DATABASE_URL (or POSTGRES_URL)." >&2
+            exit 1
+          fi
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Drain due employer boards
+        shell: bash
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              budget="${{ inputs.budget_seconds }}"
+              concurrency="${{ inputs.concurrency }}"
+              ;;
+            push)
+              budget="1800"
+              concurrency="24"
+              ;;
+            *)
+              budget="720"
+              concurrency="24"
+              ;;
+          esac
+          gaia worker --once --budget-seconds "$budget" --concurrency "$concurrency"
