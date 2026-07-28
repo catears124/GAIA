@@ -28,10 +28,62 @@ def add_target(database: Database, source: str, *, complete_at: datetime) -> Non
         )
 
 
+def add_family(
+    database: Database,
+    key: str,
+    *,
+    posted_at: datetime,
+    found_at: datetime,
+) -> None:
+    with database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO families(
+                family_key, company, title, category, season, year, target_match,
+                opening_count, location_count, locations, openings, posted_precision,
+                latest_posted_at, first_detected_at, last_verified_at,
+                direct_openings, backstop_openings
+            ) VALUES (
+                %s, %s, 'Software Engineer Intern', 'software', 'summer', 2027,
+                'exact', 1, 1, ARRAY['Remote'], '[]'::jsonb, 'timestamp',
+                %s, %s, %s, 1, 0
+            )
+            """,
+            (key, key, posted_at, found_at, found_at),
+        )
+
+
 def test_newest_sort_uses_latest_activity_before_date_quality() -> None:
     order = _live_order_clause("newest")
     assert order.startswith("GREATEST(COALESCE(latest_posted_at")
     assert order.index("GREATEST") < order.index("(latest_posted_at IS NOT NULL) DESC")
+
+
+def test_newly_found_role_outranks_older_published_activity(tmp_path) -> None:
+    database = Database(tmp_path / "recency-order.db")
+    now = datetime.now(UTC)
+    add_family(
+        database,
+        "found-recently",
+        posted_at=now - timedelta(hours=38),
+        found_at=now - timedelta(hours=1),
+    )
+    add_family(
+        database,
+        "posted-ten-hours-ago",
+        posted_at=now - timedelta(hours=10),
+        found_at=now - timedelta(hours=10),
+    )
+
+    with database.connect() as connection:
+        rows = connection.execute(
+            f"SELECT family_key FROM families ORDER BY {_live_order_clause('newest')}"
+        ).fetchall()
+
+    assert [row["family_key"] for row in rows] == [
+        "found-recently",
+        "posted-ten-hours-ago",
+    ]
 
 
 def test_inventory_freshness_has_scheduler_safe_floor(tmp_path) -> None:
