@@ -63,6 +63,11 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         default=os.getenv("GAIA_CHECK_REQUIRE_HEALTHY", "0") == "1",
     )
+    check.add_argument(
+        "--require-universe",
+        action="store_true",
+        default=os.getenv("GAIA_CHECK_REQUIRE_UNIVERSE", "0") == "1",
+    )
     check.add_argument("--output", type=Path, default=None)
 
     serve = sub.add_parser("serve", help="preview the read-only product API locally")
@@ -146,6 +151,7 @@ def run_check(args: argparse.Namespace) -> int:
         min_sources=max(1, args.min_sources),
         min_active_listings=max(1, args.min_active_listings),
         require_healthy=bool(args.require_healthy),
+        require_universe=bool(args.require_universe),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     print(rendered)
