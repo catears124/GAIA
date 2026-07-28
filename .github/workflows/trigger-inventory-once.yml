@@ -1,0 +1,27 @@
+name: Trigger production inventory once
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/trigger-inventory-once.yml]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch bounded production inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/inventory.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"budget_seconds":"360"}}'
