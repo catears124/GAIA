@@ -1,7 +1,7 @@
 """Vercel entrypoint for the GAIA FastAPI application.
 
 The public deployment reads PostgreSQL through Supabase's transaction pooler.
-Crawler and discovery jobs run outside Vercel and write to the same database.
+The continuous crawler runs in a separate worker process and writes to the same database.
 """
 
 from __future__ import annotations
@@ -18,4 +18,4 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_READ_ONLY", "1")
     os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")
 
-from gaia.api import app  # noqa: E402,F401
+from gaia.product_api import app  # noqa: E402,F401

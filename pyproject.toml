@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gaia-internships"
-version = "4.0.0"
-description = "Verified CS internships from employer-controlled sources"
+version = "5.0.0"
+description = "Continuous employer job inventory for technical internships"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
