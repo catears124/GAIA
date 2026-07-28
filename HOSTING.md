@@ -42,6 +42,8 @@ The Vercel application never crawls or migrates. It reads the same Supabase data
 - Two enterprise-ATS lanes each run 8 async workers.
 - Workday has one isolated 2-worker lane; generic fallback pages have one 8-worker lane.
 - A separate discovery job runs only after the validated employer-board lanes complete and the market queue is caught up.
-- Scheduled lanes run for up to 11 minutes, pushes start 50-minute catch-up lanes, and manual runs default to 50 minutes per lane.
+- Scheduled lanes run for up to 11 minutes.
+- A successful `main` production deployment launches 50-minute catch-up lanes after migration and deployment complete.
+- A manual **Production inventory** run also defaults to 50 minutes per lane.
 
-The PostgreSQL queue uses leases and `FOR UPDATE SKIP LOCKED`, so every async worker across every Actions runner claims a distinct source. Interrupted jobs are safely reclaimed, and manual, push, and scheduled workflow runs may overlap without crawling the same board twice.
+The PostgreSQL queue uses leases and `FOR UPDATE SKIP LOCKED`, so every async worker across every Actions runner claims a distinct source. Interrupted jobs are safely reclaimed, and manual, deployment-triggered, and scheduled workflow runs may overlap without crawling the same board twice.
