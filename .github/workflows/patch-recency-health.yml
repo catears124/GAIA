@@ -25,6 +25,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src tests .github/workflows/production-health.yml .github/workflows/inventory.yml
+          git add src tests
           git commit -m 'Fix recency sorting and production freshness' || exit 0
           git push origin HEAD:agent/fix-recency-health
