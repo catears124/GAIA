@@ -77,10 +77,15 @@ def test_product_copy_and_recency_display_are_shipped() -> None:
 
 def test_health_watchdog_can_dispatch_recovery() -> None:
     root = Path(__file__).parents[1]
-    health_workflow = (root / ".github" / "workflows" / "production-health.yml").read_text(encoding="utf-8")
-    inventory_workflow = (root / ".github" / "workflows" / "inventory.yml").read_text(encoding="utf-8")
+    health_workflow = (
+        root / ".github" / "workflows" / "production-health.yml"
+    ).read_text(encoding="utf-8")
+    inventory_workflow = (
+        root / ".github" / "workflows" / "inventory.yml"
+    ).read_text(encoding="utf-8")
 
     assert "actions: write" in health_workflow
     assert "gh workflow run inventory.yml" in health_workflow
+    assert '"src/gaia/health.py"' in health_workflow
     assert "continue-on-error: true" in health_workflow
-    assert '"src/gaia/health.py"' in inventory_workflow
+    assert "continue-on-error: true" in inventory_workflow
