@@ -236,12 +236,13 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload health report
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: production-health
+          name: production-health-${{ github.run_id }}
           path: production-health.json
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 7
       - name: Publish final commit status
         if: always()
         shell: bash

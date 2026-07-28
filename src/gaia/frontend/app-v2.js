@@ -179,15 +179,23 @@ function jobRow(item) {
   const tracked = trackingMap()[item.family_key];
   const locations = item.locations || [];
   const location = locations.slice(0, 2).join(" · ") || "Location not stated";
-  const primaryDate = item.latest_posted_at
-    ? `Posted ${relative(item.latest_posted_at, item.posted_precision)}`
-    : `Found ${relative(item.first_detected_at)}`;
-  const secondaryDate = item.latest_posted_at
+  const postedAt = item.latest_posted_at ? new Date(item.latest_posted_at).getTime() : Number.NaN;
+  const foundAt = item.first_detected_at ? new Date(item.first_detected_at).getTime() : Number.NaN;
+  const foundIsNewer = Number.isFinite(foundAt) && (!Number.isFinite(postedAt) || foundAt > postedAt);
+  const primaryTimestamp = foundIsNewer
+    ? item.first_detected_at
+    : (item.latest_posted_at || item.first_detected_at);
+  const primaryDate = foundIsNewer
     ? `Found ${relative(item.first_detected_at)}`
+    : `Posted ${relative(item.latest_posted_at, item.posted_precision)}`;
+  const secondaryDate = item.latest_posted_at
+    ? foundIsNewer
+      ? `Employer posted ${relative(item.latest_posted_at, item.posted_precision)}`
+      : `Found ${relative(item.first_detected_at)}`
     : `Checked ${relative(item.last_verified_at)}`;
   const cycle = item.year ? (item.season ? `${item.season} ${item.year}` : String(item.year)) : "Cycle not stated";
   return `<article class="job-row" role="listitem" data-key="${esc(item.family_key)}">
-    <div class="job-date"><strong title="${esc(exact(item.latest_posted_at || item.first_detected_at))}">${esc(primaryDate)}</strong><span>${esc(secondaryDate)}</span></div>
+    <div class="job-date"><strong title="${esc(exact(primaryTimestamp))}">${esc(primaryDate)}</strong><span>${esc(secondaryDate)}</span></div>
     <div class="job-role"><button data-open="${esc(item.family_key)}">${esc(item.title || "Untitled internship")}</button><span>${esc(item.company || "Unknown company")} · ${esc(cycle)}</span></div>
     <div class="job-location" title="${esc(locations.join(" · "))}">${esc(location)}${locations.length > 2 ? ` +${locations.length - 2}` : ""}</div>
     <div class="job-source">${sourceBadge(item)}<span class="tag">${esc(item.category || "technical")}</span><span class="tag">${formatNumber(item.opening_count)} opening${item.opening_count === 1 ? "" : "s"}</span>${tracked ? `<span class="tag">${esc(tracked)}</span>` : ""}</div>

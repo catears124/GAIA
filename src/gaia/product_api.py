@@ -17,12 +17,12 @@ def _live_order_clause(sort: str) -> str:
         return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
-    # Employer-published chronology is the trustworthy primary order. Within the
-    # same published time, timestamp precision beats day precision. Roles whose
-    # employer did not publish a date fall back to GAIA's first-detected time.
+    # Sort by the newest trustworthy activity. A newly discovered role must not
+    # be buried beneath every role that happens to expose an older employer date.
+    # When activity times tie, employer dates and precise timestamps win.
     return (
+        "GREATEST(COALESCE(latest_posted_at, first_detected_at), first_detected_at) DESC, "
         "(latest_posted_at IS NOT NULL) DESC, "
-        "latest_posted_at DESC NULLS LAST, "
         "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
         "first_detected_at DESC, last_verified_at DESC, family_key"
     )

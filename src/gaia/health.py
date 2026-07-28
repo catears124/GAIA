@@ -10,11 +10,26 @@ from .universe import universe_summary
 BAD_STATUSES = ("broken", "blocked", "truncated", "partial")
 
 
+FRESHNESS_FLOOR_SECONDS = 90 * 60
+FRESHNESS_INTERVAL_MULTIPLIER = 3
+
+
 def inventory_state(database: Database) -> dict[str, Any]:
     """Return mutually exclusive source-health counts for the public inventory."""
     with database.connect() as connection:
         row = connection.execute(
             """
+            WITH current_targets AS (
+                SELECT
+                    target.*,
+                    GREATEST(target.interval_seconds * %s, %s) AS freshness_seconds
+                FROM crawl_targets AS target
+                JOIN source_catalog AS catalog USING(source)
+                WHERE target.enabled
+                  AND target.scheduled
+                  AND catalog.validated
+                  AND catalog.scope='current'
+            )
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (
@@ -26,7 +41,7 @@ def inventory_state(database: Database) -> dict[str, Any]:
                 COUNT(*) FILTER (
                     WHERE target.last_complete_at IS NOT NULL
                       AND target.last_complete_at <
-                          now() - make_interval(secs => target.interval_seconds * 2)
+                          now() - make_interval(secs => target.freshness_seconds)
                 ) AS overdue,
                 COUNT(*) FILTER (
                     WHERE target.last_status = ANY(%s)
@@ -34,27 +49,28 @@ def inventory_state(database: Database) -> dict[str, Any]:
                 COUNT(*) FILTER (
                     WHERE target.last_complete_at IS NOT NULL
                       AND target.last_complete_at >=
-                          now() - make_interval(secs => target.interval_seconds * 2)
+                          now() - make_interval(secs => target.freshness_seconds)
                       AND target.last_status <> ALL(%s)
                 ) AS fresh,
                 COUNT(*) FILTER (
                     WHERE target.last_complete_at IS NULL
                        OR target.last_complete_at <
-                          now() - make_interval(secs => target.interval_seconds * 2)
+                          now() - make_interval(secs => target.freshness_seconds)
                        OR target.last_status = ANY(%s)
                 ) AS unhealthy,
                 MAX(target.last_finished_at) AS latest_activity_at,
                 MIN(target.last_complete_at) FILTER (
                     WHERE target.last_complete_at IS NOT NULL
                 ) AS coverage_watermark
-            FROM crawl_targets AS target
-            JOIN source_catalog AS catalog USING(source)
-            WHERE target.enabled
-              AND target.scheduled
-              AND catalog.validated
-              AND catalog.scope='current'
+            FROM current_targets AS target
             """,
-            (list(BAD_STATUSES), list(BAD_STATUSES), list(BAD_STATUSES)),
+            (
+                FRESHNESS_INTERVAL_MULTIPLIER,
+                FRESHNESS_FLOOR_SECONDS,
+                list(BAD_STATUSES),
+                list(BAD_STATUSES),
+                list(BAD_STATUSES),
+            ),
         ).fetchone()
         historical = connection.execute(
             """
@@ -81,6 +97,7 @@ def inventory_state(database: Database) -> dict[str, Any]:
     state["historical"] = int(historical["count"] or 0)
     state["latest_activity_at"] = iso(state.get("latest_activity_at"))
     state["coverage_watermark"] = iso(state.get("coverage_watermark"))
+    state["freshness_floor_seconds"] = FRESHNESS_FLOOR_SECONDS
     total = int(state["total"])
     state["fresh_percent"] = round(100 * int(state["fresh"]) / total, 1) if total else 0.0
     state["healthy"] = bool(total) and int(state["unhealthy"]) == 0
