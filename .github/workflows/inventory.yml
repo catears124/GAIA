@@ -4,9 +4,8 @@ on:
   schedule:
     # Offset from the top of the hour to reduce GitHub scheduler congestion.
     - cron: "2,17,32,47 * * * *"
-  workflow_run:
-    workflows: ["Vercel"]
-    types: [completed]
+  push:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       budget_seconds:
@@ -19,17 +18,13 @@ permissions:
 
 jobs:
   prepare:
-    name: Prepare distributed source queue
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.conclusion == 'success')
+    name: Migrate and prepare distributed queue
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
@@ -41,15 +36,21 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connection
+      - name: Require Supabase URLs
         shell: bash
         run: |
           if [ -z "$GAIA_DATABASE_URL" ]; then
-            echo "Missing production secret GAIA_DATABASE_URL (or POSTGRES_URL)." >&2
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 1
+          fi
+          if [ -z "$GAIA_MIGRATION_DATABASE_URL" ]; then
+            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
             exit 1
           fi
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+      - name: Apply production schema
+        run: gaia migrate
       - name: Reconcile validated sources into the crawl queue
         run: gaia worker --once --budget-seconds 1 --concurrency 1
 
@@ -90,7 +91,7 @@ jobs:
             kinds: domain,verification
             workers: 8
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
@@ -114,7 +115,7 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            workflow_run) budget="3000" ;;
+            push) budget="3000" ;;
             *) budget="660" ;;
           esac
           gaia worker \
@@ -130,7 +131,7 @@ jobs:
     timeout-minutes: 12
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
