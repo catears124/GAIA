@@ -3,8 +3,6 @@ name: Production inventory
 on:
   schedule:
     - cron: "2,17,32,47 * * * *"
-  push:
-    branches: ["main"]
   workflow_dispatch:
     inputs:
       budget_seconds:
@@ -132,7 +130,6 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            push) budget="3000" ;;
             *) budget="660" ;;
           esac
           gaia worker \
