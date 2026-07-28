@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import logging
 import os
-import threading
 from pathlib import Path
 
 import psycopg
@@ -14,15 +13,13 @@ from psycopg import sql
 from .db import Database, _normalize_database_url
 from .live_inventory import InventoryWorker, LiveDatabase
 
-LOGGER = logging.getLogger("gaia.cli")
-
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="gaia")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="create or upgrade the PostgreSQL schema")
 
-    worker = sub.add_parser("worker", help="run the continuous job-inventory worker")
+    worker = sub.add_parser("worker", help="run a bounded production inventory batch")
     worker.add_argument("--once", action="store_true", help="drain currently due work, then exit")
     worker.add_argument("--budget-seconds", type=float, default=None)
     worker.add_argument(
@@ -31,25 +28,15 @@ def parser() -> argparse.ArgumentParser:
         default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "24")),
     )
 
-    serve = sub.add_parser("serve", help="serve the app and continuously refresh inventory")
+    serve = sub.add_parser("serve", help="preview the read-only product API locally")
     serve.add_argument("--host", default=os.getenv("GAIA_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.getenv("GAIA_PORT", "8501")))
-    serve.add_argument(
-        "--no-worker",
-        action="store_true",
-        help="serve read-only without starting the local continuous worker",
-    )
-    serve.add_argument(
-        "--concurrency",
-        type=int,
-        default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "24")),
-    )
     return root
 
 
 async def run_worker(*, once: bool, budget_seconds: float | None, concurrency: int) -> None:
-    # Schema changes are explicit through `gaia migrate`; workers stay on the normal
-    # pooled connection and never attempt long-running DDL during startup.
+    # Production workers run in GitHub Actions against Supabase's pooled connection.
+    # Schema changes are applied separately by the deployment workflow.
     database = LiveDatabase(migrate=False)
     summary = await InventoryWorker(database, concurrency=max(1, concurrency)).run(
         once=once,
@@ -57,18 +44,6 @@ async def run_worker(*, once: bool, budget_seconds: float | None, concurrency: i
     )
     if once:
         print(summary.as_dict())
-
-
-def start_embedded_worker(concurrency: int) -> threading.Thread:
-    def target() -> None:
-        try:
-            asyncio.run(run_worker(once=False, budget_seconds=None, concurrency=concurrency))
-        except Exception:
-            LOGGER.exception("embedded inventory worker stopped")
-
-    thread = threading.Thread(target=target, name="gaia-inventory", daemon=True)
-    thread.start()
-    return thread
 
 
 def run_migration() -> None:
@@ -119,8 +94,6 @@ def main() -> None:
             )
         )
     elif args.command == "serve":
-        if not args.no_worker:
-            start_embedded_worker(max(1, args.concurrency))
         uvicorn.run("gaia.product_api:app", host=args.host, port=args.port, reload=False)
 
 
