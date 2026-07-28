@@ -115,7 +115,7 @@ def ensure_ecosystem_schema(database: Database) -> None:
 
 def _observation_key(source: str, profile_url: str, name: str) -> str:
     raw = f"{source}|{profile_url}|{name.casefold()}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:28]
+    return hashlib.sha256(raw.encode()).hexdigest()[:28]
 
 
 def _yc_company_name(text: str) -> str:
@@ -355,7 +355,7 @@ async def _resolve_observation(
                     url
                     for _, url in _external_links(jobs_body, final_url)
                     if urlsplit(url).netloc.casefold()
-                    not in {"ycombinator.com", "www.ycombinator.com"}
+                    not in EXCLUDED_PROFILE_HOSTS
                 )
 
         postings = [
