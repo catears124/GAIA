@@ -204,4 +204,4 @@ def test_production_checker_can_require_employer_universe(tmp_path) -> None:
     )
 
     assert report["ok"] is False
-    assert "employer universe read model is missing" in report["errors"]
+    assert "employer universe contains no employers" in report["errors"]
