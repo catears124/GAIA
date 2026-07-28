@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from gaia.db import Database
-from gaia.health import inventory_state
+from gaia.health import inventory_state, production_report
 from gaia.live_inventory import LiveDatabase, LiveInventoryStore
 
 
@@ -31,6 +31,25 @@ def add_target(
             ) VALUES (%s,TRUE,TRUE,10,900,now(),%s,%s,%s)
             """,
             (source, complete_at, complete_at, status),
+        )
+
+
+def add_family(database: Database) -> None:
+    now = datetime.now(UTC)
+    with database.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO families(
+                family_key, company, title, category, season, year, target_match,
+                opening_count, location_count, locations, openings, posted_precision,
+                first_detected_at, last_verified_at, direct_openings, backstop_openings
+            ) VALUES (
+                'example:software-intern', 'Example', 'Software Engineer Intern',
+                'software', 'summer', 2027, 'exact', 1, 1, ARRAY['Remote'],
+                '[]'::jsonb, 'day', %s, %s, 1, 0
+            )
+            """,
+            (now, now),
         )
 
 
@@ -107,3 +126,43 @@ def test_health_union_does_not_double_count_overdue_degraded_source(tmp_path) ->
     assert state["unhealthy"] == 1
     assert state["fresh_percent"] == 50.0
     assert state["healthy"] is False
+
+
+def test_production_checker_accepts_recent_populated_inventory(tmp_path) -> None:
+    database = Database(tmp_path / "checker-ok.db")
+    add_target(database, "greenhouse:healthy", complete_at=datetime.now(UTC), status="ok")
+    add_family(database)
+
+    report = production_report(
+        database,
+        max_activity_minutes=90,
+        min_sources=1,
+        min_active_listings=1,
+    )
+
+    assert report["ok"] is True
+    assert report["errors"] == []
+    assert report["inventory"]["fresh"] == 1
+    assert report["product"]["active_listings"] == 1
+
+
+def test_production_checker_rejects_stalled_inventory(tmp_path) -> None:
+    database = Database(tmp_path / "checker-stale.db")
+    add_target(
+        database,
+        "greenhouse:stale",
+        complete_at=datetime.now(UTC) - timedelta(hours=3),
+        status="ok",
+    )
+    add_family(database)
+
+    report = production_report(
+        database,
+        max_activity_minutes=90,
+        min_sources=1,
+        min_active_listings=1,
+    )
+
+    assert report["ok"] is False
+    assert any("activity is" in error for error in report["errors"])
+    assert "no validated current source is fresh" in report["errors"]
