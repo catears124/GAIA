@@ -4,8 +4,9 @@ on:
   schedule:
     # Offset from the top of the hour to reduce GitHub scheduler congestion.
     - cron: "2,17,32,47 * * * *"
-  push:
-    branches: ["main"]
+  workflow_run:
+    workflows: ["Vercel"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       budget_seconds:
@@ -19,6 +20,11 @@ permissions:
 jobs:
   prepare:
     name: Prepare distributed source queue
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 8
     environment: production
@@ -108,7 +114,7 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            push) budget="3000" ;;
+            workflow_run) budget="3000" ;;
             *) budget="660" ;;
           esac
           gaia worker \
