@@ -189,7 +189,7 @@ def _split_keywords(value: object) -> list[str]:
     if isinstance(value, list):
         values = [str(item).strip() for item in value]
     else:
-        values = re.split(r"[,;|]", str(value or ""))
+        values = [item.strip() for item in re.split(r"[,;|]", str(value or ""))]
     return sorted({item for item in values if item})[:30]
 
 
