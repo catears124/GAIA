@@ -3,90 +3,77 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Continuously monitored technical internships from employer-controlled sources and clearly labeled market leads.">
-  <meta name="theme-color" content="#0d1b16">
-  <meta property="og:title" content="GAIA — Internships you can trust">
-  <meta property="og:description" content="Technical internships from a continuously monitored employer-job inventory.">
+  <meta name="description" content="A continuously monitored inventory of technical internships and the employers GAIA has not covered yet.">
+  <meta name="theme-color" content="#111111">
+  <meta property="og:title" content="GAIA — Technical internships">
+  <meta property="og:description" content="Direct employer applications, clearly labeled leads, and an auditable employer-universe frontier.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="__GAIA_OG_IMAGE__">
   <meta name="twitter:card" content="summary_large_image">
-  <title>GAIA — Internships you can trust</title>
+  <title>GAIA — Technical internships</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/product.css?v=7.1.0">
+  <link rel="stylesheet" href="/assets/product-v2.css?v=8.0.0">
 </head>
 <body>
-  <a class="skip-link" href="#results">Skip to opportunities</a>
+  <a class="skip-link" href="#results">Skip to results</a>
 
-  <header class="site-header">
-    <a class="brand" href="/" aria-label="GAIA home">
-      <span class="brand-mark" aria-hidden="true">G</span>
-      <span>GAIA</span>
-    </a>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="GAIA home">GAIA</a>
     <nav aria-label="Primary navigation">
-      <button class="nav-link active" data-view="jobs">Explore</button>
+      <button class="nav-link active" data-view="jobs">Jobs</button>
       <button class="nav-link" data-view="saved">Saved <span id="saved-count" class="count">0</span></button>
-      <button class="nav-link" data-view="coverage">Sources</button>
+      <button class="nav-link" data-view="universe">Universe</button>
     </nav>
     <div id="freshness" class="freshness" aria-live="polite">
       <span class="status-dot" aria-hidden="true"></span>
-      <span>Checking source coverage…</span>
+      <span>Checking inventory…</span>
     </div>
   </header>
 
   <main>
-    <section class="hero" aria-labelledby="page-title">
-      <div class="hero-copy">
-        <p class="eyebrow"><span></span> Technical internships · all active cycles</p>
-        <h1 id="page-title">Your next role<br>should be <em>real.</em></h1>
-        <p>GAIA continuously inventories employer career systems and tracks outside market leads, so newly opened SWE, ML, data, product, hardware, security, and quant internships appear in one place.</p>
-        <a class="hero-link" href="#results">Explore the live market <span aria-hidden="true">↓</span></a>
-      </div>
-      <aside class="proof" aria-label="Live index summary">
-        <p class="proof-label">Live inventory</p>
-        <div class="proof-primary">
-          <strong id="metric-active">—</strong>
-          <span>open applications<br>from employers</span>
-        </div>
-        <div class="proof-grid">
-          <div><strong id="metric-companies">—</strong><span>companies</span></div>
-          <div><strong id="metric-new">—</strong><span>first seen today</span></div>
-        </div>
-        <p class="proof-note"><span aria-hidden="true">✓</span> Employer applications and unverified leads are labeled separately.</p>
-      </aside>
-    </section>
-
     <section id="jobs-view" class="product-view">
-      <div class="search-panel">
+      <header class="page-intro">
+        <div>
+          <h1>Technical internships.</h1>
+          <p>Direct employer applications first. Leads are visible, but never passed off as verified.</p>
+        </div>
+        <div class="metrics" aria-label="Live inventory summary">
+          <div><strong id="metric-active">—</strong><span>open applications</span></div>
+          <div><strong id="metric-companies">—</strong><span>hiring companies</span></div>
+          <div><strong id="metric-new">—</strong><span>found today</span></div>
+        </div>
+      </header>
+
+      <section class="search-shell" aria-label="Search and filters">
         <label class="search-field">
-          <span class="search-icon" aria-hidden="true"></span>
-          <span class="sr-only">Search internships</span>
-          <input id="search" type="search" placeholder="Search roles, companies, or places" autocomplete="off">
+          <span class="sr-only">Search jobs</span>
+          <input id="search" type="search" placeholder="Search role, company, or location" autocomplete="off">
           <kbd>/</kbd>
         </label>
-        <div class="filters" aria-label="Internship filters">
-          <label><span>Confidence</span><select id="trust"><option value="verified">Verified only</option><option value="all" selected>All opportunities</option><option value="leads">Leads to verify</option></select></label>
-          <label><span>Discipline</span><select id="category"><option value="">All disciplines</option><option value="software">Software</option><option value="ml-ai">ML / AI</option><option value="data">Data</option><option value="security">Security</option><option value="hardware">Hardware</option><option value="quant">Quant</option><option value="product">Product</option><option value="other-technical">Other technical</option></select></label>
+        <div class="filter-grid">
+          <label><span>Confidence</span><select id="trust"><option value="all" selected>All</option><option value="verified">Employer verified</option><option value="leads">Leads only</option></select></label>
+          <label><span>Discipline</span><select id="category"><option value="">All technical</option><option value="software">Software</option><option value="ml-ai">ML / AI</option><option value="data">Data</option><option value="security">Security</option><option value="hardware">Hardware</option><option value="quant">Quant</option><option value="product">Product</option><option value="other-technical">Other technical</option></select></label>
           <label><span>Company</span><select id="company"><option value="">All companies</option></select></label>
           <label><span>Location</span><input id="location" type="search" placeholder="Anywhere"></label>
-          <label><span>Cycle</span><select id="target"><option value="" selected>All active internships</option><option value="default">Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027 role</option></select></label>
-          <label><span>Recency</span><select id="posted-within"><option value="0">Any time</option><option value="1">Past 24 hours</option><option value="7">Past week</option><option value="30">Past month</option></select></label>
-          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newly found</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
-          <label class="toggle-filter"><input id="remote" type="checkbox"><span class="toggle" aria-hidden="true"></span><span>Remote</span></label>
+          <label><span>Cycle</span><select id="target"><option value="" selected>All active cycles</option><option value="default">Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027</option></select></label>
+          <label><span>Recency</span><select id="posted-within"><option value="0" selected>Any time</option><option value="1">Past 24 hours</option><option value="7">Past week</option><option value="30">Past month</option></select></label>
+          <label><span>Sort</span><select id="sort"><option value="newest" selected>Most recent</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
+          <label class="check-filter"><input id="remote" type="checkbox"><span>Remote only</span></label>
         </div>
-      </div>
+      </section>
 
       <div class="results-head" id="results">
         <div>
-          <p id="result-count" aria-live="polite">Loading opportunities…</p>
-          <p id="result-note">Employer applications and clearly labeled market leads.</p>
+          <strong id="result-count" aria-live="polite">Loading…</strong>
+          <span id="result-note">Employer-posted date first; GAIA detection time is the fallback.</span>
         </div>
-        <div class="result-actions">
-          <button id="density-toggle" class="text-button" aria-pressed="false">Compact view</button>
-          <button id="clear-filters" class="text-button" hidden>Reset filters</button>
-        </div>
+        <button id="clear-filters" class="text-button" hidden>Reset filters</button>
       </div>
 
-      <div id="job-grid" class="job-grid" aria-live="polite" aria-busy="true"></div>
+      <div class="job-list" role="list">
+        <div class="job-list-head" aria-hidden="true"><span>Recent</span><span>Company and role</span><span>Location</span><span>Source</span><span></span></div>
+        <div id="job-grid" aria-live="polite" aria-busy="true"></div>
+      </div>
       <div id="empty-state" class="empty-state" hidden></div>
       <footer class="pagination" aria-label="Results pages">
         <button id="prev" class="secondary">← Previous</button>
@@ -96,25 +83,34 @@
     </section>
 
     <section id="saved-view" class="product-view" hidden>
-      <div class="section-heading">
-        <div><p class="eyebrow"><span></span> Your shortlist</p><h2>Roles worth returning to.</h2><p>Saved privately on this device. Track each application from its details.</p></div>
-      </div>
-      <div id="saved-grid" class="job-grid"></div>
-      <div id="saved-empty" class="empty-state" hidden><strong>Your shortlist is empty.</strong><p>Save a role when it catches your eye. It will stay here on this device.</p><button class="primary" data-view="jobs">Explore internships</button></div>
+      <header class="section-heading"><h1>Saved jobs</h1><p>Stored only in this browser.</p></header>
+      <div class="job-list"><div id="saved-grid"></div></div>
+      <div id="saved-empty" class="empty-state" hidden><strong>No saved jobs.</strong><p>Save a role from the main list and it will appear here.</p><button class="primary" data-view="jobs">Browse jobs</button></div>
     </section>
 
-    <section id="coverage-view" class="product-view" hidden>
-      <div class="section-heading admin-heading">
-        <div><p class="eyebrow"><span></span> Transparent by design</p><h2>Trust, with receipts.</h2><p>See what GAIA checked, what is current, and where access is limited.</p></div>
-        <div class="admin-actions" hidden><button id="sync-button" class="secondary">Refresh sources</button><button id="discover-button" class="primary">Discover employers</button></div>
+    <section id="universe-view" class="product-view" hidden>
+      <header class="section-heading">
+        <h1>Employer universe</h1>
+        <p>Historical internship evidence and live market signals are employer nodes. A company is not covered until GAIA validates its real hiring surface.</p>
+      </header>
+
+      <div id="universe-summary" class="universe-summary" aria-live="polite"></div>
+      <div class="universe-explainer">
+        <strong id="coverage-benchmark">Loading benchmark…</strong>
+        <span id="coverage-source-count"></span>
       </div>
-      <div id="sync-progress" class="sync-progress" hidden><div><strong id="progress-stage">Starting…</strong><span id="progress-label">0 / 0</span></div><progress id="progress-bar" value="0" max="1"></progress><small id="progress-current"></small></div>
-      <div id="coverage-summary" class="coverage-summary"></div>
-      <div class="coverage-toolbar">
-        <label><span>Show</span><select id="coverage-filter"><option value="actionable">Needs attention</option><option value="access">Access limited</option><option value="stale">Stale sources</option><option value="historical">Historical watches</option><option value="all">Every source</option></select></label>
-        <div><span id="coverage-benchmark"></span><span id="coverage-source-count"></span></div>
-      </div>
-      <div id="coverage-list" class="coverage-list"></div>
+
+      <section class="panel">
+        <div class="panel-head"><div><h2>Unresolved frontier</h2><p>High-probability technical internship employers without a validated enumerable source.</p></div><span id="frontier-count"></span></div>
+        <div id="frontier-list" class="frontier-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><div><h2>Source diagnostics</h2><p>Operational source records, shown separately from employer coverage.</p></div>
+          <label><span class="sr-only">Filter sources</span><select id="coverage-filter"><option value="actionable">Needs attention</option><option value="access">Access limited</option><option value="stale">Stale</option><option value="historical">Historical</option><option value="all">All source records</option></select></label>
+        </div>
+        <div id="coverage-list" class="coverage-list"></div>
+      </section>
     </section>
   </main>
 
@@ -123,7 +119,7 @@
     <div id="drawer-content"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=7.1.0" defer></script>
+  <script src="/assets/app-v2.js?v=8.0.0" defer></script>
   <script src="/assets/live.js?v=7.1.0" defer></script>
 </body>
 </html>
