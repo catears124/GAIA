@@ -16,12 +16,6 @@ on:
 permissions:
   contents: read
 
-env:
-  GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
-  GAIA_AUTO_MIGRATE: "0"
-  GAIA_READ_ONLY: "0"
-  GAIA_HTTP_TIMEOUT: "45"
-
 jobs:
   prepare:
     name: Prepare distributed source queue
@@ -29,6 +23,10 @@ jobs:
     timeout-minutes: 8
     environment: production
     env:
+      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_READ_ONLY: "0"
+      GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
       GAIA_WORKER_KINDS: __prepare_only__
     steps:
@@ -86,6 +84,10 @@ jobs:
             kinds: domain,verification
             workers: 8
     env:
+      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_READ_ONLY: "0"
+      GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
       GAIA_SKIP_CATALOG_SYNC: "1"
       GAIA_WORKER_KINDS: ${{ matrix.kinds }}
@@ -122,6 +124,10 @@ jobs:
     timeout-minutes: 12
     environment: production
     env:
+      GAIA_DATABASE_URL: ${{ secrets.GAIA_DATABASE_URL || secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_READ_ONLY: "0"
+      GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "1"
       # No catalog kind has this name, so this runner only executes the globally
       # leased discovery task after all currently due employer boards are drained.
