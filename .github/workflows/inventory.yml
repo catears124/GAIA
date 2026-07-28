@@ -13,6 +13,12 @@ on:
         required: false
         default: "3000"
 
+# Matrix jobs provide horizontal fan-out inside one run. Serializing whole runs prevents
+# a long catch-up batch from spawning a second Workday lane while the first is active.
+concurrency:
+  group: gaia-production-inventory
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -150,3 +156,59 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e .
       - name: Refresh evidence and validate candidate boards
         run: gaia worker --once --budget-seconds 600 --concurrency 16
+
+  health:
+    name: Verify production inventory
+    needs: [prepare, inventory, discovery]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_CHECK_MAX_ACTIVITY_MINUTES: "90"
+      GAIA_CHECK_MIN_SOURCES: "100"
+      GAIA_CHECK_MIN_ACTIVE_LISTINGS: "25"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Check Supabase inventory and product read model
+        run: gaia check --output production-health.json
+      - name: Publish health report
+        if: always()
+        shell: bash
+        run: |
+          echo "### Production inventory health" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f production-health.json ]; then
+            cat production-health.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '{"ok": false, "errors": ["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-health
+          path: production-health.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Require successful crawler lanes
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ needs.prepare.result }}" != "success" ]; then
+            echo "Queue preparation or migration failed." >&2
+            exit 1
+          fi
+          if [ "${{ needs.inventory.result }}" != "success" ]; then
+            echo "One or more inventory lanes failed." >&2
+            exit 1
+          fi
