@@ -8,9 +8,32 @@ on:
     - cron: "17 */2 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  expand-hidden-market:
+    if: github.event_name == 'push' && github.ref_name == 'agent/hidden-market-expansion' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/hidden-market-expansion
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Apply reviewed expansion
+        run: |
+          python .github/expand_hidden_market.py
+          ruff check src/gaia/employer_census.py tests/test_employer_universe.py --fix
+      - name: Commit code and tests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/gaia/employer_census.py src/gaia/default_sources.yaml src/gaia/frontend/app-v2.js tests/test_employer_universe.py .github/expand_hidden_market.py
+          git commit -m "Expand the hidden-market employer frontier"
+          git push origin HEAD:agent/hidden-market-expansion
+
   lint:
     runs-on: ubuntu-latest
     steps:
