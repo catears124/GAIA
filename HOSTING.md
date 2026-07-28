@@ -3,8 +3,8 @@
 GAIA production uses exactly three services:
 
 - **Vercel** serves the read-only FastAPI product.
-- **GitHub Actions** applies migrations and runs bounded inventory batches.
-- **Supabase PostgreSQL** stores the source queue, job inventory, history, and public read model.
+- **GitHub Actions** applies migrations and runs horizontally scaled inventory batches.
+- **Supabase PostgreSQL** stores the source queue, leases, job inventory, history, and public read model.
 
 No laptop, Render worker, Docker service, or manually running terminal is part of production.
 
@@ -37,8 +37,11 @@ The Vercel application never crawls or migrates. It reads the same Supabase data
 ## Workflows
 
 - `.github/workflows/deploy.yml` verifies the project, migrates Supabase through the direct connection, and deploys Vercel after every push to `main`.
-- `.github/workflows/inventory.yml` runs every 15 minutes and drains due employer boards for up to 12 minutes.
-- A push to `main` starts a 30-minute catch-up batch.
-- A manual **Production inventory** workflow run defaults to a 50-minute catch-up batch.
+- `.github/workflows/inventory.yml` runs every 15 minutes and fans inventory out across seven simultaneous GitHub-hosted runners.
+- Three fast-ATS lanes each run 24 async workers.
+- Two enterprise-ATS lanes each run 8 async workers.
+- Workday has one isolated 2-worker lane; generic fallback pages have one 8-worker lane.
+- A separate discovery job runs only after the validated employer-board lanes complete and the market queue is caught up.
+- Scheduled lanes run for up to 11 minutes, pushes start 50-minute catch-up lanes, and manual runs default to 50 minutes per lane.
 
-The PostgreSQL queue uses leases and `FOR UPDATE SKIP LOCKED`, so interrupted jobs are safely reclaimed and overlapping workflow attempts do not crawl the same source concurrently.
+The PostgreSQL queue uses leases and `FOR UPDATE SKIP LOCKED`, so every async worker across every Actions runner claims a distinct source. Interrupted jobs are safely reclaimed, and manual, push, and scheduled workflow runs may overlap without crawling the same board twice.
