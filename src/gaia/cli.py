@@ -14,12 +14,20 @@ from psycopg import sql
 from .db import Database, _normalize_database_url
 from .health import production_report
 from .live_inventory import InventoryWorker, LiveDatabase
+from .universe import (
+    UNIVERSE_SCHEMA_STATEMENTS,
+    rebuild_employer_universe,
+)
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="gaia")
     sub = root.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="create or upgrade the PostgreSQL schema")
+    sub.add_parser(
+        "reconcile",
+        help="serialize derived role families and the employer-universe census",
+    )
 
     worker = sub.add_parser("worker", help="run a bounded production inventory batch")
     worker.add_argument("--once", action="store_true", help="drain currently due work, then exit")
@@ -99,6 +107,26 @@ def run_migration() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(database.schema))
         )
         connection.execute(schema_sql)
+        for statement in UNIVERSE_SCHEMA_STATEMENTS:
+            connection.execute(statement)
+
+
+def run_reconcile() -> dict[str, int]:
+    """Build all global read models once after horizontally scaled collectors finish."""
+    database = Database(migrate=False)
+    with database.connect() as lock:
+        lock.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            ("gaia:global-reconcile",),
+        )
+        try:
+            database.rebuild_families()
+            return rebuild_employer_universe(database)
+        finally:
+            lock.execute(
+                "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                ("gaia:global-reconcile",),
+            )
 
 
 def run_check(args: argparse.Namespace) -> int:
@@ -127,6 +155,8 @@ def main() -> int:
     if args.command == "migrate":
         run_migration()
         print("PostgreSQL schema is ready.")
+    elif args.command == "reconcile":
+        print(json.dumps(run_reconcile(), sort_keys=True))
     elif args.command == "worker":
         asyncio.run(
             run_worker(
