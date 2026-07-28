@@ -154,21 +154,22 @@ class InventoryWorker(RuntimeInventoryWorker):
         once: bool = False,
         budget_seconds: float | None = None,
     ) -> WorkerSummary:
-        if os.getenv("GAIA_SKIP_CATALOG_SYNC", "0") != "1":
-            return await super().run(once=once, budget_seconds=budget_seconds)
-
-        # The workflow's prepare job already reconciled source_catalog into crawl_targets.
-        # Skip repeating that full-table transaction in every parallel provider lane.
+        # Provider lanes may mutate independent postings concurrently, but global
+        # materialized read models must be rebuilt exactly once by `gaia reconcile`.
+        skip_sync = os.getenv("GAIA_SKIP_CATALOG_SYNC", "0") == "1"
+        defer_rebuild = os.getenv("GAIA_DEFER_FAMILY_REBUILD", "0") == "1"
         original_sync = self.store.sync_catalog
+        original_rebuild = self.database.rebuild_families
 
-        def skip_catalog_sync() -> int:
-            return 0
-
-        self.store.sync_catalog = skip_catalog_sync  # type: ignore[method-assign]
+        if skip_sync:
+            self.store.sync_catalog = lambda: 0  # type: ignore[method-assign]
+        if defer_rebuild:
+            self.database.rebuild_families = lambda: None  # type: ignore[method-assign]
         try:
             return await super().run(once=once, budget_seconds=budget_seconds)
         finally:
             self.store.sync_catalog = original_sync  # type: ignore[method-assign]
+            self.database.rebuild_families = original_rebuild  # type: ignore[method-assign]
 
     async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
         if os.getenv("GAIA_ENABLE_DISCOVERY", "1") != "1":
