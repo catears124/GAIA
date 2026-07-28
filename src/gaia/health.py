@@ -5,6 +5,7 @@ from typing import Any
 
 from .db import Database
 from .db_base import iso
+from .universe import universe_summary
 
 BAD_STATUSES = ("broken", "blocked", "truncated", "partial")
 
@@ -66,10 +67,7 @@ def inventory_state(database: Database) -> dict[str, Any]:
             """
         ).fetchone()
 
-    state: dict[str, Any] = {
-        key: row[key]
-        for key in row.keys()
-    }
+    state: dict[str, Any] = {key: row[key] for key in row.keys()}
     for key in (
         "total",
         "running",
@@ -96,9 +94,11 @@ def production_report(
     min_sources: int = 100,
     min_active_listings: int = 25,
     require_healthy: bool = False,
+    require_universe: bool = False,
 ) -> dict[str, Any]:
     """Evaluate whether hosted inventory is alive, populated, and advancing."""
     state = inventory_state(database)
+    census = universe_summary(database, limit=1)
     with database.connect() as connection:
         product = connection.execute(
             """
@@ -137,6 +137,7 @@ def production_report(
     warnings: list[str] = []
     total = int(state["total"])
     active_listings = int(product["active_listings"] or 0)
+    census_summary = dict(census.get("summary") or {})
     if total < min_sources:
         errors.append(f"validated source count {total} is below floor {min_sources}")
     if active_listings < min_active_listings:
@@ -161,7 +162,17 @@ def production_report(
     if int(state["degraded"]):
         warnings.append(f"{state['degraded']} sources have a degraded latest result")
 
-    report = {
+    if require_universe:
+        if not bool(census.get("ready")):
+            errors.append("employer universe read model is missing")
+        elif int(census_summary.get("known_employers") or 0) == 0:
+            errors.append("employer universe contains no employers")
+        elif int(census_summary.get("enumerated_employers") or 0) == 0:
+            errors.append("employer universe contains no independently enumerated employers")
+    elif not bool(census.get("ready")):
+        warnings.append("employer universe read model has not been built")
+
+    return {
         "ok": not errors,
         "checked_at": now.isoformat(),
         "activity_age_minutes": (
@@ -172,6 +183,7 @@ def production_report(
             "min_sources": min_sources,
             "min_active_listings": min_active_listings,
             "require_healthy": require_healthy,
+            "require_universe": require_universe,
         },
         "inventory": state,
         "product": {
@@ -179,6 +191,7 @@ def production_report(
             "active_listings": active_listings,
             "companies": int(product["companies"] or 0),
         },
+        "universe": census,
         "snapshots": {
             "recent_30m": int(snapshots["recent_snapshots"] or 0),
             "recent_failed_30m": int(snapshots["recent_failed_snapshots"] or 0),
@@ -187,4 +200,3 @@ def production_report(
         "errors": errors,
         "warnings": warnings,
     }
-    return report
