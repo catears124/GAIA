@@ -12,6 +12,10 @@ import uvicorn
 from psycopg import sql
 
 from .db import Database, _normalize_database_url
+from .employer_census import (
+    ECOSYSTEM_SCHEMA_STATEMENTS,
+    merge_observations_into_universe,
+)
 from .health import production_report
 from .live_inventory import InventoryWorker, LiveDatabase
 from .universe import (
@@ -107,7 +111,7 @@ def run_migration() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(database.schema))
         )
         connection.execute(schema_sql)
-        for statement in UNIVERSE_SCHEMA_STATEMENTS:
+        for statement in (*UNIVERSE_SCHEMA_STATEMENTS, *ECOSYSTEM_SCHEMA_STATEMENTS):
             connection.execute(statement)
 
 
@@ -121,7 +125,12 @@ def run_reconcile() -> dict[str, int]:
         )
         try:
             database.rebuild_families()
-            return rebuild_employer_universe(database)
+            posting_census = rebuild_employer_universe(database)
+            ecosystem_census = merge_observations_into_universe(database)
+            return {
+                **posting_census,
+                **{f"ecosystem_{key}": value for key, value in ecosystem_census.items()},
+            }
         finally:
             lock.execute(
                 "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
