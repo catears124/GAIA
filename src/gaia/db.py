@@ -27,9 +27,17 @@ def _normalize_database_url(value: str) -> str:
 
 
 def _is_legacy_path(value: str | Path | None) -> bool:
-    return isinstance(value, Path) or (
-        isinstance(value, str) and "://" not in value and not value.startswith("postgres")
-    )
+    if isinstance(value, Path):
+        return True
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip().casefold()
+    return (
+        candidate == ":memory:"
+        or candidate.endswith((".db", ".sqlite", ".sqlite3"))
+        or "/" in candidate
+        or "\\" in candidate
+    ) and "://" not in candidate
 
 
 # Vercel's Supabase integration provides POSTGRES_URL automatically. Normalize it
