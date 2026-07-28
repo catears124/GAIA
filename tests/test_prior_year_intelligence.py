@@ -72,7 +72,7 @@ def test_historical_catalog_watch_promotes_after_finding_current_role(tmp_path):
     db = Database(tmp_path / "gaia.db")
     collector = SitemapDomainCollector("Example", "careers.example.com", [])
     collector.scope = "historical"
-    save_catalog(db, [collector])
+    save_catalog(db, [collector], validated=True, origin="test")
 
     posting = Posting(
         company="Example",
