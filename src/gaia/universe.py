@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections import defaultdict
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -78,13 +77,17 @@ def ensure_universe_schema(database: Database) -> None:
 
 def _employer_key(name: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return hashlib.sha256(normalized.encode()).hexdigest()[:24]
 
 
 def _evidence_type(row: Mapping[str, Any]) -> str:
     mode = str(row.get("source_mode") or "")
     if mode == "direct":
-        return "validated-source" if row.get("validated") and row.get("catalog_scope") == "current" else "historical-direct"
+        return (
+            "validated-source"
+            if row.get("validated") and row.get("catalog_scope") == "current"
+            else "historical-direct"
+        )
     return {
         "registry": "current-index",
         "external-index": "market-index",
@@ -98,12 +101,19 @@ def _event_year(row: Mapping[str, Any]) -> int | None:
     value = row.get("year")
     if value is not None:
         return int(value)
-    source = str(row.get("source") or "")
-    match = re.search(r"(?:19|20)\d{2}", source)
+    match = re.search(r"(?:19|20)\d{2}", str(row.get("source") or ""))
     return int(match.group(0)) if match else None
 
 
-def _probabilities(*, direct_sources: int, registry: int, verification: int, historical: int, market: int, technical_roles: int) -> tuple[float, float]:
+def _probabilities(
+    *,
+    direct_sources: int,
+    registry: int,
+    verification: int,
+    historical: int,
+    market: int,
+    technical_roles: int,
+) -> tuple[float, float]:
     if direct_sources:
         internship = 0.999
     else:
@@ -113,18 +123,16 @@ def _probabilities(*, direct_sources: int, registry: int, verification: int, his
         internship += 0.20 * min(3, historical)
         internship += 0.12 * min(2, market)
         internship = min(0.985, internship)
-    technical = 0.08 if technical_roles == 0 else min(0.995, 0.38 + 0.24 * math.log1p(technical_roles))
+    technical = (
+        0.08
+        if technical_roles == 0
+        else min(0.995, 0.38 + 0.24 * math.log1p(technical_roles))
+    )
     return round(internship, 4), round(technical, 4)
 
 
 def rebuild_employer_universe(database: Database) -> dict[str, int]:
-    """Rebuild the employer census from auditable posting evidence.
-
-    The universe is employer based, not URL based. Historical archives, current public
-    indexes, employer pages, and validated boards are evidence on the same employer node.
-    An employer remains in the frontier until GAIA independently enumerates its hiring
-    surface.
-    """
+    """Rebuild the employer census from auditable posting evidence."""
 
     ensure_universe_schema(database)
     now = datetime.now(UTC)
@@ -206,7 +214,10 @@ def rebuild_employer_universe(database: Database) -> dict[str, int]:
             ev["first_seen"] = min(ev["first_seen"], row["first_seen_at"])
             ev["last_seen"] = max(ev["last_seen"], row["last_seen_at"])
 
-        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("gaia:employer-universe",))
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            ("gaia:employer-universe",),
+        )
         connection.execute("DELETE FROM employer_evidence")
         connection.execute("DELETE FROM employer_universe")
 
@@ -246,7 +257,7 @@ def rebuild_employer_universe(database: Database) -> dict[str, int]:
                 not direct_count
                 and item["registry"] == 0
                 and (item["historical"] or item["verification"] or item["market"])
-                and technical >= 0.55
+                and technical >= 0.5
             )
             universe_rows.append(
                 (
@@ -290,7 +301,9 @@ def rebuild_employer_universe(database: Database) -> dict[str, int]:
 
         evidence_rows: list[tuple[Any, ...]] = []
         for (employer_key, kind, source, year), item in evidence.items():
-            digest = hashlib.sha256(f"{employer_key}|{kind}|{source}|{year}".encode("utf-8")).hexdigest()[:28]
+            digest = hashlib.sha256(
+                f"{employer_key}|{kind}|{source}|{year}".encode()
+            ).hexdigest()[:28]
             evidence_rows.append(
                 (
                     digest,
@@ -325,7 +338,9 @@ def rebuild_employer_universe(database: Database) -> dict[str, int]:
 
 def universe_summary(database: Database, *, limit: int = 80) -> dict[str, object]:
     with database.connect() as connection:
-        exists = connection.execute("SELECT to_regclass('employer_universe') AS name").fetchone()["name"]
+        exists = connection.execute(
+            "SELECT to_regclass('employer_universe') AS name"
+        ).fetchone()["name"]
         if not exists:
             return {"ready": False, "summary": {}, "frontier": []}
         counts = connection.execute(
@@ -337,8 +352,11 @@ def universe_summary(database: Database, *, limit: int = 80) -> dict[str, object
                 COUNT(*) FILTER (WHERE blind_spot) AS blind_spots,
                 COUNT(*) FILTER (WHERE historical_internships>0) AS historical_employers,
                 COUNT(*) FILTER (WHERE current_index_mentions>0) AS registry_employers,
-                ROUND(100.0 * COUNT(*) FILTER (WHERE resolution_status='enumerated') / NULLIF(COUNT(*),0), 1)
-                    AS employer_resolution_percent
+                ROUND(
+                    100.0 * COUNT(*) FILTER (WHERE resolution_status='enumerated')
+                    / NULLIF(COUNT(*), 0),
+                    1
+                ) AS employer_resolution_percent
             FROM employer_universe
             """
         ).fetchone()
@@ -369,7 +387,14 @@ def universe_summary(database: Database, *, limit: int = 80) -> dict[str, object
                 (max(1, min(limit, 250)),),
             ).fetchall()
         ]
-    summary = {key: (float(value) if key == "employer_resolution_percent" and value is not None else int(value or 0)) for key, value in counts.items()}
+    summary = {
+        key: (
+            float(value)
+            if key == "employer_resolution_percent" and value is not None
+            else int(value or 0)
+        )
+        for key, value in counts.items()
+    }
     summary["candidate_surfaces"] = int(candidate_count or 0)
     summary["validated_sources"] = int(validated_count or 0)
     return {"ready": True, "summary": summary, "frontier": frontier}
