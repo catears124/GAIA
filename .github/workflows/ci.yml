@@ -26,7 +26,12 @@ jobs:
         run: |
           set -o pipefail
           ruff check . --output-format=concise 2>&1 | tee ruff-report.txt
+      - name: Generate Ruff autofix patch
+        if: failure()
+        shell: bash
+        run: ruff check . --fix --diff > ruff-fix.diff || true
       - name: Compile all Python modules
+        if: success()
         run: python -m compileall -q src tests scripts
       - name: Publish lint report
         if: always()
@@ -45,7 +50,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lint-report
-          path: ruff-report.txt
+          path: |
+            ruff-report.txt
+            ruff-fix.diff
           if-no-files-found: warn
           retention-days: 14
 
