@@ -1,6 +1,11 @@
 name: Production health
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/production-health.yml"
+      - "src/gaia/health.py"
   schedule:
     - cron: "12,27,42,57 * * * *"
   workflow_dispatch:
@@ -10,6 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: write
   contents: read
   statuses: write
 
@@ -72,14 +78,27 @@ jobs:
             echo '{"ok": false, "errors": ["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Dispatch recovery crawl when inventory is stale
+        if: steps.production_check.outcome != 'success'
+        shell: bash
+        run: |
+          active=$(gh run list --workflow inventory.yml --limit 20 --json status \
+            --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
+          if [ "$active" -eq 0 ]; then
+            gh workflow run inventory.yml --ref main -f budget_seconds=900
+            echo "Dispatched a bounded production inventory recovery run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "A production inventory run is already active; no duplicate recovery was queued." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload health report
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: production-health
+          name: production-health-${{ github.run_id }}
           path: production-health.json
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 7
       - name: Publish final commit status
         if: always()
         shell: bash
@@ -88,7 +107,7 @@ jobs:
           description="Production inventory is advancing"
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
             state=failure
-            description="Production inventory health check failed"
+            description="Production inventory stale; recovery requested"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -108,6 +127,6 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
-            echo "Production health checker failed." >&2
+            echo "Production health checker failed; a recovery run was requested when none was active." >&2
             exit 1
           fi
