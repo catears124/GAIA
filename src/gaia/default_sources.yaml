@@ -24,6 +24,17 @@ universe_seeds:
 # the organization's official site, and any hiring surface remains a candidate until GAIA
 # successfully enumerates it. This deliberately reaches companies omitted by prestige lists.
 employer_ecosystems:
+  # Recent federal R&D awardees expose obscure technical small businesses that rarely
+  # appear in prestige-oriented internship repositories. The official SBIR API is
+  # evidence only; company websites and hiring surfaces still require validation.
+  - kind: sbir-awards
+    name: recent-federal-rd-awardees
+    url: https://api.www.sbir.gov/public/api/awards
+    years: [2024, 2025, 2026]
+    rows: 5000
+    max_pages: 2
+    internship_signal: 0.18
+    technical_signal: 0.98
   - kind: yc-directory
     name: yc-hard-tech
     url: https://www.ycombinator.com/companies/industry/hard-tech

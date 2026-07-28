@@ -8,7 +8,7 @@ import os
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -93,6 +93,21 @@ CAREER_MARKERS = (
     "work-with-us",
     "open-positions",
     "open-roles",
+    "openings",
+    "opportunities",
+)
+ATS_HOST_SUFFIXES = (
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "myworkdayjobs.com",
+    "smartrecruiters.com",
+    "recruitee.com",
+    "workable.com",
+    "jobvite.com",
+    "icims.com",
+    "oraclecloud.com",
+    "successfactors.com",
 )
 RESOLVABLE_KINDS = {
     "greenhouse",
@@ -154,6 +169,114 @@ def _yc_observations(body: str, *, url: str, source: str, sectors: list[str]) ->
     return list(output.values())
 
 
+
+def _json_records(payload: object) -> list[dict[str, object]]:
+    if isinstance(payload, list):
+        return [dict(item) for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("results", "result", "data", "awards", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+    for value in payload.values():
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return [dict(item) for item in value]
+    return []
+
+
+def _split_keywords(value: object) -> list[str]:
+    if isinstance(value, list):
+        values = [str(item).strip() for item in value]
+    else:
+        values = re.split(r"[,;|]", str(value or ""))
+    return sorted({item for item in values if item})[:30]
+
+
+def _sbir_observations(records: list[dict[str, object]], *, source_url: str) -> list[dict[str, object]]:
+    companies: dict[str, dict[str, object]] = {}
+    for record in records:
+        raw_name = str(record.get("firm") or record.get("company_name") or "").strip()
+        name = canonical_company(raw_name)
+        if not name:
+            continue
+        official_url = str(record.get("company_url") or "").strip()
+        key = f"{name.casefold()}|{urlsplit(official_url).netloc.casefold()}"
+        item = companies.setdefault(
+            key,
+            {
+                "name": name,
+                "profile_url": official_url or (
+                    "https://www.sbir.gov/awards?" + urlencode({"company_name": name})
+                ),
+                "official_url": official_url,
+                "location": ", ".join(
+                    value
+                    for value in (
+                        str(record.get("city") or "").strip(),
+                        str(record.get("state") or "").strip(),
+                    )
+                    if value
+                ),
+                "sectors": [],
+                "metadata": {
+                    "source_url": source_url,
+                    "award_count": 0,
+                    "agencies": [],
+                    "award_years": [],
+                    "sample_awards": [],
+                },
+            },
+        )
+        sectors = set(item["sectors"])
+        sectors.update(_split_keywords(record.get("research_area_keywords")))
+        item["sectors"] = sorted(sectors)[:30]
+        metadata = dict(item["metadata"])
+        metadata["award_count"] = int(metadata.get("award_count") or 0) + 1
+        metadata["agencies"] = sorted(
+            {*(metadata.get("agencies") or []), str(record.get("agency") or "").strip()} - {""}
+        )
+        year = record.get("award_year") or record.get("solicitation_year")
+        metadata["award_years"] = sorted(
+            {*(metadata.get("award_years") or []), str(year or "").strip()} - {""}
+        )
+        samples = list(metadata.get("sample_awards") or [])
+        title = str(record.get("award_title") or "").strip()
+        if title and title not in samples and len(samples) < 5:
+            samples.append(title)
+        metadata["sample_awards"] = samples
+        if record.get("uei"):
+            metadata["uei"] = str(record["uei"])
+        if record.get("number_employees"):
+            metadata["number_employees"] = record["number_employees"]
+        item["metadata"] = metadata
+    return list(companies.values())
+
+
+async def _sbir_feed(
+    client: httpx.AsyncClient,
+    item: Mapping[str, object],
+) -> list[dict[str, object]]:
+    url = str(item.get("url") or "https://api.www.sbir.gov/public/api/awards")
+    rows = max(1, min(5000, int(item.get("rows") or 5000)))
+    max_pages = max(1, min(10, int(item.get("max_pages") or 2)))
+    years = [int(value) for value in item.get("years") or []]
+    if not years:
+        years = [datetime.now(UTC).year]
+    records: list[dict[str, object]] = []
+    for year in years:
+        for page in range(max_pages):
+            response = await client.get(
+                url,
+                params={"year": year, "rows": rows, "start": page * rows},
+            )
+            response.raise_for_status()
+            page_records = _json_records(response.json())
+            records.extend(page_records)
+            if len(page_records) < rows:
+                break
+    return _sbir_observations(records, source_url=url)
+
 def _upsert_observations(
     database: Database,
     *,
@@ -177,6 +300,7 @@ def _upsert_observations(
                 evidence_type,
                 source,
                 profile_url,
+                str(item.get("official_url") or "") or None,
                 str(item.get("location") or "") or None,
                 sorted({str(value) for value in item.get("sectors") or [] if value}),
                 max(0.0, min(1.0, internship_signal)),
@@ -191,15 +315,19 @@ def _upsert_observations(
             """
             INSERT INTO employer_observations(
                 observation_key, canonical_name, aliases, evidence_type, source,
-                profile_url, location, sectors, internship_signal, technical_signal,
-                metadata
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                profile_url, official_url, location, sectors,
+                internship_signal, technical_signal, metadata
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(observation_key) DO UPDATE SET
                 canonical_name=excluded.canonical_name,
                 aliases=ARRAY(
                     SELECT DISTINCT value
                     FROM unnest(employer_observations.aliases || excluded.aliases) AS value
                     ORDER BY value
+                ),
+                official_url=COALESCE(
+                    excluded.official_url,
+                    employer_observations.official_url
                 ),
                 location=COALESCE(excluded.location, employer_observations.location),
                 sectors=ARRAY(
@@ -295,15 +423,23 @@ def _official_url(profile_body: str, profile_url: str) -> str | None:
     return None
 
 
+def _is_ats_host(host: str) -> bool:
+    normalized = host.casefold().split(":", 1)[0]
+    return any(normalized == suffix or normalized.endswith(f".{suffix}") for suffix in ATS_HOST_SUFFIXES)
+
+
 def _career_links(body: str, base_url: str, *, same_host_only: bool) -> list[str]:
     base_host = urlsplit(base_url).netloc.casefold()
     output: list[str] = []
     for score, url in _external_links(body, base_url):
         parts = urlsplit(url)
+        host = parts.netloc.casefold().split(":", 1)[0]
+        if host in EXCLUDED_PROFILE_HOSTS:
+            continue
         if same_host_only and parts.netloc.casefold() != base_host:
             continue
         text = f"{parts.path} {parts.query}".casefold()
-        if score >= 80 or any(marker in text for marker in CAREER_MARKERS):
+        if _is_ats_host(host) or score >= 80 or any(marker in text for marker in CAREER_MARKERS):
             output.append(url)
     return list(dict.fromkeys(output))
 
@@ -340,7 +476,19 @@ async def _resolve_observation(
 
         official_url, homepage = await _fetch_text(client, official_url)
         candidate_urls = [official_url]
-        candidate_urls.extend(_career_links(homepage, official_url, same_host_only=True)[:6])
+        career_urls = _career_links(homepage, official_url, same_host_only=False)[:12]
+        candidate_urls.extend(career_urls)
+        official_host = urlsplit(official_url).netloc.casefold()
+        for career_url in career_urls[:6]:
+            if urlsplit(career_url).netloc.casefold() != official_host:
+                continue
+            try:
+                final_url, career_body = await _fetch_text(client, career_url)
+            except httpx.HTTPError:
+                continue
+            candidate_urls.extend(
+                _career_links(career_body, final_url, same_host_only=False)[:16]
+            )
 
         if profile_body:
             yc_jobs = [
@@ -447,23 +595,28 @@ async def refresh_employer_ecosystems(
             item = dict(raw)
             kind = str(item.get("kind") or "")
             url = str(item.get("url") or "")
-            if kind != "yc-directory" or not url:
-                continue
-            source = str(item.get("name") or url)
+            source = str(item.get("name") or url or kind)
             try:
-                response = await client.get(url)
-                response.raise_for_status()
-                observations = _yc_observations(
-                    response.text,
-                    url=url,
-                    source=source,
-                    sectors=[str(value) for value in item.get("sectors") or []],
-                )
+                if kind == "yc-directory" and url:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    observations = _yc_observations(
+                        response.text,
+                        url=url,
+                        source=source,
+                        sectors=[str(value) for value in item.get("sectors") or []],
+                    )
+                    evidence_type = "startup-ecosystem"
+                elif kind == "sbir-awards":
+                    observations = await _sbir_feed(client, item)
+                    evidence_type = "federal-rd-award"
+                else:
+                    continue
                 observed += _upsert_observations(
                     database,
-                    source=f"yc:{source}",
-                    evidence_type="startup-ecosystem",
-                    internship_signal=float(item.get("internship_signal") or 0.32),
+                    source=f"{kind}:{source}",
+                    evidence_type=evidence_type,
+                    internship_signal=float(item.get("internship_signal") or 0.25),
                     technical_signal=float(item.get("technical_signal") or 0.86),
                     observations=observations,
                 )

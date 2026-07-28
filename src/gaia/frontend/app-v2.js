@@ -313,6 +313,8 @@ function evidenceLabel(types = []) {
     "employer-page": "employer careers page",
     "employer-page-lead": "employer page lead",
     "historical-direct": "past direct application",
+    "federal-rd-award": "recent federal R&D award",
+    "startup-ecosystem": "technical startup ecosystem",
   };
   return types.map(type => labels[type] || type).join(" · ");
 }

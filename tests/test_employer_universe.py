@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 
 from gaia.db import Database
 from gaia.employer_census import (
+    _career_links,
+    _sbir_observations,
     _upsert_observations,
     _yc_observations,
     ensure_ecosystem_schema,
@@ -206,3 +208,87 @@ def test_production_checker_can_require_employer_universe(tmp_path) -> None:
 
     assert report["ok"] is False
     assert "employer universe contains no employers" in report["errors"]
+
+
+def test_sbir_awards_aggregate_obscure_technical_employers() -> None:
+    rows = _sbir_observations(
+        [
+            {
+                "firm": "Quiet Photonics LLC",
+                "company_url": "https://quietphotonics.example",
+                "city": "Huntsville",
+                "state": "AL",
+                "agency": "NASA",
+                "award_year": 2025,
+                "award_title": "Compact optical navigation",
+                "research_area_keywords": "photonics; navigation; embedded systems",
+                "uei": "EXAMPLE12345",
+            },
+            {
+                "firm": "Quiet Photonics LLC",
+                "company_url": "https://quietphotonics.example",
+                "city": "Huntsville",
+                "state": "AL",
+                "agency": "DOE",
+                "award_year": 2026,
+                "award_title": "Radiation-tolerant sensing",
+                "research_area_keywords": "sensors, photonics",
+            },
+        ],
+        source_url="https://api.www.sbir.gov/public/api/awards",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Quiet Photonics LLC"
+    assert rows[0]["official_url"] == "https://quietphotonics.example"
+    assert rows[0]["metadata"]["award_count"] == 2
+    assert rows[0]["metadata"]["agencies"] == ["DOE", "NASA"]
+    assert rows[0]["sectors"] == [
+        "embedded systems",
+        "navigation",
+        "photonics",
+        "sensors",
+    ]
+
+
+def test_career_links_follow_external_ats_but_not_social_profiles() -> None:
+    body = """
+    <a href="https://jobs.ashbyhq.com/quiet">Open positions</a>
+    <a href="/careers">Careers</a>
+    <a href="https://www.linkedin.com/company/quiet">Jobs on LinkedIn</a>
+    """
+
+    links = _career_links(body, "https://quiet.example", same_host_only=False)
+
+    assert "https://jobs.ashbyhq.com/quiet" in links
+    assert "https://quiet.example/careers" in links
+    assert not any("linkedin.com" in link for link in links)
+
+
+def test_observation_keeps_official_company_url(tmp_path) -> None:
+    database = Database(tmp_path / "official-url.db")
+    ensure_ecosystem_schema(database)
+    _upsert_observations(
+        database,
+        source="sbir:recent",
+        evidence_type="federal-rd-award",
+        internship_signal=0.18,
+        technical_signal=0.98,
+        observations=[
+            {
+                "name": "Quiet Photonics LLC",
+                "profile_url": "https://www.sbir.gov/awards?company_name=Quiet+Photonics+LLC",
+                "official_url": "https://quietphotonics.example",
+                "location": "Huntsville, AL",
+                "sectors": ["photonics"],
+                "metadata": {},
+            }
+        ],
+    )
+
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT official_url FROM employer_observations"
+        ).fetchone()
+
+    assert row["official_url"] == "https://quietphotonics.example"
