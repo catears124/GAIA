@@ -602,7 +602,7 @@ def merge_observations_into_universe(database: Database) -> dict[str, int]:
                 inserted += 1
 
             evidence_key = hashlib.sha256(
-                f"{key}|{evidence_type}|{source}|ecosystem".encode("utf-8")
+                f"{key}|{evidence_type}|{source}|ecosystem".encode()
             ).hexdigest()[:28]
             connection.execute(
                 """
