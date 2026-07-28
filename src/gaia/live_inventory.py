@@ -12,6 +12,8 @@ from .db import Database, _PsycopgConnectionAdapter
 from .inventory import ClaimedTarget, WorkerSummary
 from .inventory_runtime import (
     InventoryWorker as RuntimeInventoryWorker,
+)
+from .inventory_runtime import (
     RuntimeInventoryStore,
 )
 
