@@ -1,0 +1,68 @@
+name: Production reconcile
+
+on:
+  schedule:
+    - cron: "8,18,28,38,48,58 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-production-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Rebuild role and employer read models
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "900"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          test -n "$GAIA_DATABASE_URL" || {
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 1
+          }
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Serialize global reconciliation
+        run: gaia reconcile
+      - name: Verify reconciled production state
+        run: gaia check --output production-health.json
+      - name: Publish read-model status
+        if: always()
+        shell: bash
+        run: |
+          state=success
+          description="Production read models are current"
+          if [ "${{ job.status }}" != "success" ]; then
+            state=failure
+            description="Production read-model reconciliation failed"
+          fi
+          payload=$(jq -n \
+            --arg state "$state" \
+            --arg context "gaia/production-read-model" \
+            --arg description "$description" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state, context:$context, description:$description, target_url:$target_url}')
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
