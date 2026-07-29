@@ -2,65 +2,23 @@ name: Production inventory
 
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "4,19,34,49 * * * *"
   workflow_dispatch:
     inputs:
       budget_seconds:
-        description: "Continuous runtime per provider lane"
+        description: "Maximum runtime per provider lane"
         required: false
-        default: "3300"
+        default: "900"
 
 permissions:
   contents: read
   statuses: write
 
 jobs:
-  maintenance:
-    name: Migrate and maintain source queue
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-    concurrency:
-      group: gaia-production-maintenance
-      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
-      GAIA_READ_ONLY: "0"
-      GAIA_HTTP_TIMEOUT: "45"
-      GAIA_ENABLE_DISCOVERY: "0"
-      GAIA_DEFER_FAMILY_REBUILD: "1"
-      GAIA_WORKER_KINDS: __prepare_only__
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Require Supabase URLs
-        shell: bash
-        run: |
-          test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
-            exit 1
-          }
-          test -n "$GAIA_MIGRATION_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
-            exit 1
-          }
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Apply production schema
-        run: gaia migrate
-      - name: Reconcile validated sources into the crawl queue
-        run: gaia worker --once --budget-seconds 1 --concurrency 1
-
   inventory:
     name: Inventory · ${{ matrix.lane }}
     runs-on: ubuntu-latest
-    timeout-minutes: 58
+    timeout-minutes: 20
     environment: production
     concurrency:
       group: gaia-production-inventory-${{ matrix.lane }}
@@ -111,80 +69,30 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          test -n "$GAIA_DATABASE_URL" || {
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 1
+          }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Keep provider lane warm
+      - name: Drain due employer boards
         shell: bash
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="3300" ;;
+            *) budget="480" ;;
           esac
-          deadline=$((SECONDS + budget))
-          consecutive_failures=0
-
-          while (( SECONDS < deadline )); do
-            remaining=$((deadline - SECONDS))
-            slice=300
-            if (( remaining < slice )); then
-              slice=$remaining
-            fi
-            if (( slice <= 0 )); then
-              break
-            fi
-
-            if gaia worker \
-              --once \
-              --budget-seconds "$slice" \
-              --concurrency "${{ matrix.workers }}"; then
-              consecutive_failures=0
-            else
-              consecutive_failures=$((consecutive_failures + 1))
-              if (( consecutive_failures >= 3 )); then
-                echo "Provider lane failed three consecutive worker slices." >&2
-                exit 1
-              fi
-              sleep 30
-            fi
-
-            if (( SECONDS < deadline )); then
-              sleep 10
-            fi
-          done
-
-  discovery:
-    name: Employer census and source validation
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: production
-    concurrency:
-      group: gaia-production-discovery
-      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
-      GAIA_READ_ONLY: "0"
-      GAIA_HTTP_TIMEOUT: "45"
-      GAIA_ENABLE_DISCOVERY: "1"
-      GAIA_DEFER_FAMILY_REBUILD: "1"
-      GAIA_WORKER_KINDS: __discovery_only__
-      GAIA_CANDIDATE_PROBE_LIMIT: "64"
-      GAIA_EMPLOYER_PROFILE_PROBE_LIMIT: "24"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Refresh evidence and validate candidate sources
-        run: gaia worker --once --budget-seconds 900 --concurrency 12
+          gaia worker \
+            --once \
+            --budget-seconds "$budget" \
+            --concurrency "${{ matrix.workers }}"
 
   status:
     name: Publish inventory pulse status
-    needs: [maintenance, inventory, discovery]
+    needs: inventory
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -196,12 +104,10 @@ jobs:
         shell: bash
         run: |
           state=success
-          description="Continuous inventory lanes completed"
-          if [ "${{ needs.maintenance.result }}" != "success" ] || \
-             [ "${{ needs.inventory.result }}" != "success" ] || \
-             [ "${{ needs.discovery.result }}" != "success" ]; then
+          description="Provider inventory pulse completed"
+          if [ "${{ needs.inventory.result }}" != "success" ]; then
             state=failure
-            description="One or more continuous inventory lanes failed"
+            description="One or more provider inventory lanes failed"
           fi
           payload=$(jq -n \
             --arg state "$state" \
