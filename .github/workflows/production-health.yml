@@ -6,11 +6,12 @@ on:
     paths:
       - ".github/workflows/production-health.yml"
       - ".github/workflows/inventory.yml"
+      - ".github/workflows/maintenance.yml"
       - ".github/workflows/reconcile.yml"
       - "src/gaia/health.py"
       - "src/gaia/cli.py"
   schedule:
-    - cron: "12,27,42,57 * * * *"
+    - cron: "1,16,31,46 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -92,8 +93,8 @@ jobs:
             --jq '[.[] | select(.event == "workflow_dispatch") | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
 
           if [ "$active_recovery" -eq 0 ]; then
-            gh workflow run inventory.yml --ref main -f budget_seconds=3300
-            echo "Dispatched a 55-minute recovery crawl. Manual recovery jobs replace any stale scheduled lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
+            gh workflow run inventory.yml --ref main -f budget_seconds=900
+            echo "Dispatched a 15-minute recovery pulse. Manual recovery jobs replace any stale scheduled provider lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "A manual recovery crawl is already active; it was left running." >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -114,7 +115,7 @@ jobs:
           description="Production inventory is advancing"
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
             state=failure
-            description="Production inventory stale; continuous recovery requested"
+            description="Production inventory stale; recovery pulse requested"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -134,6 +135,6 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
-            echo "Production health checker failed; a continuous recovery run was requested when none was already active." >&2
+            echo "Production health checker failed; a recovery pulse was requested when none was already active." >&2
             exit 1
           fi
