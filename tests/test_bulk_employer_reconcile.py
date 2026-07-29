@@ -10,12 +10,13 @@ from gaia.employer_census import (
     ensure_ecosystem_schema,
     merge_observations_into_universe,
 )
-from gaia.universe import _employer_key
+from gaia.universe import _employer_key, ensure_universe_schema
 
 
 def test_ecosystem_observations_merge_in_bulk(tmp_path) -> None:
     database = Database(tmp_path / "bulk-employer-reconcile.db")
     ensure_ecosystem_schema(database)
+    ensure_universe_schema(database)
     now = datetime.now(UTC)
     with database.connect() as connection:
         connection.executemany(
