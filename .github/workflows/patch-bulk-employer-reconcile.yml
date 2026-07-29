@@ -1,0 +1,30 @@
+name: Apply bulk employer reconcile patch
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.head_ref == 'agent/bulk-employer-reconcile' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/bulk-employer-reconcile
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply bulk reconcile patch
+        run: python .github/patch_bulk_employer_reconcile.py
+      - name: Commit code and tests
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/gaia/employer_census.py .github/workflows/reconcile.yml tests/test_bulk_employer_reconcile.py
+          git commit -m 'Bulk merge employer observations' || exit 0
+          git push origin HEAD:agent/bulk-employer-reconcile
