@@ -1,6 +1,14 @@
 name: Production reconcile
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/reconcile.yml"
+      - "src/gaia/db.py"
+      - "src/gaia/db_write.py"
+      - "src/gaia/universe.py"
+      - "src/gaia/employer_census.py"
   schedule:
     - cron: "13,28,43,58 * * * *"
   workflow_dispatch:
