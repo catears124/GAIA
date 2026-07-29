@@ -135,9 +135,17 @@ def test_health_watchdog_can_dispatch_recovery() -> None:
     inventory_workflow = (
         root / ".github" / "workflows" / "inventory.yml"
     ).read_text(encoding="utf-8")
+    maintenance_workflow = (
+        root / ".github" / "workflows" / "maintenance.yml"
+    ).read_text(encoding="utf-8")
+    reconcile_workflow = (
+        root / ".github" / "workflows" / "reconcile.yml"
+    ).read_text(encoding="utf-8")
 
     assert "actions: write" in health_workflow
     assert "gh workflow run inventory.yml" in health_workflow
     assert '"src/gaia/health.py"' in health_workflow
     assert "continue-on-error: true" in health_workflow
-    assert "continue-on-error: true" in inventory_workflow
+    assert "group: gaia-production-inventory-${{ matrix.lane }}" in inventory_workflow
+    assert "Migrate and maintain source queue" in maintenance_workflow
+    assert "run: gaia reconcile" in reconcile_workflow
