@@ -6,12 +6,16 @@ from pathlib import Path
 from psycopg.types.json import Jsonb
 
 from gaia.db import Database
-from gaia.employer_census import merge_observations_into_universe
+from gaia.employer_census import (
+    ensure_ecosystem_schema,
+    merge_observations_into_universe,
+)
 from gaia.universe import _employer_key
 
 
 def test_ecosystem_observations_merge_in_bulk(tmp_path) -> None:
     database = Database(tmp_path / "bulk-employer-reconcile.db")
+    ensure_ecosystem_schema(database)
     now = datetime.now(UTC)
     with database.connect() as connection:
         connection.executemany(
