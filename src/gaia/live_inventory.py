@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 
 import httpx
 
 from .collectors import CollectorResult
-from .db import Database, _PsycopgConnectionAdapter
+from .db import Database
 from .employer_census import refresh_employer_ecosystems
 from .inventory import ClaimedTarget, WorkerSummary
 from .inventory import InventoryWorker as BaseInventoryWorker
@@ -25,15 +23,12 @@ LOGGER = logging.getLogger("gaia.inventory.live")
 
 
 class LiveDatabase(Database):
-    """Worker database connection that pipelines independent PostgreSQL writes."""
+    """Worker database using ordinary transaction-scoped PostgreSQL connections.
 
-    @contextmanager
-    def connect(self) -> Iterator[_PsycopgConnectionAdapter]:
-        # apply_result historically issues one upsert per listing. Pipeline mode keeps
-        # its transaction semantics while collapsing thousands of network round trips.
-        with Database.connect(self) as adapter:
-            with adapter._connection.pipeline():
-                yield adapter
+    A transaction-wide psycopg pipeline let one delayed statement poison every
+    queued write in a source crawl. Psycopg's normal executemany path can still
+    batch writes without making unrelated queries share one failure boundary.
+    """
 
 
 class LiveInventoryStore(RuntimeInventoryStore):

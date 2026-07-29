@@ -28,6 +28,7 @@ jobs:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "240"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
@@ -87,28 +88,29 @@ jobs:
         include:
           - lane: fast-a
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 24
+            workers: 8
           - lane: fast-b
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 24
+            workers: 8
           - lane: fast-c
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 24
+            workers: 8
           - lane: enterprise-a
             kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 8
+            workers: 4
           - lane: enterprise-b
             kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 8
+            workers: 4
           - lane: workday
             kinds: workday-search
             workers: 2
           - lane: fallback
             kinds: domain,verification
-            workers: 8
+            workers: 4
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "240"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
@@ -132,7 +134,7 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="360" ;;
+            *) budget="600" ;;
           esac
           gaia worker \
             --once \
@@ -141,14 +143,15 @@ jobs:
 
   discovery:
     name: Employer census and source validation
-    needs: inventory
-    if: ${{ always() && needs.inventory.result == 'success' }}
+    needs: [prepare, inventory]
+    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "240"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "1"
@@ -175,8 +178,8 @@ jobs:
 
   reconcile:
     name: Rebuild role and employer read models
-    needs: [inventory, discovery]
-    if: ${{ always() && needs.inventory.result == 'success' && needs.discovery.result == 'success' }}
+    needs: [prepare, inventory, discovery]
+    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -279,7 +282,7 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.inventory.result }}" != "success" ]; then
-            echo "One or more inventory lanes failed." >&2
+            echo "One or more inventory lanes failed; successful partial results were still reconciled." >&2
             exit 1
           fi
           if [ "${{ needs.discovery.result }}" != "success" ]; then
