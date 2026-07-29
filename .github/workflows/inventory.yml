@@ -104,10 +104,18 @@ jobs:
         run: |
           state=success
           description="Provider inventory pulse completed"
-          if [ "${{ needs.inventory.result }}" != "success" ]; then
-            state=failure
-            description="One or more provider inventory lanes failed"
-          fi
+          case "${{ needs.inventory.result }}" in
+            success)
+              ;;
+            cancelled)
+              state=pending
+              description="Provider pulse superseded by recovery"
+              ;;
+            *)
+              state=failure
+              description="One or more provider inventory lanes failed"
+              ;;
+          esac
           payload=$(jq -n \
             --arg state "$state" \
             --arg context "gaia/production-inventory" \
