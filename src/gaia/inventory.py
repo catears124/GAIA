@@ -509,18 +509,38 @@ class InventoryWorker:
             self.store.release_target(target, f"unsupported source kind: {target.kind}")
             self.summary.failed += 1
             return
-        known, active = self.store.known_keys(target.source)
+        try:
+            known, active = self.store.known_keys(target.source)
+        except Exception as exc:
+            LOGGER.exception("source preparation failed for %s", target.source)
+            try:
+                self.store.release_target(target, repr(exc))
+            except Exception:
+                LOGGER.exception("could not release failed source %s", target.source)
+            self.summary.failed += 1
+            return
         try:
             result = self._normalize_result(collector, await collector.collect(client))
         except Exception as exc:
             result = self._failure_result(collector, exc)
-        new, removed = self.store.finish_target(
-            target,
-            result,
-            started_at=started_at,
-            known_keys=known,
-            active_keys=active,
-        )
+        try:
+            new, removed = self.store.finish_target(
+                target,
+                result,
+                started_at=started_at,
+                known_keys=known,
+                active_keys=active,
+            )
+        except Exception as exc:
+            # A slow or contended board write is a source failure, not a lane failure.
+            # Keep the other concurrently claimed sources moving and release this lease.
+            LOGGER.exception("source persistence failed for %s", target.source)
+            try:
+                self.store.release_target(target, repr(exc))
+            except Exception:
+                LOGGER.exception("could not release failed source %s", target.source)
+            self.summary.failed += 1
+            return
         self.summary.sources += 1
         self.summary.postings += len(result.postings)
         self.summary.new += new
