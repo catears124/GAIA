@@ -497,26 +497,46 @@ async def refresh_employer_ecosystems(
 
 
 def merge_observations_into_universe(database: Database) -> dict[str, int]:
-    """Merge ecosystem-only employers into the evidence-backed employer census."""
+    """Bulk-merge ecosystem employers into the evidence-backed employer census."""
 
     ensure_ecosystem_schema(database)
     now = datetime.now(UTC)
     with database.connect() as connection:
         rows = connection.execute(
             """
-            SELECT * FROM employer_observations
-            ORDER BY lower(canonical_name), source
+            SELECT
+                observation_key,
+                canonical_name,
+                aliases,
+                evidence_type,
+                source,
+                profile_url,
+                official_url,
+                internship_signal,
+                technical_signal,
+                first_seen_at,
+                last_seen_at,
+                metadata
+            FROM employer_observations
+            ORDER BY lower(canonical_name), source, observation_key
             """
         ).fetchall()
-        merged = 0
-        inserted = 0
+        if not rows:
+            return {"observations": 0, "merged": 0, "inserted": 0}
+
+        existing_keys = {
+            str(row["employer_key"])
+            for row in connection.execute(
+                "SELECT employer_key FROM employer_universe"
+            ).fetchall()
+        }
+        employers: dict[str, dict[str, object]] = {}
+        evidence: dict[str, dict[str, object]] = {}
+
         for row in rows:
-            name = canonical_company(str(row["canonical_name"]))
+            raw_name = str(row["canonical_name"]).strip()
+            name = canonical_company(raw_name) or raw_name
             key = _employer_key(name)
-            existing = connection.execute(
-                "SELECT * FROM employer_universe WHERE employer_key=%s",
-                (key,),
-            ).fetchone()
             recency_days = max(
                 0.0,
                 (now - row["last_seen_at"]).total_seconds() / 86400,
@@ -524,113 +544,202 @@ def merge_observations_into_universe(database: Database) -> dict[str, int]:
             recency = math.exp(-recency_days / 730)
             internship = float(row["internship_signal"] or 0)
             technical = float(row["technical_signal"] or 0)
-            score = round(100 * (0.42 * internship + 0.40 * technical + 0.18 * recency), 3)
-            evidence_type = str(row["evidence_type"])
-            source = str(row["source"])
-            if existing:
-                if str(existing["resolution_status"]) != "enumerated":
-                    resolution = "located" if row["official_url"] else str(existing["resolution_status"])
-                    connection.execute(
-                        """
-                        UPDATE employer_universe
-                        SET aliases=ARRAY(
-                                SELECT DISTINCT value
-                                FROM unnest(aliases || %s::text[]) AS value
-                                ORDER BY value
-                            ),
-                            resolution_status=%s,
-                            evidence_count=evidence_count + 1,
-                            evidence_types=ARRAY(
-                                SELECT DISTINCT value
-                                FROM unnest(evidence_types || ARRAY[%s]) AS value
-                                ORDER BY value
-                            ),
-                            evidence_sources=ARRAY(
-                                SELECT DISTINCT value
-                                FROM unnest(evidence_sources || ARRAY[%s]) AS value
-                                ORDER BY value
-                            ),
-                            internship_probability=GREATEST(internship_probability, %s),
-                            technical_probability=GREATEST(technical_probability, %s),
-                            frontier_score=GREATEST(frontier_score, %s),
-                            blind_spot=(current_index_mentions=0 AND %s >= 0.5),
-                            first_seen_at=LEAST(first_seen_at, %s),
-                            last_seen_at=GREATEST(last_seen_at, %s),
-                            updated_at=now()
-                        WHERE employer_key=%s
-                        """,
-                        (
-                            list(row["aliases"] or [name]),
-                            resolution,
-                            evidence_type,
-                            source,
-                            internship,
-                            technical,
-                            score,
-                            technical,
-                            row["first_seen_at"],
-                            row["last_seen_at"],
-                            key,
-                        ),
-                    )
-                merged += 1
-            else:
-                connection.execute(
-                    """
-                    INSERT INTO employer_universe(
-                        employer_key, canonical_name, aliases, resolution_status,
-                        evidence_count, evidence_types, evidence_sources,
-                        historical_years, historical_internships,
-                        current_index_mentions, direct_sources, direct_openings,
-                        technical_roles, internship_probability,
-                        technical_probability, frontier_score, blind_spot,
-                        first_seen_at, last_seen_at, updated_at
-                    ) VALUES (
-                        %s,%s,%s,%s,1,ARRAY[%s],ARRAY[%s],ARRAY[]::SMALLINT[],
-                        0,0,0,0,0,%s,%s,%s,%s,%s,%s,now()
-                    )
-                    """,
-                    (
-                        key,
-                        name,
-                        list(row["aliases"] or [name]),
-                        "located" if row["official_url"] else "candidate",
-                        evidence_type,
-                        source,
-                        internship,
-                        technical,
-                        score,
-                        technical >= 0.5,
-                        row["first_seen_at"],
-                        row["last_seen_at"],
-                    ),
-                )
-                inserted += 1
-
-            evidence_key = hashlib.sha256(
-                f"{key}|{evidence_type}|{source}|ecosystem".encode()
-            ).hexdigest()[:28]
-            connection.execute(
-                """
-                INSERT INTO employer_evidence(
-                    evidence_key, employer_key, evidence_type, source, event_year,
-                    role_count, active_roles, first_seen_at, last_seen_at,
-                    sample_url, metadata
-                ) VALUES (%s,%s,%s,%s,NULL,0,0,%s,%s,%s,%s)
-                ON CONFLICT(evidence_key) DO UPDATE SET
-                    last_seen_at=excluded.last_seen_at,
-                    sample_url=excluded.sample_url,
-                    metadata=excluded.metadata
-                """,
-                (
-                    evidence_key,
-                    key,
-                    evidence_type,
-                    source,
-                    row["first_seen_at"],
-                    row["last_seen_at"],
-                    row["official_url"] or row["profile_url"],
-                    Jsonb(dict(row["metadata"] or {})),
-                ),
+            score = round(
+                100 * (0.42 * internship + 0.40 * technical + 0.18 * recency),
+                3,
             )
-    return {"observations": len(rows), "merged": merged, "inserted": inserted}
+
+            item = employers.setdefault(
+                key,
+                {
+                    "name": name,
+                    "aliases": set(),
+                    "evidence_types": set(),
+                    "sources": set(),
+                    "count": 0,
+                    "located": False,
+                    "internship": 0.0,
+                    "technical": 0.0,
+                    "score": 0.0,
+                    "first_seen": row["first_seen_at"],
+                    "last_seen": row["last_seen_at"],
+                },
+            )
+            aliases = item["aliases"]
+            evidence_types = item["evidence_types"]
+            sources = item["sources"]
+            assert isinstance(aliases, set)
+            assert isinstance(evidence_types, set)
+            assert isinstance(sources, set)
+            aliases.update(str(alias) for alias in (row["aliases"] or [name]) if alias)
+            evidence_types.add(str(row["evidence_type"]))
+            sources.add(str(row["source"]))
+            item["count"] = int(item["count"]) + 1
+            item["located"] = bool(item["located"] or row["official_url"])
+            item["internship"] = max(float(item["internship"]), internship)
+            item["technical"] = max(float(item["technical"]), technical)
+            item["score"] = max(float(item["score"]), score)
+            item["first_seen"] = min(item["first_seen"], row["first_seen_at"])
+            item["last_seen"] = max(item["last_seen"], row["last_seen_at"])
+
+            evidence_type = str(row["evidence_type"])
+            source_name = str(row["source"])
+            evidence_key = hashlib.sha256(
+                f"{key}|{evidence_type}|{source_name}|ecosystem".encode()
+            ).hexdigest()[:28]
+            evidence_item = evidence.setdefault(
+                evidence_key,
+                {
+                    "employer_key": key,
+                    "evidence_type": evidence_type,
+                    "source": source_name,
+                    "first_seen": row["first_seen_at"],
+                    "last_seen": row["last_seen_at"],
+                    "sample_url": row["official_url"] or row["profile_url"],
+                    "metadata": {},
+                },
+            )
+            evidence_item["first_seen"] = min(
+                evidence_item["first_seen"], row["first_seen_at"]
+            )
+            if row["last_seen_at"] >= evidence_item["last_seen"]:
+                evidence_item["last_seen"] = row["last_seen_at"]
+                evidence_item["sample_url"] = row["official_url"] or row["profile_url"]
+            metadata = evidence_item["metadata"]
+            assert isinstance(metadata, dict)
+            metadata.update(dict(row["metadata"] or {}))
+
+        universe_rows = []
+        for key, item in employers.items():
+            aliases = item["aliases"]
+            evidence_types = item["evidence_types"]
+            sources = item["sources"]
+            assert isinstance(aliases, set)
+            assert isinstance(evidence_types, set)
+            assert isinstance(sources, set)
+            technical = float(item["technical"])
+            universe_rows.append(
+                (
+                    key,
+                    item["name"],
+                    sorted(aliases),
+                    "located" if item["located"] else "candidate",
+                    int(item["count"]),
+                    sorted(evidence_types),
+                    sorted(sources),
+                    float(item["internship"]),
+                    technical,
+                    float(item["score"]),
+                    technical >= 0.5,
+                    item["first_seen"],
+                    item["last_seen"],
+                    now,
+                )
+            )
+
+        connection.executemany(
+            """
+            INSERT INTO employer_universe(
+                employer_key, canonical_name, aliases, resolution_status,
+                evidence_count, evidence_types, evidence_sources,
+                historical_years, historical_internships,
+                current_index_mentions, direct_sources, direct_openings,
+                technical_roles, internship_probability,
+                technical_probability, frontier_score, blind_spot,
+                first_seen_at, last_seen_at, updated_at
+            ) VALUES (
+                %s,%s,%s,%s,%s,%s,%s,ARRAY[]::SMALLINT[],0,0,0,0,0,
+                %s,%s,%s,%s,%s,%s,%s
+            )
+            ON CONFLICT(employer_key) DO UPDATE SET
+                aliases=ARRAY(
+                    SELECT DISTINCT value
+                    FROM unnest(employer_universe.aliases || excluded.aliases) AS value
+                    ORDER BY value
+                ),
+                resolution_status=CASE
+                    WHEN excluded.resolution_status='located' THEN 'located'
+                    ELSE employer_universe.resolution_status
+                END,
+                evidence_count=employer_universe.evidence_count + excluded.evidence_count,
+                evidence_types=ARRAY(
+                    SELECT DISTINCT value
+                    FROM unnest(
+                        employer_universe.evidence_types || excluded.evidence_types
+                    ) AS value
+                    ORDER BY value
+                ),
+                evidence_sources=ARRAY(
+                    SELECT DISTINCT value
+                    FROM unnest(
+                        employer_universe.evidence_sources || excluded.evidence_sources
+                    ) AS value
+                    ORDER BY value
+                ),
+                internship_probability=GREATEST(
+                    employer_universe.internship_probability,
+                    excluded.internship_probability
+                ),
+                technical_probability=GREATEST(
+                    employer_universe.technical_probability,
+                    excluded.technical_probability
+                ),
+                frontier_score=GREATEST(
+                    employer_universe.frontier_score,
+                    excluded.frontier_score
+                ),
+                blind_spot=(
+                    employer_universe.current_index_mentions=0
+                    AND GREATEST(
+                        employer_universe.technical_probability,
+                        excluded.technical_probability
+                    ) >= 0.5
+                ),
+                first_seen_at=LEAST(
+                    employer_universe.first_seen_at,
+                    excluded.first_seen_at
+                ),
+                last_seen_at=GREATEST(
+                    employer_universe.last_seen_at,
+                    excluded.last_seen_at
+                ),
+                updated_at=now()
+            WHERE employer_universe.resolution_status!='enumerated'
+            """,
+            universe_rows,
+        )
+
+        evidence_rows = [
+            (
+                evidence_key,
+                item["employer_key"],
+                item["evidence_type"],
+                item["source"],
+                item["first_seen"],
+                item["last_seen"],
+                item["sample_url"],
+                Jsonb(item["metadata"]),
+            )
+            for evidence_key, item in evidence.items()
+        ]
+        connection.executemany(
+            """
+            INSERT INTO employer_evidence(
+                evidence_key, employer_key, evidence_type, source, event_year,
+                role_count, active_roles, first_seen_at, last_seen_at,
+                sample_url, metadata
+            ) VALUES (%s,%s,%s,%s,NULL,0,0,%s,%s,%s,%s)
+            ON CONFLICT(evidence_key) DO UPDATE SET
+                last_seen_at=excluded.last_seen_at,
+                sample_url=excluded.sample_url,
+                metadata=excluded.metadata
+            """,
+            evidence_rows,
+        )
+
+    inserted = sum(key not in existing_keys for key in employers)
+    return {
+        "observations": len(rows),
+        "merged": len(rows) - inserted,
+        "inserted": inserted,
+    }
