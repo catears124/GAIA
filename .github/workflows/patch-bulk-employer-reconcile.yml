@@ -19,12 +19,22 @@ jobs:
         with:
           python-version: '3.13'
       - name: Apply bulk reconcile patch
-        run: python .github/patch_bulk_employer_reconcile.py
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/patch_bulk_employer_reconcile.py')
+          text = path.read_text(encoding='utf-8')
+          start = text.index('workflow_path = Path(".github/workflows/reconcile.yml")')
+          end = text.index('test_path = Path("tests/test_bulk_employer_reconcile.py")')
+          exec(compile(text[:start] + text[end:], str(path), 'exec'))
+          PY
       - name: Commit code and tests
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/gaia/employer_census.py .github/workflows/reconcile.yml tests/test_bulk_employer_reconcile.py
+          git add src/gaia/employer_census.py tests/test_bulk_employer_reconcile.py
           git commit -m 'Bulk merge employer observations' || exit 0
           git push origin HEAD:agent/bulk-employer-reconcile
