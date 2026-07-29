@@ -1,6 +1,14 @@
 name: Production inventory
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/inventory.yml"
+      - "src/gaia/inventory.py"
+      - "src/gaia/inventory_runtime.py"
+      - "src/gaia/live_inventory.py"
+      - "src/gaia/db_write.py"
   schedule:
     - cron: "4,19,34,49 * * * *"
   workflow_dispatch:
