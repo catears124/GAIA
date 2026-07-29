@@ -42,27 +42,38 @@ class LiveInventoryStore(RuntimeInventoryStore):
         )
 
     def claim_target(self, *, lease_seconds: int) -> ClaimedTarget | None:
-        # Every GitHub Actions job can run many async workers, while several jobs run
-        # simultaneously. PostgreSQL leases and SKIP LOCKED distribute sources safely.
+        # Resolve the small validated catalog set before taking any row locks. A joined
+        # SELECT ... FOR UPDATE caused PostgreSQL to choose a pathological plan under
+        # several concurrent worker lanes, timing out before any source could be leased.
+        # The second statement now operates only on crawl_targets' primary key and its
+        # partial due index, while SKIP LOCKED still distributes work safely.
         kinds = self.allowed_kinds or None
         with self.database.connect() as connection:
+            eligible_rows = connection.execute(
+                """
+                SELECT source
+                FROM source_catalog
+                WHERE validated
+                  AND (%s::text[] IS NULL OR kind = ANY(%s::text[]))
+                """,
+                (kinds, kinds),
+            ).fetchall()
+            eligible_sources = [str(item["source"]) for item in eligible_rows]
+            if not eligible_sources:
+                return None
+
             row = connection.execute(
                 """
-                WITH candidate AS (
-                    SELECT target.source
-                    FROM crawl_targets AS target
-                    JOIN source_catalog AS catalog USING(source)
-                    WHERE target.scheduled
-                      AND catalog.validated
-                      AND target.next_run_at<=now()
-                      AND (%s::text[] IS NULL OR catalog.kind = ANY(%s::text[]))
-                      AND (target.lease_expires_at IS NULL OR target.lease_expires_at<now())
-                    ORDER BY
-                        CASE WHEN target.enabled THEN 0 ELSE 1 END,
-                        target.priority,
-                        target.next_run_at,
-                        target.source
-                    FOR UPDATE OF target SKIP LOCKED
+                WITH candidate AS MATERIALIZED (
+                    SELECT source
+                    FROM crawl_targets
+                    WHERE scheduled
+                      AND enabled
+                      AND source = ANY(%s::text[])
+                      AND next_run_at <= now()
+                      AND (lease_expires_at IS NULL OR lease_expires_at < now())
+                    ORDER BY priority, next_run_at, source
+                    FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
                 UPDATE crawl_targets AS target
@@ -70,21 +81,33 @@ class LiveInventoryStore(RuntimeInventoryStore):
                     lease_expires_at=now() + (%s * interval '1 second'),
                     last_started_at=now(),
                     updated_at=now()
-                FROM candidate, source_catalog AS catalog
+                FROM candidate
                 WHERE target.source=candidate.source
-                  AND catalog.source=target.source
-                RETURNING target.source, catalog.kind, catalog.scope, catalog.spec,
-                          target.interval_seconds, target.consecutive_failures
+                RETURNING target.source, target.interval_seconds,
+                          target.consecutive_failures
                 """,
-                (kinds, kinds, self.worker_id, lease_seconds),
+                (eligible_sources, self.worker_id, lease_seconds),
             ).fetchone()
-        if row is None:
+
+            if row is None:
+                return None
+
+            catalog = connection.execute(
+                """
+                SELECT kind, scope, spec
+                FROM source_catalog
+                WHERE source=%s
+                """,
+                (row["source"],),
+            ).fetchone()
+
+        if catalog is None:
             return None
         return ClaimedTarget(
             source=str(row["source"]),
-            kind=str(row["kind"]),
-            scope=str(row["scope"]),
-            spec=dict(row["spec"] or {}),
+            kind=str(catalog["kind"]),
+            scope=str(catalog["scope"]),
+            spec=dict(catalog["spec"] or {}),
             interval_seconds=int(row["interval_seconds"]),
             consecutive_failures=int(row["consecutive_failures"] or 0),
         )
