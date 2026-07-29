@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from gaia.db import Database
 from gaia.inventory import ClaimedTarget, InventoryWorker, WorkerSummary
 from gaia.live_inventory import LiveDatabase
-from gaia.db import Database
 from gaia.models import CollectorResult
 
 
@@ -50,8 +50,12 @@ async def test_source_write_timeout_does_not_kill_worker_lane(monkeypatch) -> No
     worker.summary = WorkerSummary()
     worker.store = _FailingStore()
     collector = _Collector()
-    monkeypatch.setattr(worker, "_build_collector", lambda target: collector)
-    monkeypatch.setattr(worker, "_normalize_result", lambda collector, result: result)
+    monkeypatch.setattr(worker, "_build_collector", lambda _target: collector)
+    monkeypatch.setattr(
+        worker,
+        "_normalize_result",
+        lambda _collector, result: result,
+    )
     target = ClaimedTarget(
         source="greenhouse:test",
         kind="greenhouse",
@@ -73,8 +77,8 @@ def test_live_database_does_not_wrap_transactions_in_pipeline() -> None:
 
 
 def test_partial_inventory_still_reconciles_read_models() -> None:
-    workflow = open(".github/workflows/inventory.yml", encoding="utf-8").read()
+    workflow = Path(".github/workflows/inventory.yml").read_text(encoding="utf-8")
     assert "workers: 24" not in workflow
-    assert "GAIA_DB_TIMEOUT: "240"" in workflow
+    assert 'GAIA_DB_TIMEOUT: "240"' in workflow
     assert "needs: [prepare, inventory, discovery]" in workflow
     assert "if: ${{ always() && needs.prepare.result == 'success' }}" in workflow
