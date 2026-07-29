@@ -1,6 +1,14 @@
 name: Production maintenance
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/maintenance.yml"
+      - "src/gaia/source_catalog.py"
+      - "src/gaia/discovery.py"
+      - "src/gaia/provider_discovery.py"
+      - "src/gaia/employer_census.py"
   schedule:
     - cron: "11 * * * *"
   workflow_dispatch:
