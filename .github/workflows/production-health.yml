@@ -5,10 +5,13 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/production-health.yml"
+      - ".github/workflows/inventory.yml"
+      - ".github/workflows/maintenance.yml"
+      - ".github/workflows/reconcile.yml"
       - "src/gaia/health.py"
       - "src/gaia/cli.py"
   schedule:
-    - cron: "12,27,42,57 * * * *"
+    - cron: "1,16,31,46 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -57,10 +60,10 @@ jobs:
       - name: Require Supabase connection
         shell: bash
         run: |
-          if [ -z "$GAIA_DATABASE_URL" ]; then
+          test -n "$GAIA_DATABASE_URL" || {
             echo "Missing GitHub Actions secret POSTGRES_URL." >&2
             exit 1
-          fi
+          }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - id: production_check
@@ -79,17 +82,21 @@ jobs:
             echo '{"ok": false, "errors": ["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - name: Dispatch recovery crawl when inventory is stale
+      - name: Replace scheduled lanes with a recovery crawl when stale
         if: steps.production_check.outcome != 'success'
         shell: bash
         run: |
-          active=$(gh run list --workflow inventory.yml --limit 20 --json status \
-            --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
-          if [ "$active" -eq 0 ]; then
+          active_recovery=$(gh run list \
+            --workflow inventory.yml \
+            --limit 30 \
+            --json event,status \
+            --jq '[.[] | select(.event == "workflow_dispatch") | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
+
+          if [ "$active_recovery" -eq 0 ]; then
             gh workflow run inventory.yml --ref main -f budget_seconds=900
-            echo "Dispatched a bounded production inventory recovery run." >> "$GITHUB_STEP_SUMMARY"
+            echo "Dispatched a 15-minute recovery pulse. Manual recovery jobs replace any stale scheduled provider lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "A production inventory run is already active; no duplicate recovery was queued." >> "$GITHUB_STEP_SUMMARY"
+            echo "A manual recovery crawl is already active; it was left running." >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload health report
         if: always()
@@ -108,7 +115,7 @@ jobs:
           description="Production inventory is advancing"
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
             state=failure
-            description="Production inventory stale; recovery requested"
+            description="Production inventory stale; recovery pulse requested"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -128,6 +135,6 @@ jobs:
         shell: bash
         run: |
           if [ "${{ steps.production_check.outcome }}" != "success" ]; then
-            echo "Production health checker failed; a recovery run was requested when none was active." >&2
+            echo "Production health checker failed; a recovery pulse was requested when none was already active." >&2
             exit 1
           fi

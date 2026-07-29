@@ -2,111 +2,44 @@ name: Production inventory
 
 on:
   schedule:
-    - cron: "2,17,32,47 * * * *"
+    - cron: "4,19,34,49 * * * *"
   workflow_dispatch:
     inputs:
       budget_seconds:
-        description: "Maximum runtime per crawler lane"
+        description: "Maximum runtime per provider lane"
         required: false
-        default: "3000"
-
-concurrency:
-  group: gaia-production-inventory
-  cancel-in-progress: false
+        default: "900"
 
 permissions:
   contents: read
   statuses: write
 
 jobs:
-  prepare:
-    name: Migrate and prepare distributed queue
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
-      GAIA_READ_ONLY: "0"
-      GAIA_HTTP_TIMEOUT: "45"
-      GAIA_ENABLE_DISCOVERY: "0"
-      GAIA_DEFER_FAMILY_REBUILD: "1"
-      GAIA_WORKER_KINDS: __prepare_only__
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Publish pending commit status
-        shell: bash
-        run: |
-          payload=$(jq -n \
-            --arg state "pending" \
-            --arg context "gaia/production-inventory" \
-            --arg description "Production inventory is running" \
-            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{state:$state, context:$context, description:$description, target_url:$target_url}')
-          curl --fail --silent --show-error \
-            -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$payload"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Require Supabase URLs
-        shell: bash
-        run: |
-          if [ -z "$GAIA_DATABASE_URL" ]; then
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
-            exit 1
-          fi
-          if [ -z "$GAIA_MIGRATION_DATABASE_URL" ]; then
-            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
-            exit 1
-          fi
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Apply production schema
-        run: gaia migrate
-      - name: Reconcile validated sources into the crawl queue
-        run: gaia worker --once --budget-seconds 1 --concurrency 1
-
   inventory:
     name: Inventory · ${{ matrix.lane }}
-    needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 58
+    timeout-minutes: 20
     environment: production
+    concurrency:
+      group: gaia-production-inventory-${{ matrix.lane }}
+      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
         include:
           - lane: fast-a
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 8
+            workers: 12
           - lane: fast-b
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
+            workers: 12
+          - lane: enterprise-fallback
+            kinds: jobvite,icims,oracle-cloud,successfactors,domain,verification
             workers: 8
-          - lane: fast-c
-            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 8
-          - lane: enterprise-a
-            kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 4
-          - lane: enterprise-b
-            kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 4
           - lane: workday
             kinds: workday-search
             workers: 2
-          - lane: fallback
-            kinds: domain,verification
-            workers: 4
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
@@ -127,6 +60,13 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          test -n "$GAIA_DATABASE_URL" || {
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 1
+          }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - name: Drain due employer boards
@@ -134,131 +74,31 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="600" ;;
+            *) budget="480" ;;
           esac
           gaia worker \
             --once \
             --budget-seconds "$budget" \
             --concurrency "${{ matrix.workers }}"
 
-  discovery:
-    name: Employer census and source validation
-    needs: [prepare, inventory]
-    if: ${{ always() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
-      GAIA_READ_ONLY: "0"
-      GAIA_HTTP_TIMEOUT: "45"
-      GAIA_ENABLE_DISCOVERY: "1"
-      GAIA_DEFER_FAMILY_REBUILD: "1"
-      GAIA_WORKER_KINDS: __discovery_only__
-      GAIA_CANDIDATE_PROBE_LIMIT: "64"
-      GAIA_EMPLOYER_PROFILE_PROBE_LIMIT: "24"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Refresh evidence and validate candidate sources
-        shell: bash
-        run: |
-          case "${{ github.event_name }}" in
-            workflow_dispatch) budget="600" ;;
-            *) budget="180" ;;
-          esac
-          gaia worker --once --budget-seconds "$budget" --concurrency 16
-
-  reconcile:
-    name: Rebuild role and employer read models
-    needs: [prepare, inventory, discovery]
-    if: ${{ always() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "900"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Serialize global reconciliation
-        run: gaia reconcile
-
-  health:
-    name: Verify production inventory
-    needs: [prepare, inventory, discovery, reconcile]
+  status:
+    name: Publish inventory pulse status
+    needs: inventory
     if: always()
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: production
+    permissions:
+      statuses: write
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_CHECK_MAX_ACTIVITY_MINUTES: "90"
-      GAIA_CHECK_MIN_SOURCES: "100"
-      GAIA_CHECK_MIN_ACTIVE_LISTINGS: "25"
-      GAIA_CHECK_REQUIRE_UNIVERSE: "1"
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - id: production_check
-        name: Check Supabase inventory and employer census
-        continue-on-error: true
-        run: gaia check --output production-health.json
-      - name: Publish health report
-        if: always()
-        shell: bash
-        run: |
-          echo "### Production inventory health" >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          if [ -f production-health.json ]; then
-            cat production-health.json >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo '{"ok": false, "errors": ["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload health report
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-health-${{ github.run_id }}
-          path: production-health.json
-          if-no-files-found: warn
-          retention-days: 7
       - name: Publish final commit status
-        if: always()
         shell: bash
         run: |
           state=success
-          description="Inventory and employer census healthy"
-          if [ "${{ needs.prepare.result }}" != "success" ] || \
-             [ "${{ needs.inventory.result }}" != "success" ] || \
-             [ "${{ needs.discovery.result }}" != "success" ] || \
-             [ "${{ needs.reconcile.result }}" != "success" ] || \
-             [ "${{ steps.production_check.outcome }}" != "success" ]; then
+          description="Provider inventory pulse completed"
+          if [ "${{ needs.inventory.result }}" != "success" ]; then
             state=failure
-            description="Inventory, discovery, reconciliation, or health failed"
+            description="One or more provider inventory lanes failed"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -273,27 +113,3 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -d "$payload"
-      - name: Require healthy production
-        if: always()
-        shell: bash
-        run: |
-          if [ "${{ needs.prepare.result }}" != "success" ]; then
-            echo "Queue preparation or migration failed." >&2
-            exit 1
-          fi
-          if [ "${{ needs.inventory.result }}" != "success" ]; then
-            echo "One or more inventory lanes failed; successful partial results were still reconciled." >&2
-            exit 1
-          fi
-          if [ "${{ needs.discovery.result }}" != "success" ]; then
-            echo "Employer census discovery failed." >&2
-            exit 1
-          fi
-          if [ "${{ needs.reconcile.result }}" != "success" ]; then
-            echo "Global reconciliation failed." >&2
-            exit 1
-          fi
-          if [ "${{ steps.production_check.outcome }}" != "success" ]; then
-            echo "Production health checker failed." >&2
-            exit 1
-          fi
