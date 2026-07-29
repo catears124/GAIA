@@ -71,6 +71,15 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
     @staticmethod
     def _query(query: str) -> str:
         translated = ConnectionAdapter._query(query)
+        # Families are a public read model, so only publishable target classes
+        # belong in a rebuild. The old negative predicate also scanned active
+        # wrong-year, wrong-season, and unknown inventory, which could make the
+        # Supabase projection exceed its statement timeout.
+        translated = translated.replace(
+            "WHERE active AND target_match!='not_internship'",
+            "WHERE active AND target_match IN "
+            "('exact','year_confirmed','source_confirmed')",
+        )
         # Psycopg treats every percent sign in a parameterized query as part of
         # its placeholder grammar. Preserve supported placeholders and already
         # escaped percents, while escaping SQL literals such as ILIKE '%remote%'.
