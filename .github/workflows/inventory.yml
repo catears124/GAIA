@@ -25,30 +25,21 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
         include:
           - lane: fast-a
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 8
+            workers: 12
           - lane: fast-b
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
+            workers: 12
+          - lane: enterprise-fallback
+            kinds: jobvite,icims,oracle-cloud,successfactors,domain,verification
             workers: 8
-          - lane: fast-c
-            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 8
-          - lane: enterprise-a
-            kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 4
-          - lane: enterprise-b
-            kinds: jobvite,icims,oracle-cloud,successfactors
-            workers: 4
           - lane: workday
             kinds: workday-search
             workers: 2
-          - lane: fallback
-            kinds: domain,verification
-            workers: 4
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
