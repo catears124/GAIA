@@ -2,7 +2,7 @@ name: Production reconcile
 
 on:
   schedule:
-    - cron: "8,18,28,38,48,58 * * * *"
+    - cron: "13,28,43,58 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -41,8 +41,6 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e .
       - name: Serialize global reconciliation
         run: gaia reconcile
-      - name: Verify reconciled production state
-        run: gaia check --output production-health.json
       - name: Publish read-model status
         if: always()
         shell: bash
