@@ -102,6 +102,7 @@ def test_read_models_reconcile_independently_every_fifteen_minutes() -> None:
     workflow = Path(".github/workflows/reconcile.yml").read_text(encoding="utf-8")
     assert 'cron: "13,28,43,58 * * * *"' in workflow
     assert "group: gaia-production-reconcile" in workflow
+    assert "cancel-in-progress: true" in workflow
     assert "run: gaia reconcile" in workflow
     assert "gaia check" not in workflow
 
