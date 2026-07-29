@@ -76,28 +76,37 @@ def test_live_database_does_not_wrap_transactions_in_pipeline() -> None:
     assert LiveDatabase.connect is Database.connect
 
 
-def test_inventory_lanes_stay_warm_without_global_serialization() -> None:
+def test_inventory_lanes_pulse_independently_every_fifteen_minutes() -> None:
     workflow = Path(".github/workflows/inventory.yml").read_text(encoding="utf-8")
-    assert 'cron: "7 * * * *"' in workflow
-    assert 'default: "3300"' in workflow
+    assert 'cron: "4,19,34,49 * * * *"' in workflow
+    assert 'default: "900"' in workflow
     assert "group: gaia-production-inventory-${{ matrix.lane }}" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}" in workflow
-    assert '*) budget="3300" ;;' in workflow
-    assert "while (( SECONDS < deadline ))" in workflow
-    assert "Provider lane failed three consecutive worker slices." in workflow
+    assert '*) budget="480" ;;' in workflow
     assert "needs: prepare" not in workflow
+    assert "Migrate and maintain source queue" not in workflow
+    assert "Employer census and source validation" not in workflow
 
 
-def test_read_models_reconcile_independently_every_ten_minutes() -> None:
+def test_source_maintenance_is_hourly_and_separate() -> None:
+    workflow = Path(".github/workflows/maintenance.yml").read_text(encoding="utf-8")
+    assert 'cron: "11 * * * *"' in workflow
+    assert "group: gaia-production-maintenance" in workflow
+    assert "run: gaia migrate" in workflow
+    assert "GAIA_WORKER_KINDS: __discovery_only__" in workflow
+
+
+def test_read_models_reconcile_independently_every_fifteen_minutes() -> None:
     workflow = Path(".github/workflows/reconcile.yml").read_text(encoding="utf-8")
-    assert 'cron: "8,18,28,38,48,58 * * * *"' in workflow
+    assert 'cron: "13,28,43,58 * * * *"' in workflow
     assert "group: gaia-production-reconcile" in workflow
     assert "run: gaia reconcile" in workflow
-    assert "run: gaia check --output production-health.json" in workflow
+    assert "gaia check" not in workflow
 
 
 def test_health_recovery_replaces_only_scheduled_lanes() -> None:
     workflow = Path(".github/workflows/production-health.yml").read_text(encoding="utf-8")
+    assert 'cron: "1,16,31,46 * * * *"' in workflow
     assert '.event == "workflow_dispatch"' in workflow
-    assert "gh workflow run inventory.yml --ref main -f budget_seconds=3300" in workflow
+    assert "gh workflow run inventory.yml --ref main -f budget_seconds=900" in workflow
     assert "A manual recovery crawl is already active" in workflow
