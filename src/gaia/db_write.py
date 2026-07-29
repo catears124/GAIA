@@ -330,7 +330,29 @@ class WriteMixin:
     def rebuild_families(self) -> None:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM postings WHERE active AND target_match!='not_internship'"
+                """
+                SELECT
+                    posting_key,
+                    family_key,
+                    company,
+                    title,
+                    locations,
+                    apply_url,
+                    canonical_apply_url,
+                    source,
+                    source_id,
+                    source_mode,
+                    posted_at,
+                    posted_precision,
+                    first_seen_at,
+                    last_seen_at,
+                    category,
+                    season,
+                    year,
+                    target_match
+                FROM postings
+                WHERE active AND target_match!='not_internship'
+                """
             ).fetchall()
             blocked_keys = [
                 str(row["posting_key"])
