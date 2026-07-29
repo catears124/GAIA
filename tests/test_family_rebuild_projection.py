@@ -5,7 +5,6 @@ from pathlib import Path
 
 from gaia.db import Database
 
-
 REQUIRED_COLUMNS = {
     "posting_key",
     "family_key",
