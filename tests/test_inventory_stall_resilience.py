@@ -86,6 +86,8 @@ def test_inventory_lanes_pulse_independently_every_fifteen_minutes() -> None:
     assert "needs: prepare" not in workflow
     assert "Migrate and maintain source queue" not in workflow
     assert "Employer census and source validation" not in workflow
+    assert "state=pending" in workflow
+    assert "Provider pulse superseded by recovery" in workflow
 
 
 def test_source_maintenance_is_hourly_and_separate() -> None:
@@ -104,9 +106,13 @@ def test_read_models_reconcile_independently_every_fifteen_minutes() -> None:
     assert "gaia check" not in workflow
 
 
-def test_health_recovery_replaces_only_scheduled_lanes() -> None:
+def test_health_recovery_is_contention_safe() -> None:
     workflow = Path(".github/workflows/production-health.yml").read_text(encoding="utf-8")
-    assert 'cron: "1,16,31,46 * * * *"' in workflow
+    assert 'cron: "2,17,32,47 * * * *"' in workflow
+    assert 'GAIA_DB_TIMEOUT: "240"' in workflow
+    assert '".github/workflows/inventory.yml"' not in workflow
+    assert '".github/workflows/maintenance.yml"' not in workflow
+    assert '".github/workflows/reconcile.yml"' not in workflow
     assert '.event == "workflow_dispatch"' in workflow
     assert "gh workflow run inventory.yml --ref main -f budget_seconds=900" in workflow
     assert "A manual recovery crawl is already active" in workflow
