@@ -78,10 +78,11 @@ def test_live_database_does_not_wrap_transactions_in_pipeline() -> None:
 
 def test_inventory_lanes_stay_warm_without_global_serialization() -> None:
     workflow = Path(".github/workflows/inventory.yml").read_text(encoding="utf-8")
-    assert 'cron: "5,35 * * * *"' in workflow
+    assert 'cron: "7 * * * *"' in workflow
+    assert 'default: "3300"' in workflow
     assert "group: gaia-production-inventory-${{ matrix.lane }}" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}" in workflow
-    assert '*) budget="3000" ;;' in workflow
+    assert '*) budget="3300" ;;' in workflow
     assert "while (( SECONDS < deadline ))" in workflow
     assert "Provider lane failed three consecutive worker slices." in workflow
     assert "needs: prepare" not in workflow
@@ -98,5 +99,5 @@ def test_read_models_reconcile_independently_every_ten_minutes() -> None:
 def test_health_recovery_replaces_only_scheduled_lanes() -> None:
     workflow = Path(".github/workflows/production-health.yml").read_text(encoding="utf-8")
     assert '.event == "workflow_dispatch"' in workflow
-    assert "gh workflow run inventory.yml --ref main -f budget_seconds=3000" in workflow
+    assert "gh workflow run inventory.yml --ref main -f budget_seconds=3300" in workflow
     assert "A manual recovery crawl is already active" in workflow
