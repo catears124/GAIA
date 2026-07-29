@@ -12,6 +12,7 @@ BAD_STATUSES = ("broken", "blocked", "truncated", "partial")
 
 FRESHNESS_FLOOR_SECONDS = 90 * 60
 FRESHNESS_INTERVAL_MULTIPLIER = 3
+ACTIVE_CATCHUP_GRACE_MINUTES = 30
 
 
 def inventory_state(database: Database) -> dict[str, Any]:
@@ -149,6 +150,12 @@ def production_report(
     activity_age_minutes = (
         max(0.0, (now - latest).total_seconds() / 60.0) if latest is not None else None
     )
+    active_catchup = bool(
+        int(state["running"])
+        and activity_age_minutes is not None
+        and activity_age_minutes <= min(max_activity_minutes, ACTIVE_CATCHUP_GRACE_MINUTES)
+    )
+    state["active_catchup"] = active_catchup
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -169,7 +176,13 @@ def production_report(
             f"maximum is {max_activity_minutes}"
         )
     if int(state["fresh"]) == 0:
-        errors.append("no validated current source is fresh")
+        if active_catchup:
+            warnings.append(
+                f"inventory has no fresh completed sources yet, but {state['running']} "
+                "workers are actively catching up"
+            )
+        else:
+            errors.append("no validated current source is fresh")
     if require_healthy and not bool(state["healthy"]):
         errors.append(f"{state['unhealthy']} sources are not current")
     elif not bool(state["healthy"]):
