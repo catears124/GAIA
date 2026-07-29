@@ -92,8 +92,8 @@ jobs:
             --jq '[.[] | select(.event == "workflow_dispatch") | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
 
           if [ "$active_recovery" -eq 0 ]; then
-            gh workflow run inventory.yml --ref main -f budget_seconds=3000
-            echo "Dispatched a 50-minute recovery crawl. Manual recovery jobs replace any stale scheduled lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
+            gh workflow run inventory.yml --ref main -f budget_seconds=3300
+            echo "Dispatched a 55-minute recovery crawl. Manual recovery jobs replace any stale scheduled lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "A manual recovery crawl is already active; it was left running." >> "$GITHUB_STEP_SUMMARY"
           fi
