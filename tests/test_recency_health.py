@@ -4,7 +4,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from gaia.db import Database
-from gaia.health import FRESHNESS_FLOOR_SECONDS, inventory_state
+from gaia.health import (
+    ACTIVE_CATCHUP_GRACE_MINUTES,
+    FRESHNESS_FLOOR_SECONDS,
+    inventory_state,
+    production_report,
+)
 from gaia.product_api import _live_order_clause
 
 
@@ -113,6 +118,64 @@ def test_inventory_still_rejects_genuinely_stale_sources(tmp_path) -> None:
 
     assert state["fresh"] == 0
     assert state["overdue"] == 1
+
+
+def test_active_workers_are_catchup_not_a_stall(tmp_path) -> None:
+    database = Database(tmp_path / "active-catchup.db")
+    now = datetime.now(UTC)
+    add_target(
+        database,
+        "greenhouse:catching-up",
+        complete_at=now - timedelta(hours=2),
+    )
+    add_family(database, "catchup-family", posted_at=now, found_at=now)
+    with database.connect() as connection:
+        connection.execute(
+            """
+            UPDATE crawl_targets
+            SET lease_owner='worker',
+                lease_expires_at=now() + interval '10 minutes',
+                last_started_at=now(),
+                last_finished_at=now()
+            WHERE source='greenhouse:catching-up'
+            """
+        )
+
+    report = production_report(
+        database,
+        max_activity_minutes=90,
+        min_sources=1,
+        min_active_listings=1,
+    )
+
+    assert ACTIVE_CATCHUP_GRACE_MINUTES == 30
+    assert report["ok"] is True
+    assert report["inventory"]["fresh"] == 0
+    assert report["inventory"]["running"] == 1
+    assert report["inventory"]["active_catchup"] is True
+    assert any("actively catching up" in warning for warning in report["warnings"])
+
+
+def test_zero_fresh_without_active_workers_is_a_stall(tmp_path) -> None:
+    database = Database(tmp_path / "inactive-stall.db")
+    now = datetime.now(UTC)
+    add_target(
+        database,
+        "greenhouse:stalled",
+        complete_at=now - timedelta(hours=2),
+    )
+    add_family(database, "stalled-family", posted_at=now, found_at=now)
+
+    report = production_report(
+        database,
+        max_activity_minutes=180,
+        min_sources=1,
+        min_active_listings=1,
+    )
+
+    assert report["ok"] is False
+    assert report["inventory"]["active_catchup"] is False
+    assert "no validated current source is fresh" in report["errors"]
 
 
 def test_product_copy_and_recency_display_are_shipped() -> None:
