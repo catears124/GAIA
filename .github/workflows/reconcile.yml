@@ -53,12 +53,20 @@ jobs:
         if: always()
         shell: bash
         run: |
-          state=success
-          description="Production read models are current"
-          if [ "${{ job.status }}" != "success" ]; then
-            state=failure
-            description="Production read-model reconciliation failed"
-          fi
+          case "${{ job.status }}" in
+            success)
+              state=success
+              description="Production read models are current"
+              ;;
+            cancelled)
+              state=pending
+              description="Reconciliation superseded by a newer pulse"
+              ;;
+            *)
+              state=failure
+              description="Production read-model reconciliation failed"
+              ;;
+          esac
           payload=$(jq -n \
             --arg state "$state" \
             --arg context "gaia/production-read-model" \
