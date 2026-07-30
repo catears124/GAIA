@@ -1,0 +1,141 @@
+name: Source-by-source inventory audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/source-audit.yml"
+      - "src/gaia/source_audit.py"
+      - "src/gaia/live_inventory.py"
+      - "src/gaia/inventory.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-source-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit unhealthy sources · shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment: production
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "240"
+      GAIA_HTTP_TIMEOUT: "50"
+      GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_SKIP_CATALOG_SYNC: "1"
+      GAIA_DEFER_FAMILY_REBUILD: "1"
+      GAIA_CRAWL_LEASE_SECONDS: "600"
+      GAIA_WORKDAY_FULL_INVENTORY: "1"
+      GAIA_WORKDAY_MAX_PER_TERM: "20000"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
+      GAIA_WORKDAY_MIN_INTERVAL: "0.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Require production database
+        shell: bash
+        run: test -n "$GAIA_DATABASE_URL"
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Probe every unhealthy source assigned to this shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m gaia.source_audit \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 12 \
+            --concurrency 3 \
+            --budget-seconds 2700 \
+            --per-source-timeout 180 \
+            --output "source-audit-${{ matrix.shard }}.json"
+      - name: Publish shard summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Source audit shard ${{ matrix.shard }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "source-audit-${{ matrix.shard }}.json" ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = next(Path('.').glob('source-audit-*.json'))
+          report = json.loads(path.read_text())
+          for key in ('initial_unhealthy','audited','probed','leased_elsewhere','timeouts','exceptions','remaining_unhealthy','not_reached'):
+              print(f"- **{key}:** {report.get(key)}")
+          PY
+          else
+            echo "- Audit produced no report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload complete source-by-source report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-audit-${{ matrix.shard }}
+          path: source-audit-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: Verify unhealthy count after individual probes
+    needs: audit
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "240"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -e .
+      - name: Check final production health
+        id: health
+        continue-on-error: true
+        run: gaia check --output final-source-audit-health.json
+      - name: Publish final audit status
+        shell: bash
+        run: |
+          set -euo pipefail
+          unhealthy=$(python -c 'import json; print(json.load(open("final-source-audit-health.json"))["inventory"]["unhealthy"])')
+          fresh=$(python -c 'import json; r=json.load(open("final-source-audit-health.json")); print(f"{r[\"inventory\"][\"fresh\"]}/{r[\"inventory\"][\"total\"]}")')
+          state=success
+          description="Individual source audit completed: ${unhealthy} unhealthy"
+          if [ "${{ needs.audit.result }}" != success ]; then
+            state=failure
+            description="One or more source audit shards failed"
+          fi
+          payload=$(jq -n --arg state "$state" --arg context gaia/source-audit --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
+          echo "### Final source audit health" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Fresh: ${fresh}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Unhealthy: ${unhealthy}" >> "$GITHUB_STEP_SUMMARY"
+          cat final-source-audit-health.json >> "$GITHUB_STEP_SUMMARY"
+          test "${{ needs.audit.result }}" = success
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-source-audit-health
+          path: final-source-audit-health.json
+          if-no-files-found: error
+          retention-days: 14
