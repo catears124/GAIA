@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require direct Supabase connection
+      - name: Require Supabase session connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
@@ -68,13 +68,13 @@ jobs:
         include:
           - lane: fast-a
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 6
+            workers: 2
           - lane: fast-b
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 6
+            workers: 2
           - lane: enterprise-fallback
             kinds: jobvite,icims,oracle-cloud,successfactors,domain,verification
-            workers: 4
+            workers: 1
           - lane: workday
             kinds: workday-search
             workers: 1
@@ -98,7 +98,7 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require direct Supabase connection
+      - name: Require Supabase session connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
