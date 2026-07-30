@@ -7,6 +7,7 @@ on:
       - ".github/workflows/production-health.yml"
       - ".github/workflows/inventory.yml"
       - "src/gaia/health.py"
+      - "src/gaia/provider_health.py"
       - "src/gaia/cli.py"
       - "src/gaia/inventory.py"
       - "src/gaia/inventory_runtime.py"
@@ -58,6 +59,11 @@ jobs:
         name: Check hosted inventory
         continue-on-error: true
         run: gaia check --output production-health.json
+      - name: Check provider backlog
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: python -m gaia.provider_health > provider-health.json
       - name: Publish health report
         if: always()
         shell: bash
@@ -65,6 +71,10 @@ jobs:
           echo "### GAIA production health" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           test -f production-health.json && cat production-health.json >> "$GITHUB_STEP_SUMMARY" || echo '{"ok":false,"errors":["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### Provider backlog" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          test -f provider-health.json && cat provider-health.json >> "$GITHUB_STEP_SUMMARY" || echo '[]' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - id: recovery_gate
         name: Classify inventory state
@@ -152,7 +162,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: production-health-${{ github.run_id }}
-          path: production-health.json
+          path: |
+            production-health.json
+            provider-health.json
           if-no-files-found: warn
           retention-days: 7
       - name: Publish final commit status
