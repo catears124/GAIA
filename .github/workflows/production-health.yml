@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GAIA_CHECK_MAX_ACTIVITY_MINUTES: "90"
@@ -55,11 +55,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connection
+      - name: Require direct Supabase connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
             exit 1
           }
       - name: Install GAIA
@@ -92,7 +92,7 @@ jobs:
 
           if [ "$active_recovery" -eq 0 ]; then
             gh workflow run inventory.yml --ref main -f budget_seconds=900
-            echo "Dispatched a 15-minute recovery pulse. Manual recovery jobs replace any stale scheduled provider lane through job-level concurrency." >> "$GITHUB_STEP_SUMMARY"
+            echo "Dispatched a 15-minute recovery pulse." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "A manual recovery crawl is already active; it was left running." >> "$GITHUB_STEP_SUMMARY"
           fi
