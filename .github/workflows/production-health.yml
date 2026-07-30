@@ -80,8 +80,43 @@ jobs:
             echo '{"ok": false, "errors": ["checker produced no report"]}' >> "$GITHUB_STEP_SUMMARY"
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - name: Replace scheduled lanes with a recovery crawl when stale
-        if: steps.production_check.outcome != 'success'
+      - id: recovery_gate
+        name: Detect degraded idle inventory
+        if: always()
+        shell: bash
+        run: |
+          needed=true
+          reason="health checker produced no report"
+          if [ -f production-health.json ]; then
+            needed=$(jq -r '
+              (.ok != true) or
+              (
+                (.inventory.unhealthy // 0) > 0 and
+                (.inventory.running // 0) == 0 and
+                (
+                  (.inventory.fresh_percent // 0) < 75 or
+                  (.snapshots.recent_30m // 0) == 0
+                )
+              )
+            ' production-health.json)
+            reason=$(jq -r '
+              "fresh=\(.inventory.fresh // 0)/\(.inventory.total // 0) " +
+              "(\(.inventory.fresh_percent // 0)%), " +
+              "unhealthy=\(.inventory.unhealthy // 0), " +
+              "running=\(.inventory.running // 0), " +
+              "snapshots_30m=\(.snapshots.recent_30m // 0), " +
+              "activity_age=\(.activity_age_minutes // \"unknown\")m"
+            ' production-health.json)
+          fi
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          if [ "$needed" = "true" ]; then
+            echo "Recovery required: $reason" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Inventory is advancing without recovery: $reason" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Replace scheduled lanes with a recovery crawl when stale or degraded
+        if: steps.recovery_gate.outputs.needed == 'true'
         shell: bash
         run: |
           active_recovery=$(gh run list \
@@ -111,9 +146,9 @@ jobs:
         run: |
           state=success
           description="Production inventory is advancing"
-          if [ "${{ steps.production_check.outcome }}" != "success" ]; then
+          if [ "${{ steps.recovery_gate.outputs.needed }}" = "true" ]; then
             state=failure
-            description="Production inventory stale; recovery pulse requested"
+            description="Inventory degraded or stale; recovery pulse requested"
           fi
           payload=$(jq -n \
             --arg state "$state" \
@@ -128,11 +163,11 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -d "$payload"
-      - name: Require healthy production
+      - name: Require advancing production
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.production_check.outcome }}" != "success" ]; then
-            echo "Production health checker failed; a recovery pulse was requested when none was already active." >&2
+          if [ "${{ steps.recovery_gate.outputs.needed }}" = "true" ]; then
+            echo "Production inventory is degraded or stale; a recovery pulse was requested when none was already active." >&2
             exit 1
           fi
