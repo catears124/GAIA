@@ -11,7 +11,7 @@ on:
       - "src/gaia/live_inventory.py"
       - "src/gaia/db_write.py"
   schedule:
-    - cron: "4,19,34,49 * * * *"
+    - cron: "4,14,24,34,44,54 * * * *"
   workflow_dispatch:
     inputs:
       budget_seconds:
@@ -23,14 +23,17 @@ permissions:
   contents: read
   statuses: write
 
-# Never cancel a running inventory pulse. Source leases make overlapping workers safe,
-# while cancellation can strand a slow provider lane without advancing its watermark.
+# Source leases provide the concurrency boundary. Never cancel a pulse: cancellation
+# strands slow provider work and leaves the corresponding freshness watermark behind.
 concurrency:
   group: gaia-production-inventory
   cancel-in-progress: false
 
 jobs:
+  # Index maintenance is deployment/incident work, not a prerequisite for every pulse.
+  # Running it in front of scheduled crawls previously consumed part of every cadence.
   repair:
+    if: github.event_name != 'schedule'
     name: Repair production query indexes
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -71,27 +74,32 @@ jobs:
 
   inventory:
     name: Inventory · ${{ matrix.lane }}
-    needs: repair
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 18
     environment: production
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 6
       matrix:
         include:
-          - lane: fast-a
-            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 2
-          - lane: fast-b
-            kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 2
-          - lane: enterprise-fallback
-            kinds: jobvite,icims,oracle-cloud,successfactors,domain,verification
-            workers: 1
+          - lane: greenhouse-lever
+            kinds: greenhouse,lever
+            workers: 4
+          - lane: ashby
+            kinds: ashby
+            workers: 3
+          - lane: modern-ats
+            kinds: smartrecruiters,recruitee,workable
+            workers: 3
           - lane: workday
             kinds: workday-search
-            workers: 1
+            workers: 4
+          - lane: enterprise
+            kinds: jobvite,icims,oracle-cloud,successfactors
+            workers: 2
+          - lane: fallback-google
+            kinds: domain,verification,google-careers
+            workers: 2
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
@@ -127,7 +135,7 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="600" ;;
+            *) budget="480" ;;
           esac
 
           for attempt in 1 2 3; do
@@ -159,7 +167,7 @@ jobs:
         shell: bash
         run: |
           state=success
-          description="Provider inventory pulse completed"
+          description="All provider inventory lanes completed"
           case "${{ needs.inventory.result }}" in
             success)
               ;;
