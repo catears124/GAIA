@@ -51,11 +51,7 @@ async def test_source_write_timeout_does_not_kill_worker_lane(monkeypatch) -> No
     worker.store = _FailingStore()
     collector = _Collector()
     monkeypatch.setattr(worker, "_build_collector", lambda _target: collector)
-    monkeypatch.setattr(
-        worker,
-        "_normalize_result",
-        lambda _collector, result: result,
-    )
+    monkeypatch.setattr(worker, "_normalize_result", lambda _collector, result: result)
     target = ClaimedTarget(
         source="greenhouse:test",
         kind="greenhouse",
@@ -76,18 +72,36 @@ def test_live_database_does_not_wrap_transactions_in_pipeline() -> None:
     assert LiveDatabase.connect is Database.connect
 
 
-def test_inventory_lanes_pulse_independently_every_fifteen_minutes() -> None:
+def test_inventory_is_provisioned_for_continuous_coverage() -> None:
     workflow = Path(".github/workflows/inventory.yml").read_text(encoding="utf-8")
-    assert 'cron: "4,19,34,49 * * * *"' in workflow
+    assert 'cron: "4,14,24,34,44,54 * * * *"' in workflow
     assert 'default: "900"' in workflow
-    assert "group: gaia-production-inventory-${{ matrix.lane }}" in workflow
-    assert "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}" in workflow
+    assert "group: gaia-production-inventory" in workflow
+    assert "cancel-in-progress: false" in workflow
     assert '*) budget="480" ;;' in workflow
-    assert "needs: prepare" not in workflow
-    assert "Migrate and maintain source queue" not in workflow
-    assert "Employer census and source validation" not in workflow
-    assert "state=pending" in workflow
-    assert "Provider pulse superseded by recovery" in workflow
+    assert "needs: repair" not in workflow
+    assert "if: github.event_name != 'schedule'" in workflow
+    assert "max-parallel: 6" in workflow
+    assert "lane: greenhouse-lever" in workflow
+    assert "lane: ashby" in workflow
+    assert "lane: modern-ats" in workflow
+    assert "lane: workday" in workflow
+    assert "lane: enterprise" in workflow
+    assert "lane: fallback-google" in workflow
+    assert "kinds: workday-search" in workflow
+    assert "workers: 4" in workflow
+    assert "for attempt in 1 2 3" in workflow
+
+
+def test_inventory_capacity_is_not_accidentally_reduced() -> None:
+    workflow = Path(".github/workflows/inventory.yml").read_text(encoding="utf-8")
+    worker_values = [
+        int(line.split(":", 1)[1].strip())
+        for line in workflow.splitlines()
+        if line.strip().startswith("workers:")
+    ]
+    assert sum(worker_values) >= 18
+    assert max(worker_values) >= 4
 
 
 def test_source_maintenance_is_hourly_and_separate() -> None:
@@ -111,9 +125,6 @@ def test_health_recovery_is_contention_safe() -> None:
     workflow = Path(".github/workflows/production-health.yml").read_text(encoding="utf-8")
     assert 'cron: "2,17,32,47 * * * *"' in workflow
     assert 'GAIA_DB_TIMEOUT: "240"' in workflow
-    assert '".github/workflows/inventory.yml"' not in workflow
-    assert '".github/workflows/maintenance.yml"' not in workflow
-    assert '".github/workflows/reconcile.yml"' not in workflow
-    assert '.event == "workflow_dispatch"' in workflow
+    assert "Ensure inventory pulse is active" in workflow
     assert "gh workflow run inventory.yml --ref main -f budget_seconds=900" in workflow
-    assert "A manual recovery crawl is already active" in workflow
+    assert "Fail only when recovery failed" in workflow
