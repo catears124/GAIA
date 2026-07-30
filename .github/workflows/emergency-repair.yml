@@ -35,7 +35,7 @@ jobs:
           payload=$(jq -n \
             --arg state "pending" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Launching direct-database inventory recovery" \
+            --arg description "Launching bounded six-worker recovery" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
@@ -49,14 +49,14 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require direct Supabase connection
+      - name: Require Supabase session connection
         shell: bash
         run: test -n "$GAIA_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - name: Verify production query indexes
         run: python -m gaia.repair_indexes
-      - name: Dispatch clean inventory recovery
+      - name: Dispatch bounded inventory recovery
         run: gh workflow run inventory.yml --ref main -f budget_seconds=900
       - name: Publish successful repair status
         if: success()
@@ -65,7 +65,7 @@ jobs:
           payload=$(jq -n \
             --arg state "success" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Direct-database inventory recovery dispatched" \
+            --arg description "Bounded inventory recovery dispatched" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
