@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 from fastapi import HTTPException, Query
 from fastapi.routing import APIRoute
@@ -12,24 +13,51 @@ from .universe import universe_summary
 app = legacy.app
 
 
+# Employer dates with day-level precision do not have a trustworthy time-of-day.
+# Treat them as midnight rather than letting an invented hidden hour control feed order.
+_POSTED_ACTIVITY_SQL = (
+    "CASE "
+    "WHEN latest_posted_at IS NULL THEN '-infinity'::timestamptz "
+    "WHEN posted_precision='timestamp' THEN latest_posted_at "
+    "ELSE date_trunc('day', latest_posted_at) END"
+)
+_FOUND_ACTIVITY_SQL = "date_trunc('hour', first_detected_at)"
+
+
 def _live_order_clause(sort: str) -> str:
     if sort == "company":
         return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
-    # Recovery crawls can discover hundreds of roles seconds apart. The UI rounds those
-    # timestamps to the same visible hour, so ordering by hidden seconds makes the feed
-    # look random. Bucket GAIA discovery activity by hour, then use the employer's
-    # publication timestamp to order roles inside that visible activity bucket.
+
+    # Rank by the same precision the user can actually see. Recovery discoveries are
+    # shown by hour, and day-only employer dates cannot legitimately win on a hidden
+    # time-of-day. Exact timestamps still retain their full employer-provided precision.
     return (
-        "CASE "
-        "WHEN first_detected_at >= COALESCE(latest_posted_at, '-infinity'::timestamptz) "
-        "THEN date_trunc('hour', first_detected_at) "
-        "ELSE latest_posted_at END DESC, "
-        "latest_posted_at DESC NULLS LAST, "
+        f"GREATEST({_FOUND_ACTIVITY_SQL}, {_POSTED_ACTIVITY_SQL}) DESC, "
+        f"{_FOUND_ACTIVITY_SQL} DESC, "
+        f"{_POSTED_ACTIVITY_SQL} DESC, "
         "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
-        "first_detected_at DESC, last_verified_at DESC, family_key"
+        "first_detected_at DESC, latest_posted_at DESC NULLS LAST, "
+        "last_verified_at DESC, family_key"
     )
+
+
+def _normalize_visible_posted_time(item: dict[str, object]) -> None:
+    """Remove invented time-of-day from imprecise employer dates in API responses."""
+    value = item.get("latest_posted_at")
+    if not value or item.get("posted_precision") == "timestamp":
+        return
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    item["latest_posted_at"] = parsed.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    ).isoformat()
 
 
 def _remove_get_routes(*paths: str) -> None:
@@ -107,7 +135,7 @@ def live_families(
         raise HTTPException(status_code=400, detail="trust must be verified, leads, or all")
     if sort not in {"newest", "verified", "company"}:
         raise HTTPException(status_code=400, detail="sort must be newest, verified, or company")
-    return legacy._list_families(
+    payload = legacy._list_families(
         query=q.strip(),
         category=category.strip(),
         target=target.strip(),
@@ -121,6 +149,10 @@ def live_families(
         remote=remote,
         posted_within=posted_within,
     )
+    for raw_item in payload.get("items", []):
+        if isinstance(raw_item, dict):
+            _normalize_visible_posted_time(raw_item)
+    return payload
 
 
 @app.get("/api/facets")
