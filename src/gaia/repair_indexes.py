@@ -167,7 +167,6 @@ def repair_indexes() -> None:
                 _build_index(connection, name, statement)
                 if _index_state(connection, name) != (True, True):
                     raise RuntimeError(f"index build did not become ready and valid: {name}")
-            connection.execute("ANALYZE postings")
         finally:
             connection.execute("SELECT pg_advisory_unlock(hashtext(%s))", (LOCK_NAME,))
 
