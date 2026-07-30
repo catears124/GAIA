@@ -12,12 +12,12 @@ LOCK_NAME = "gaia-postings-index-repair-v1"
 LOCK_WAIT_SECONDS = 15 * 60
 INDEXES = {
     "idx_postings_source_inventory": """
-        CREATE INDEX CONCURRENTLY idx_postings_source_inventory
+        CREATE INDEX idx_postings_source_inventory
         ON postings (source, target_match)
         INCLUDE (posting_key, active, canonical_apply_url, source_id)
     """,
     "idx_postings_active_lead_reconcile": """
-        CREATE INDEX CONCURRENTLY idx_postings_active_lead_reconcile
+        CREATE INDEX idx_postings_active_lead_reconcile
         ON postings (target_match, source_mode)
         INCLUDE (posting_key, company, canonical_apply_url, source, source_id)
         WHERE active
@@ -75,9 +75,6 @@ def _acquire_repair_lock(connection: psycopg.Connection) -> None:
             return
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for the production index repair lock")
-        # pg_try_advisory_lock returns immediately, so the autocommit transaction has
-        # ended before sleeping. CREATE INDEX CONCURRENTLY is therefore never forced
-        # to wait on another repair process that is merely queued for the lock.
         time.sleep(2)
 
 
@@ -88,6 +85,7 @@ def repair_indexes() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
         )
         connection.execute("SET statement_timeout = 0")
+        connection.execute("SET lock_timeout = '15min'")
         _acquire_repair_lock(connection)
         try:
             for name, statement in INDEXES.items():
@@ -95,9 +93,7 @@ def repair_indexes() -> None:
                     print(f"index ready: {name}")
                     continue
                 connection.execute(
-                    sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}").format(
-                        sql.Identifier(name)
-                    )
+                    sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name))
                 )
                 print(f"building index: {name}")
                 connection.execute(statement)
