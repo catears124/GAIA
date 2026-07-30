@@ -8,12 +8,10 @@ import psycopg
 from psycopg import sql
 
 
-LOCK_NAME = "gaia-postings-index-repair-v1"
+APPLICATION_NAME = "gaia-index-repair-v2"
+SUPERSEDED_APPLICATION_NAMES = ("gaia-index-repair",)
+LOCK_NAME = "gaia-postings-index-repair-v2"
 LOCK_WAIT_SECONDS = 15 * 60
-INDEX_NAMES = (
-    "idx_postings_source_inventory",
-    "idx_postings_active_lead_reconcile",
-)
 INDEXES = {
     "idx_postings_source_inventory": """
         CREATE INDEX idx_postings_source_inventory
@@ -43,13 +41,13 @@ def _database_url() -> str:
     query = [
         (key, value)
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() != "supa"
+        if key.lower() not in {"supa", "application_name"}
     ]
     if "supabase.com" in parts.netloc and not any(
         key.lower() == "sslmode" for key, _ in query
     ):
         query.append(("sslmode", "require"))
-    query.append(("application_name", "gaia-index-repair"))
+    query.append(("application_name", APPLICATION_NAME))
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
     )
@@ -70,23 +68,48 @@ def _index_is_valid(connection: psycopg.Connection, name: str) -> bool:
     return bool(row and row[0])
 
 
-def _cancel_stale_index_builds(connection: psycopg.Connection) -> None:
+def _terminate_superseded_repairs(connection: psycopg.Connection) -> None:
     rows = connection.execute(
         """
-        SELECT pid
+        SELECT pid, application_name
         FROM pg_stat_activity
         WHERE datname=current_database()
           AND pid<>pg_backend_pid()
+          AND application_name = ANY(%s)
+        """,
+        (list(SUPERSEDED_APPLICATION_NAMES),),
+    ).fetchall()
+    for pid, application_name in rows:
+        terminated = connection.execute(
+            "SELECT pg_terminate_backend(%s)", (int(pid),)
+        ).fetchone()
+        print(
+            f"terminated superseded repair pid={pid} app={application_name}: "
+            f"{bool(terminated and terminated[0])}"
+        )
+
+
+def _cancel_unversioned_stale_index_builds(connection: psycopg.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT pid, application_name
+        FROM pg_stat_activity
+        WHERE datname=current_database()
+          AND pid<>pg_backend_pid()
+          AND COALESCE(application_name, '') <> %s
           AND query_start < now() - interval '30 seconds'
           AND query ~* 'CREATE[[:space:]]+INDEX([[:space:]]+CONCURRENTLY)?[[:space:]]+(idx_postings_source_inventory|idx_postings_active_lead_reconcile)'
-        """
+        """,
+        (APPLICATION_NAME,),
     ).fetchall()
-    for row in rows:
-        pid = int(row[0])
+    for pid, application_name in rows:
         cancelled = connection.execute(
-            "SELECT pg_cancel_backend(%s)", (pid,)
+            "SELECT pg_cancel_backend(%s)", (int(pid),)
         ).fetchone()
-        print(f"cancelled stale index builder pid={pid}: {bool(cancelled and cancelled[0])}")
+        print(
+            f"cancelled stale index builder pid={pid} app={application_name!r}: "
+            f"{bool(cancelled and cancelled[0])}"
+        )
 
 
 def _acquire_repair_lock(connection: psycopg.Connection) -> None:
@@ -99,7 +122,6 @@ def _acquire_repair_lock(connection: psycopg.Connection) -> None:
             return
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for the production index repair lock")
-        _cancel_stale_index_builds(connection)
         time.sleep(2)
 
 
@@ -111,7 +133,8 @@ def repair_indexes() -> None:
         )
         connection.execute("SET statement_timeout = 0")
         connection.execute("SET lock_timeout = '15min'")
-        _cancel_stale_index_builds(connection)
+        _terminate_superseded_repairs(connection)
+        _cancel_unversioned_stale_index_builds(connection)
         _acquire_repair_lock(connection)
         try:
             for name, statement in INDEXES.items():
