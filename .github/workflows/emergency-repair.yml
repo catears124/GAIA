@@ -35,7 +35,7 @@ jobs:
           payload=$(jq -n \
             --arg state "pending" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Running non-blocking production index repair v4" \
+            --arg description "Verifying repaired indexes and launching recovery" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
@@ -56,7 +56,7 @@ jobs:
           test -n "$GAIA_MIGRATION_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Repair blocking query indexes without blocking writers
+      - name: Verify production query indexes
         run: python -m gaia.repair_indexes
       - name: Dispatch clean inventory recovery
         run: gh workflow run inventory.yml --ref main -f budget_seconds=900
@@ -67,7 +67,7 @@ jobs:
           payload=$(jq -n \
             --arg state "success" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Indexes repaired concurrently; inventory recovery dispatched" \
+            --arg description "Indexes ready; inventory recovery dispatched" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
