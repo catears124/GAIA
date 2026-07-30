@@ -105,7 +105,7 @@ jobs:
               "unhealthy=\(.inventory.unhealthy // 0), " +
               "running=\(.inventory.running // 0), " +
               "snapshots_30m=\(.snapshots.recent_30m // 0), " +
-              "activity_age=\(.activity_age_minutes // \"unknown\")m"
+              "activity_age=" + ((.activity_age_minutes // "unknown") | tostring) + "m"
             ' production-health.json)
           fi
           echo "needed=$needed" >> "$GITHUB_OUTPUT"
