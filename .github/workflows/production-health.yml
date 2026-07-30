@@ -5,8 +5,12 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/production-health.yml"
+      - ".github/workflows/inventory.yml"
       - "src/gaia/health.py"
       - "src/gaia/cli.py"
+      - "src/gaia/inventory.py"
+      - "src/gaia/inventory_runtime.py"
+      - "src/gaia/live_inventory.py"
   schedule:
     - cron: "2,17,32,47 * * * *"
   workflow_dispatch:
@@ -38,6 +42,7 @@ jobs:
       - name: Publish pending commit status
         shell: bash
         run: |
+          set -euo pipefail
           payload=$(jq -n --arg state pending --arg context gaia/production-health --arg description "Production health check is running" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
           curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
       - uses: actions/setup-python@v5
@@ -46,8 +51,7 @@ jobs:
           cache: pip
       - name: Require direct Supabase connection
         shell: bash
-        run: |
-          test -n "$GAIA_DATABASE_URL" || exit 1
+        run: test -n "$GAIA_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - id: production_check
@@ -67,31 +71,81 @@ jobs:
         if: always()
         shell: bash
         run: |
-          state=fatal
-          reason="health checker produced no report"
-          if [ -f production-health.json ]; then
-            state=$(python -c 'import json; r=json.load(open("production-health.json")); i=r.get("inventory",{}); s=r.get("snapshots",{}); degraded=(int(i.get("unhealthy",0))>0 and int(i.get("running",0))==0 and (float(i.get("fresh_percent",0))<75 or int(s.get("recent_30m",0))==0)); print("recover" if r.get("ok") is not True or degraded else "healthy")')
-            reason=$(python -c 'import json; r=json.load(open("production-health.json")); i=r.get("inventory",{}); s=r.get("snapshots",{}); print(f"fresh={i.get(chr(102)+chr(114)+chr(101)+chr(115)+chr(104),0)}/{i.get(chr(116)+chr(111)+chr(116)+chr(97)+chr(108),0)}, unhealthy={i.get(chr(117)+chr(110)+chr(104)+chr(101)+chr(97)+chr(108)+chr(116)+chr(104)+chr(121),0)}, running={i.get(chr(114)+chr(117)+chr(110)+chr(110)+chr(105)+chr(110)+chr(103),0)}, snapshots_30m={s.get(chr(114)+chr(101)+chr(99)+chr(101)+chr(110)+chr(116)+chr(95)+chr(51)+chr(48)+chr(109),0)}, age={r.get(chr(97)+chr(99)+chr(116)+chr(105)+chr(118)+chr(105)+chr(116)+chr(121)+chr(95)+chr(97)+chr(103)+chr(101)+chr(95)+chr(109)+chr(105)+chr(110)+chr(117)+chr(116)+chr(101)+chr(115))}m")')
-          fi
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "reason=$reason" >> "$GITHUB_OUTPUT"
-          echo "Inventory state: $state — $reason" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path("production-health.json")
+          state = "fatal"
+          reason = "health checker produced no report"
+          if report_path.is_file():
+              report = json.loads(report_path.read_text())
+              inventory = report.get("inventory", {})
+              snapshots = report.get("snapshots", {})
+              total = int(inventory.get("total", 0) or 0)
+              fresh = int(inventory.get("fresh", 0) or 0)
+              unhealthy = int(inventory.get("unhealthy", 0) or 0)
+              running = int(inventory.get("running", 0) or 0)
+              fresh_percent = float(inventory.get("fresh_percent", 0) or 0)
+              recent = int(snapshots.get("recent_30m", 0) or 0)
+              age = report.get("activity_age_minutes")
+              under_capacity = total > 0 and unhealthy > 0 and fresh_percent < 75
+              no_progress = unhealthy > 0 and recent == 0
+              state = "recover" if report.get("ok") is not True or under_capacity or no_progress else "healthy"
+              reason = (
+                  f"fresh={fresh}/{total} ({fresh_percent:.1f}%), "
+                  f"unhealthy={unhealthy}, running={running}, "
+                  f"snapshots_30m={recent}, age={age}m"
+              )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"state={state}\n")
+              output.write(f"reason={reason}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(f"Inventory state: {state} — {reason}\n")
+          PY
       - id: recovery
         name: Ensure inventory pulse is active
         if: steps.recovery_gate.outputs.state != 'healthy'
         shell: bash
         run: |
           set -euo pipefail
-          active=$(gh run list --workflow inventory.yml --limit 50 --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
+
+          active_runs() {
+            for attempt in 1 2 3; do
+              if gh run list --workflow inventory.yml --limit 50 --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length'; then
+                return 0
+              fi
+              sleep $((attempt * 3))
+            done
+            return 1
+          }
+
+          active=$(active_runs)
           if [ "$active" -eq 0 ]; then
-            gh workflow run inventory.yml --ref main -f budget_seconds=900
-            sleep 5
-            active=$(gh run list --workflow inventory.yml --limit 20 --json status --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "requested" or .status == "pending")] | length')
-            test "$active" -gt 0
-            echo "Dispatched and verified a recovery pulse." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "An inventory pulse is already active; duplicate recovery suppressed." >> "$GITHUB_STEP_SUMMARY"
+            dispatched=0
+            for attempt in 1 2 3; do
+              if gh workflow run inventory.yml --ref main -f budget_seconds=900; then
+                dispatched=1
+                break
+              fi
+              sleep $((attempt * 3))
+            done
+            test "$dispatched" -eq 1
+
+            for attempt in 1 2 3 4 5; do
+              sleep 3
+              active=$(active_runs)
+              if [ "$active" -gt 0 ]; then
+                echo "Dispatched and verified a recovery pulse." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+            done
+            echo "Recovery dispatch was accepted but no active run appeared." >&2
+            exit 1
           fi
+          echo "An inventory pulse is already active; duplicate recovery suppressed." >> "$GITHUB_STEP_SUMMARY"
       - name: Upload health report
         if: always()
         continue-on-error: true
@@ -105,14 +159,23 @@ jobs:
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           state=success
-          description="Production inventory is advancing"
-          if [ "${{ steps.recovery_gate.outputs.state }}" = recover ]; then description="Inventory degraded; recovery pulse active"; fi
-          if [ "${{ steps.recovery_gate.outputs.state }}" = fatal ] || [ "${{ steps.recovery.outcome }}" = failure ]; then state=failure; description="Inventory recovery could not be verified"; fi
+          description="Production inventory is current and advancing"
+          if [ "${{ steps.recovery_gate.outputs.state }}" = recover ]; then
+            state=pending
+            description="Inventory catch-up is active"
+          fi
+          if [ "${{ steps.recovery_gate.outputs.state }}" = fatal ] || [ "${{ steps.recovery.outcome }}" = failure ]; then
+            state=failure
+            description="Inventory recovery could not be verified"
+          fi
           payload=$(jq -n --arg state "$state" --arg context gaia/production-health --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
           curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
       - name: Fail only when recovery failed
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.recovery_gate.outputs.state }}" = fatal ] || [ "${{ steps.recovery.outcome }}" = failure ]; then exit 1; fi
+          if [ "${{ steps.recovery_gate.outputs.state }}" = fatal ] || [ "${{ steps.recovery.outcome }}" = failure ]; then
+            exit 1
+          fi
