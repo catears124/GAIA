@@ -113,7 +113,9 @@
       </section>
 
       <section class="panel">
-        <div class="panel-head"><div><h2>Source diagnostics</h2><p>Operational source records, shown separately from employer coverage.</p></div><span id="coverage-source-count"></span></div>
+        <div class="panel-head"><div><h2>Source diagnostics</h2><p>Operational source records, shown separately from employer coverage.</p></div>
+          <label><span class="sr-only">Filter sources</span><select id="coverage-filter"><option value="actionable">Needs attention</option><option value="access">Access limited</option><option value="stale">Stale</option><option value="historical">Historical</option><option value="all">All source records</option></select></label>
+        </div>
         <div id="coverage-list" class="coverage-list"></div>
       </section>
     </section>
