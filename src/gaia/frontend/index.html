@@ -47,7 +47,7 @@
         <div class="metrics" aria-label="Live inventory summary">
           <div><strong id="metric-active">—</strong><span>open applications</span></div>
           <div><strong id="metric-companies">—</strong><span>hiring companies</span></div>
-          <div><strong id="metric-new">—</strong><span>found today</span></div>
+          <div><strong id="metric-new">—</strong><span>found in 24h</span></div>
         </div>
       </header>
 
@@ -113,9 +113,7 @@
       </section>
 
       <section class="panel">
-        <div class="panel-head"><div><h2>Source diagnostics</h2><p>Operational source records, shown separately from employer coverage.</p></div>
-          <label><span class="sr-only">Filter sources</span><select id="coverage-filter"><option value="actionable">Needs attention</option><option value="access">Access limited</option><option value="stale">Stale</option><option value="historical">Historical</option><option value="all">All source records</option></select></label>
-        </div>
+        <div class="panel-head"><div><h2>Source diagnostics</h2><p>Operational source records, shown separately from employer coverage.</p></div><span id="coverage-source-count"></span></div>
         <div id="coverage-list" class="coverage-list"></div>
       </section>
     </section>
@@ -126,6 +124,6 @@
     <div id="drawer-content"></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app-v2.js?v=8.1.0" defer></script>
+  <script src="/assets/app-v2.js?v=8.1.1" defer></script>
 </body>
 </html>
