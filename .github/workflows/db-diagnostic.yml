@@ -1,0 +1,125 @@
+name: Production DB diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/db-diagnostic.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish pending diagnostic status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          payload=$(jq -n \
+            --arg state "pending" \
+            --arg context "gaia/db-diagnostic" \
+            --arg description "Inspecting production database locks" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state, context:$context, description:$description, target_url:$target_url}')
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install database driver
+        run: python -m pip install --disable-pip-version-check 'psycopg[binary]>=3.2'
+      - name: Inspect sessions and locks
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+          import psycopg
+
+          url = os.environ['GAIA_MIGRATION_DATABASE_URL']
+          if url.startswith('postgres://'):
+              url = 'postgresql://' + url[len('postgres://'):]
+          parts = urlsplit(url)
+          query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in {'supa', 'application_name'}]
+          query.append(('application_name', 'gaia-db-diagnostic'))
+          url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+          with psycopg.connect(url, autocommit=True) as db:
+              db.execute("SET statement_timeout='30s'")
+              print('=== INDEXES ===')
+              for row in db.execute("""
+                  SELECT c.relname, i.indisvalid, i.indisready, pg_size_pretty(pg_relation_size(c.oid))
+                  FROM pg_class c
+                  JOIN pg_index i ON i.indexrelid=c.oid
+                  JOIN pg_namespace n ON n.oid=c.relnamespace
+                  WHERE n.nspname=current_schema()
+                    AND c.relname LIKE 'idx_postings_%'
+                  ORDER BY c.relname
+              ""):
+                  print(tuple(row))
+
+              print('=== REPAIR/INDEX SESSIONS ===')
+              for row in db.execute("""
+                  SELECT pid, application_name, state, wait_event_type, wait_event,
+                         age(clock_timestamp(), xact_start) AS xact_age,
+                         age(clock_timestamp(), query_start) AS query_age,
+                         left(regexp_replace(query, E'\\s+', ' ', 'g'), 240)
+                  FROM pg_stat_activity
+                  WHERE pid<>pg_backend_pid()
+                    AND (application_name LIKE 'gaia-index-repair%'
+                         OR query ILIKE '%idx_postings_%')
+                  ORDER BY query_start
+              ""):
+                  print(tuple(row))
+
+              print('=== POSTINGS LOCKS ===')
+              for row in db.execute("""
+                  SELECT a.pid, a.application_name, a.state, l.mode, l.granted,
+                         a.wait_event_type, a.wait_event,
+                         age(clock_timestamp(), a.query_start) AS query_age,
+                         left(regexp_replace(a.query, E'\\s+', ' ', 'g'), 200)
+                  FROM pg_locks l
+                  JOIN pg_class c ON c.oid=l.relation
+                  JOIN pg_namespace n ON n.oid=c.relnamespace
+                  JOIN pg_stat_activity a ON a.pid=l.pid
+                  WHERE n.nspname=current_schema()
+                    AND c.relname='postings'
+                  ORDER BY l.granted, a.query_start
+              ""):
+                  print(tuple(row))
+          PY
+      - name: Publish successful diagnostic status
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          payload=$(jq -n \
+            --arg state "success" \
+            --arg context "gaia/db-diagnostic" \
+            --arg description "Production database lock snapshot captured" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state, context:$context, description:$description, target_url:$target_url}')
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
