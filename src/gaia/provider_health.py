@@ -58,13 +58,15 @@ def provider_health(database: Database) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for row in rows:
         total = int(row["total"] or 0)
+        due = int(row["due"] or 0)
         fresh = int(row["fresh"] or 0)
         result.append(
             {
                 "kind": str(row["kind"]),
                 "total": total,
                 "running": int(row["running"] or 0),
-                "due": int(row["due"] or 0),
+                "due": due,
+                "due_percent": round(100 * due / total, 1) if total else 0.0,
                 "fresh": fresh,
                 "unhealthy": int(row["unhealthy"] or 0),
                 "degraded": int(row["degraded"] or 0),
