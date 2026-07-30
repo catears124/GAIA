@@ -71,7 +71,7 @@ jobs:
                   WHERE n.nspname=current_schema()
                     AND c.relname LIKE 'idx_postings_%'
                   ORDER BY c.relname
-              ""):
+              """):
                   print(tuple(row))
 
               print('=== REPAIR/INDEX SESSIONS ===')
@@ -85,7 +85,7 @@ jobs:
                     AND (application_name LIKE 'gaia-index-repair%'
                          OR query ILIKE '%idx_postings_%')
                   ORDER BY query_start
-              ""):
+              """):
                   print(tuple(row))
 
               print('=== POSTINGS LOCKS ===')
@@ -101,7 +101,7 @@ jobs:
                   WHERE n.nspname=current_schema()
                     AND c.relname='postings'
                   ORDER BY l.granted, a.query_start
-              ""):
+              """):
                   print(tuple(row))
           PY
       - name: Publish successful diagnostic status
