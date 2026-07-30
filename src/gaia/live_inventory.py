@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -112,6 +113,38 @@ class LiveInventoryStore(RuntimeInventoryStore):
             consecutive_failures=int(row["consecutive_failures"] or 0),
         )
 
+    def renew_target(self, target: ClaimedTarget, *, lease_seconds: int) -> bool:
+        """Keep a live crawl leased; dead workers naturally expire quickly."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                UPDATE crawl_targets
+                SET lease_expires_at=now() + (%s * interval '1 second'),
+                    updated_at=now()
+                WHERE source=%s
+                  AND lease_owner=%s
+                RETURNING source
+                """,
+                (lease_seconds, target.source, self.worker_id),
+            ).fetchone()
+        return row is not None
+
+    def abandon_target(self, target: ClaimedTarget) -> None:
+        """Release a crawl immediately when its task is cancelled cleanly."""
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE crawl_targets
+                SET next_run_at=LEAST(next_run_at, now()),
+                    lease_owner=NULL,
+                    lease_expires_at=NULL,
+                    updated_at=now()
+                WHERE source=%s
+                  AND lease_owner=%s
+                """,
+                (target.source, self.worker_id),
+            )
+
     def finish_target(
         self,
         target: ClaimedTarget,
@@ -194,6 +227,39 @@ class InventoryWorker(RuntimeInventoryWorker):
         finally:
             self.store.sync_catalog = original_sync  # type: ignore[method-assign]
             self.database.rebuild_families = original_rebuild  # type: ignore[method-assign]
+
+    async def _run_target(self, client: httpx.AsyncClient, target: ClaimedTarget) -> None:
+        """Renew active leases and promptly release a cleanly cancelled crawl."""
+        heartbeat_seconds = max(30, min(120, self.lease_seconds // 3))
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(heartbeat_seconds)
+                try:
+                    renewed = self.store.renew_target(
+                        target,
+                        lease_seconds=self.lease_seconds,
+                    )
+                except Exception:
+                    # A transient heartbeat failure must not kill a crawl that may still
+                    # finish successfully. The next heartbeat retries before lease expiry.
+                    LOGGER.exception("lease heartbeat failed for %s", target.source)
+                    continue
+                if not renewed:
+                    return
+
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            await super()._run_target(client, target)
+        except asyncio.CancelledError:
+            try:
+                self.store.abandon_target(target)
+            except Exception:
+                LOGGER.exception("could not abandon cancelled source %s", target.source)
+            raise
+        finally:
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
 
     async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
         if os.getenv("GAIA_ENABLE_DISCOVERY", "1") != "1":
