@@ -15,6 +15,9 @@
   <script src="/assets/theme.js?v=1.0.0"></script>
   <link rel="stylesheet" href="/assets/product-v2.css?v=8.0.0">
   <link rel="stylesheet" href="/assets/dark-mode.css?v=1.0.0">
+  <style>
+    .quick-actions{display:flex;flex-wrap:wrap;gap:.55rem;align-items:center;margin:.8rem 0 0}.quick-actions span{font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;opacity:.62;margin-right:.15rem}.quick-actions button{appearance:none;border:1px solid var(--line,#d8d8d8);background:var(--surface,#fff);color:inherit;border-radius:999px;padding:.48rem .72rem;font:inherit;font-size:.82rem;cursor:pointer}.quick-actions button:hover{border-color:currentColor}.quick-actions .utility{margin-left:auto}.section-heading-actions{display:flex;gap:.55rem;align-items:center;flex-wrap:wrap}.section-heading-actions button{white-space:nowrap}@media(max-width:720px){.quick-actions .utility{margin-left:0}.section-heading-actions{width:100%}}
+  </style>
 </head>
 <body>
   <a class="skip-link" href="#results">Skip to results</a>
@@ -67,6 +70,15 @@
           <label><span>Sort</span><select id="sort"><option value="newest" selected>Most recent</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
           <label class="check-filter"><input id="remote" type="checkbox"><span>Remote only</span></label>
         </div>
+        <div class="quick-actions" aria-label="Quick searches">
+          <span>Quick start</span>
+          <button type="button" data-preset="new">New verified</button>
+          <button type="button" data-preset="summer2027">Summer 2027</button>
+          <button type="button" data-preset="software">2027 software</button>
+          <button type="button" data-preset="quant">2027 quant</button>
+          <button type="button" data-preset="remote">Remote verified</button>
+          <button id="copy-search" class="utility" type="button">Copy search</button>
+        </div>
       </section>
 
       <div class="results-head" id="results">
@@ -90,7 +102,10 @@
     </section>
 
     <section id="saved-view" class="product-view" hidden>
-      <header class="section-heading"><h1>Saved jobs</h1><p>Stored only in this browser.</p></header>
+      <header class="section-heading">
+        <div><h1>Saved jobs</h1><p>Stored only in this browser.</p></div>
+        <div class="section-heading-actions"><button id="export-saved" class="secondary" type="button">Export CSV</button></div>
+      </header>
       <div class="job-list"><div id="saved-grid"></div></div>
       <div id="saved-empty" class="empty-state" hidden><strong>No saved jobs.</strong><p>Save a role from the main list and it will appear here.</p><button class="primary" data-view="jobs">Browse jobs</button></div>
     </section>
@@ -127,5 +142,6 @@
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/assets/app-v2.js?v=8.1.1" defer></script>
+  <script src="/assets/app-improvements.js?v=1.0.0" defer></script>
 </body>
 </html>
