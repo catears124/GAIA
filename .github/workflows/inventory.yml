@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/inventory.yml"
+      - "src/gaia/repair_indexes.py"
       - "src/gaia/inventory.py"
       - "src/gaia/inventory_runtime.py"
       - "src/gaia/live_inventory.py"
@@ -23,8 +24,40 @@ permissions:
   statuses: write
 
 jobs:
+  repair:
+    name: Repair production query indexes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Require Supabase connection
+        shell: bash
+        run: |
+          test -n "$GAIA_DATABASE_URL" || {
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 1
+          }
+          test -n "$GAIA_MIGRATION_DATABASE_URL" || {
+            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
+            exit 1
+          }
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Repair postings indexes
+        run: python -m gaia.repair_indexes
+
   inventory:
     name: Inventory · ${{ matrix.lane }}
+    needs: repair
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
