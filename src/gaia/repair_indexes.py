@@ -5,12 +5,12 @@ import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
-from psycopg import sql
+from psycopg import errors, sql
 
 
-APPLICATION_NAME = "gaia-index-repair-v2"
-SUPERSEDED_APPLICATION_NAMES = ("gaia-index-repair",)
-LOCK_NAME = "gaia-postings-index-repair-v2"
+APPLICATION_NAME = "gaia-index-repair-v3"
+SUPERSEDED_APPLICATION_NAMES = ("gaia-index-repair", "gaia-index-repair-v2")
+LOCK_NAME = "gaia-postings-index-repair-v3"
 LOCK_WAIT_SECONDS = 15 * 60
 INDEXES = {
     "idx_postings_source_inventory": """
@@ -20,8 +20,7 @@ INDEXES = {
     """,
     "idx_postings_active_lead_reconcile": """
         CREATE INDEX idx_postings_active_lead_reconcile
-        ON postings (target_match, source_mode)
-        INCLUDE (posting_key, company, canonical_apply_url, source, source_id)
+        ON postings (source_mode)
         WHERE active
           AND source_mode IN ('registry', 'external-index', 'verification-lead')
     """,
@@ -68,6 +67,22 @@ def _index_is_valid(connection: psycopg.Connection, name: str) -> bool:
     return bool(row and row[0])
 
 
+def _terminate_pids(
+    connection: psycopg.Connection,
+    rows: list[tuple[int, str]],
+    *,
+    reason: str,
+) -> None:
+    for pid, application_name in rows:
+        terminated = connection.execute(
+            "SELECT pg_terminate_backend(%s)", (int(pid),)
+        ).fetchone()
+        print(
+            f"terminated {reason} pid={pid} app={application_name!r}: "
+            f"{bool(terminated and terminated[0])}"
+        )
+
+
 def _terminate_superseded_repairs(connection: psycopg.Connection) -> None:
     rows = connection.execute(
         """
@@ -79,14 +94,7 @@ def _terminate_superseded_repairs(connection: psycopg.Connection) -> None:
         """,
         (list(SUPERSEDED_APPLICATION_NAMES),),
     ).fetchall()
-    for pid, application_name in rows:
-        terminated = connection.execute(
-            "SELECT pg_terminate_backend(%s)", (int(pid),)
-        ).fetchone()
-        print(
-            f"terminated superseded repair pid={pid} app={application_name}: "
-            f"{bool(terminated and terminated[0])}"
-        )
+    _terminate_pids(connection, rows, reason="superseded repair")
 
 
 def _cancel_unversioned_stale_index_builds(connection: psycopg.Connection) -> None:
@@ -112,6 +120,32 @@ def _cancel_unversioned_stale_index_builds(connection: psycopg.Connection) -> No
         )
 
 
+def _terminate_postings_lockers(connection: psycopg.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT activity.pid, activity.application_name
+        FROM pg_locks AS held
+        JOIN pg_class AS relation ON relation.oid=held.relation
+        JOIN pg_namespace AS namespace ON namespace.oid=relation.relnamespace
+        JOIN pg_stat_activity AS activity ON activity.pid=held.pid
+        WHERE namespace.nspname=current_schema()
+          AND relation.relname='postings'
+          AND held.granted
+          AND held.mode IN (
+              'RowExclusiveLock',
+              'ShareUpdateExclusiveLock',
+              'ShareRowExclusiveLock',
+              'ExclusiveLock',
+              'AccessExclusiveLock'
+          )
+          AND activity.pid<>pg_backend_pid()
+          AND COALESCE(activity.application_name, '') <> %s
+        """,
+        (APPLICATION_NAME,),
+    ).fetchall()
+    _terminate_pids(connection, rows, reason="postings lock holder")
+
+
 def _acquire_repair_lock(connection: psycopg.Connection) -> None:
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     while True:
@@ -125,6 +159,23 @@ def _acquire_repair_lock(connection: psycopg.Connection) -> None:
         time.sleep(2)
 
 
+def _build_index(connection: psycopg.Connection, name: str, statement: str) -> None:
+    for attempt in range(1, 6):
+        _terminate_postings_lockers(connection)
+        try:
+            connection.execute(
+                sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name))
+            )
+            print(f"building index: {name} attempt={attempt}")
+            connection.execute(statement)
+            return
+        except errors.LockNotAvailable:
+            if attempt == 5:
+                raise
+            print(f"lock contention building {name}; retrying")
+            time.sleep(2)
+
+
 def repair_indexes() -> None:
     schema = os.getenv("GAIA_SCHEMA", "public")
     with psycopg.connect(_database_url(), autocommit=True) as connection:
@@ -132,7 +183,7 @@ def repair_indexes() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
         )
         connection.execute("SET statement_timeout = 0")
-        connection.execute("SET lock_timeout = '15min'")
+        connection.execute("SET lock_timeout = '30s'")
         _terminate_superseded_repairs(connection)
         _cancel_unversioned_stale_index_builds(connection)
         _acquire_repair_lock(connection)
@@ -141,11 +192,7 @@ def repair_indexes() -> None:
                 if _index_is_valid(connection, name):
                     print(f"index ready: {name}")
                     continue
-                connection.execute(
-                    sql.SQL("DROP INDEX IF EXISTS {}").format(sql.Identifier(name))
-                )
-                print(f"building index: {name}")
-                connection.execute(statement)
+                _build_index(connection, name, statement)
                 if not _index_is_valid(connection, name):
                     raise RuntimeError(f"index build did not become valid: {name}")
             connection.execute("ANALYZE postings")
