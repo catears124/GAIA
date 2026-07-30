@@ -17,12 +17,15 @@ def _live_order_clause(sort: str) -> str:
         return "lower(company), lower(title), family_key"
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
-    # Primary order is the newest visible activity: either employer publication or
-    # GAIA discovery. Large recovery crawls often give many families the exact same
-    # first_detected_at, so employer publication time must be the next tie-breaker;
-    # otherwise results fall through to family_key and look randomly ordered.
+    # Recovery crawls can discover hundreds of roles seconds apart. The UI rounds those
+    # timestamps to the same visible hour, so ordering by hidden seconds makes the feed
+    # look random. Bucket GAIA discovery activity by hour, then use the employer's
+    # publication timestamp to order roles inside that visible activity bucket.
     return (
-        "GREATEST(COALESCE(latest_posted_at, first_detected_at), first_detected_at) DESC, "
+        "CASE "
+        "WHEN first_detected_at >= COALESCE(latest_posted_at, '-infinity'::timestamptz) "
+        "THEN date_trunc('hour', first_detected_at) "
+        "ELSE latest_posted_at END DESC, "
         "latest_posted_at DESC NULLS LAST, "
         "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
         "first_detected_at DESC, last_verified_at DESC, family_key"
@@ -136,7 +139,7 @@ def live_stats() -> dict[str, object]:
                 COUNT(DISTINCT company) AS companies,
                 COUNT(*) FILTER (
                     WHERE first_detected_at >= now() - interval '24 hours'
-                ) AS new_families_24h,
+                ) AS new_families_today,
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
             FROM families
@@ -162,10 +165,10 @@ def live_stats() -> dict[str, object]:
             SELECT
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE first_seen_at >= now() - interval '24 hours'
-                ) AS new_24h,
+                ) AS new_today,
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE removed_at >= now() - interval '24 hours'
-                ) AS removed_24h
+                ) AS removed_today
             FROM postings
             WHERE source_mode='direct'
               AND target_match!='not_internship'
@@ -187,18 +190,17 @@ def live_stats() -> dict[str, object]:
 
     census = universe_summary(legacy.db, limit=1)
     census_summary = dict(census.get("summary") or {})
-    new_24h = int(movement["new_24h"] or 0)
-    removed_24h = int(movement["removed_24h"] or 0)
+    new_today = int(movement["new_today"] or 0)
+    removed_today = int(movement["removed_today"] or 0)
     return {
         "role_families": int(row["role_families"]),
         "active_listings": int(row["active_listings"]),
         "companies": int(row["companies"]),
-        "new_24h": new_24h,
-        # Backward-compatible key for deployed clients; semantics are rolling 24h.
-        "new_today": new_24h,
-        "removed_today": removed_24h,
-        "net_today": new_24h - removed_24h,
-        "new_families_24h": int(row["new_families_24h"]),
+        "new_24h": new_today,
+        "new_today": new_today,
+        "removed_today": removed_today,
+        "net_today": new_today - removed_today,
+        "new_families_24h": int(row["new_families_today"]),
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
         "validated_sources": int(source_row["count"] or 0),
