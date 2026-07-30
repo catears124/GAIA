@@ -10,6 +10,10 @@ from psycopg import sql
 
 LOCK_NAME = "gaia-postings-index-repair-v1"
 LOCK_WAIT_SECONDS = 15 * 60
+INDEX_NAMES = (
+    "idx_postings_source_inventory",
+    "idx_postings_active_lead_reconcile",
+)
 INDEXES = {
     "idx_postings_source_inventory": """
         CREATE INDEX idx_postings_source_inventory
@@ -45,6 +49,7 @@ def _database_url() -> str:
         key.lower() == "sslmode" for key, _ in query
     ):
         query.append(("sslmode", "require"))
+    query.append(("application_name", "gaia-index-repair"))
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
     )
@@ -65,6 +70,25 @@ def _index_is_valid(connection: psycopg.Connection, name: str) -> bool:
     return bool(row and row[0])
 
 
+def _cancel_stale_index_builds(connection: psycopg.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT pid
+        FROM pg_stat_activity
+        WHERE datname=current_database()
+          AND pid<>pg_backend_pid()
+          AND query_start < now() - interval '30 seconds'
+          AND query ~* 'CREATE[[:space:]]+INDEX([[:space:]]+CONCURRENTLY)?[[:space:]]+(idx_postings_source_inventory|idx_postings_active_lead_reconcile)'
+        """
+    ).fetchall()
+    for row in rows:
+        pid = int(row[0])
+        cancelled = connection.execute(
+            "SELECT pg_cancel_backend(%s)", (pid,)
+        ).fetchone()
+        print(f"cancelled stale index builder pid={pid}: {bool(cancelled and cancelled[0])}")
+
+
 def _acquire_repair_lock(connection: psycopg.Connection) -> None:
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     while True:
@@ -75,6 +99,7 @@ def _acquire_repair_lock(connection: psycopg.Connection) -> None:
             return
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for the production index repair lock")
+        _cancel_stale_index_builds(connection)
         time.sleep(2)
 
 
@@ -86,6 +111,7 @@ def repair_indexes() -> None:
         )
         connection.execute("SET statement_timeout = 0")
         connection.execute("SET lock_timeout = '15min'")
+        _cancel_stale_index_builds(connection)
         _acquire_repair_lock(connection)
         try:
             for name, statement in INDEXES.items():
