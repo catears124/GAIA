@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 20
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
     steps:
@@ -43,14 +43,10 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connection
+      - name: Require direct Supabase connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
-            exit 1
-          }
-          test -n "$GAIA_MIGRATION_DATABASE_URL" || {
             echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
             exit 1
           }
@@ -72,18 +68,18 @@ jobs:
         include:
           - lane: fast-a
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 12
+            workers: 6
           - lane: fast-b
             kinds: greenhouse,lever,ashby,smartrecruiters,recruitee,workable,google-careers
-            workers: 12
+            workers: 6
           - lane: enterprise-fallback
             kinds: jobvite,icims,oracle-cloud,successfactors,domain,verification
-            workers: 8
+            workers: 4
           - lane: workday
             kinds: workday-search
-            workers: 2
+            workers: 1
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GAIA_READ_ONLY: "0"
@@ -102,11 +98,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connection
+      - name: Require direct Supabase connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
             exit 1
           }
       - name: Install GAIA
