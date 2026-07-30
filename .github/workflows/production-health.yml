@@ -101,9 +101,11 @@ jobs:
               fresh_percent = float(inventory.get("fresh_percent", 0) or 0)
               recent = int(snapshots.get("recent_30m", 0) or 0)
               age = report.get("activity_age_minutes")
-              under_capacity = total > 0 and unhealthy > 0 and fresh_percent < 75
+              # Green means fully current. Any overdue or degraded source keeps the
+              # status pending and guarantees a verified recovery pulse is active.
+              needs_recovery = unhealthy > 0
               no_progress = unhealthy > 0 and recent == 0
-              state = "recover" if report.get("ok") is not True or under_capacity or no_progress else "healthy"
+              state = "recover" if report.get("ok") is not True or needs_recovery or no_progress else "healthy"
               reason = (
                   f"fresh={fresh}/{total} ({fresh_percent:.1f}%), "
                   f"unhealthy={unhealthy}, running={running}, "
@@ -173,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           state=success
-          description="Production inventory is current and advancing"
+          description="Production inventory is fully current"
           if [ "${{ steps.recovery_gate.outputs.state }}" = recover ]; then
             state=pending
             description="Inventory catch-up is active"
