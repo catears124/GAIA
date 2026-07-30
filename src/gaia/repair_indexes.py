@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
@@ -8,6 +9,7 @@ from psycopg import sql
 
 
 LOCK_NAME = "gaia-postings-index-repair-v1"
+LOCK_WAIT_SECONDS = 15 * 60
 INDEXES = {
     "idx_postings_source_inventory": """
         CREATE INDEX CONCURRENTLY idx_postings_source_inventory
@@ -63,6 +65,22 @@ def _index_is_valid(connection: psycopg.Connection, name: str) -> bool:
     return bool(row and row[0])
 
 
+def _acquire_repair_lock(connection: psycopg.Connection) -> None:
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        row = connection.execute(
+            "SELECT pg_try_advisory_lock(hashtext(%s))", (LOCK_NAME,)
+        ).fetchone()
+        if row and bool(row[0]):
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out waiting for the production index repair lock")
+        # pg_try_advisory_lock returns immediately, so the autocommit transaction has
+        # ended before sleeping. CREATE INDEX CONCURRENTLY is therefore never forced
+        # to wait on another repair process that is merely queued for the lock.
+        time.sleep(2)
+
+
 def repair_indexes() -> None:
     schema = os.getenv("GAIA_SCHEMA", "public")
     with psycopg.connect(_database_url(), autocommit=True) as connection:
@@ -70,7 +88,7 @@ def repair_indexes() -> None:
             sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
         )
         connection.execute("SET statement_timeout = 0")
-        connection.execute("SELECT pg_advisory_lock(hashtext(%s))", (LOCK_NAME,))
+        _acquire_repair_lock(connection)
         try:
             for name, statement in INDEXES.items():
                 if _index_is_valid(connection, name):
