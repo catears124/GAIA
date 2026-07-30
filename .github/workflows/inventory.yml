@@ -23,9 +23,11 @@ permissions:
   contents: read
   statuses: write
 
+# Never cancel a running inventory pulse. Source leases make overlapping workers safe,
+# while cancellation can strand a slow provider lane without advancing its watermark.
 concurrency:
   group: gaia-production-inventory
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: false
 
 jobs:
   repair:
@@ -52,8 +54,20 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Repair postings indexes
-        run: python -m gaia.repair_indexes
+      - name: Repair postings indexes with retries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout 600 python -m gaia.repair_indexes; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Index repair failed after three attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
   inventory:
     name: Inventory · ${{ matrix.lane }}
@@ -107,17 +121,29 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Drain due employer boards
+      - name: Drain due employer boards with bounded retries
         shell: bash
         run: |
+          set -euo pipefail
           case "${{ github.event_name }}" in
             workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="480" ;;
+            *) budget="600" ;;
           esac
-          gaia worker \
-            --once \
-            --budget-seconds "$budget" \
-            --concurrency "${{ matrix.workers }}"
+
+          for attempt in 1 2 3; do
+            echo "${{ matrix.lane }} attempt ${attempt}/3 with ${budget}s budget"
+            if gaia worker \
+              --once \
+              --budget-seconds "$budget" \
+              --concurrency "${{ matrix.workers }}"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "${{ matrix.lane }} failed after three attempts." >&2
+              exit 1
+            fi
+            sleep $((attempt * 20))
+          done
 
   status:
     name: Publish inventory pulse status
@@ -138,12 +164,12 @@ jobs:
             success)
               ;;
             cancelled)
-              state=pending
-              description="Provider pulse superseded by recovery"
+              state=failure
+              description="Provider inventory pulse was unexpectedly cancelled"
               ;;
             *)
               state=failure
-              description="One or more provider inventory lanes failed"
+              description="One or more provider inventory lanes failed after retries"
               ;;
           esac
           payload=$(jq -n \
@@ -153,6 +179,7 @@ jobs:
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors --retry-delay 2 \
             -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
