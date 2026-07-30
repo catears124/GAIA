@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
 from psycopg import sql
@@ -32,9 +33,19 @@ def _database_url() -> str:
         )
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://") :]
-    if "supabase.com" in url and "sslmode=" not in url:
-        url += ("&" if "?" in url else "?") + "sslmode=require"
-    return url
+    parts = urlsplit(url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() != "supa"
+    ]
+    if "supabase.com" in parts.netloc and not any(
+        key.lower() == "sslmode" for key, _ in query
+    ):
+        query.append(("sslmode", "require"))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
 
 
 def _index_is_valid(connection: psycopg.Connection, name: str) -> bool:
