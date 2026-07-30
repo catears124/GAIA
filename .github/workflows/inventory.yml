@@ -23,6 +23,10 @@ permissions:
   contents: read
   statuses: write
 
+concurrency:
+  group: gaia-production-inventory
+  cancel-in-progress: true
+
 jobs:
   repair:
     name: Repair production query indexes
@@ -61,9 +65,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
-    concurrency:
-      group: gaia-production-inventory-${{ matrix.lane }}
-      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       max-parallel: 4
