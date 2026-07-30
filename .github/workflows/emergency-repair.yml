@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 20
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GH_TOKEN: ${{ github.token }}
@@ -35,7 +35,7 @@ jobs:
           payload=$(jq -n \
             --arg state "pending" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Verifying repaired indexes and launching recovery" \
+            --arg description "Launching direct-database inventory recovery" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
@@ -49,11 +49,9 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase connections
+      - name: Require direct Supabase connection
         shell: bash
-        run: |
-          test -n "$GAIA_DATABASE_URL"
-          test -n "$GAIA_MIGRATION_DATABASE_URL"
+        run: test -n "$GAIA_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - name: Verify production query indexes
@@ -67,7 +65,7 @@ jobs:
           payload=$(jq -n \
             --arg state "success" \
             --arg context "gaia/emergency-repair" \
-            --arg description "Indexes ready; inventory recovery dispatched" \
+            --arg description "Direct-database inventory recovery dispatched" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
           curl --fail --silent --show-error \
