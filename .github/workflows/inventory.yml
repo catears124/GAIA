@@ -87,16 +87,16 @@ jobs:
             workers: 3
           - lane: workday-a
             kinds: workday-search
-            workers: 2
+            workers: 3
           - lane: workday-b
             kinds: workday-search
-            workers: 2
+            workers: 3
           - lane: workday-c
             kinds: workday-search
-            workers: 2
+            workers: 3
           - lane: workday-d
             kinds: workday-search
-            workers: 2
+            workers: 3
           - lane: oracle
             kinds: oracle-cloud
             workers: 4
@@ -117,10 +117,14 @@ jobs:
       GAIA_SKIP_CATALOG_SYNC: "1"
       GAIA_DEFER_FAMILY_REBUILD: "1"
       GAIA_WORKER_KINDS: ${{ matrix.kinds }}
-      GAIA_WORKDAY_FULL_INVENTORY: "1"
-      GAIA_WORKDAY_MAX_PER_TERM: "20000"
-      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "1"
-      GAIA_WORKDAY_MIN_INTERVAL: "1.0"
+      # GAIA only serves internships. Blank Workday searches enumerated entire
+      # enterprise boards (often 1,000–2,000 rows) and made a 90-minute freshness
+      # target mathematically impossible. Query-scoped collection covers the actual
+      # 2027 intern/co-op surface and completes fast enough to remain continuously fresh.
+      GAIA_WORKDAY_FULL_INVENTORY: "0"
+      GAIA_WORKDAY_MAX_PER_TERM: "1200"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
+      GAIA_WORKDAY_MIN_INTERVAL: "0.5"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
