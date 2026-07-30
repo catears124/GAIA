@@ -23,12 +23,8 @@ permissions:
   contents: read
   statuses: write
 
-# Source leases provide the concurrency boundary. Never cancel a pulse: cancellation
-# strands slow provider work and leaves the corresponding freshness watermark behind.
-concurrency:
-  group: gaia-production-inventory
-  cancel-in-progress: false
-
+# PostgreSQL source leases are the only concurrency boundary. Workflow-level
+# serialization created a permanent queue whenever a pulse outlived its cadence.
 jobs:
   repair:
     if: github.event_name != 'schedule'
