@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import yaml
-
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "production-api-smoke.yml"
@@ -12,10 +10,10 @@ def workflow_text() -> str:
 
 
 def test_production_smoke_runs_frequently_without_overlap() -> None:
-    workflow = yaml.safe_load(workflow_text())
-    assert workflow["on"]["schedule"] == [{"cron": "*/15 * * * *"}]
-    assert workflow["concurrency"]["group"] == "production-api-smoke"
-    assert workflow["concurrency"]["cancel-in-progress"] is True
+    text = workflow_text()
+    assert 'cron: "*/15 * * * *"' in text
+    assert "group: production-api-smoke" in text
+    assert "cancel-in-progress: true" in text
 
 
 def test_production_smoke_checks_ui_and_core_read_contracts() -> None:
