@@ -45,7 +45,7 @@ jobs:
         if: github.event_name == 'push'
         run: sleep 45
 
-      - name: Resolve active production deployment
+      - name: Resolve public production deployment
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -66,7 +66,8 @@ jobs:
               + map(select(((.environment // "") | ascii_downcase) != "production"))
             ) | .[].id' smoke/deployments.json
           )
-          base_url=""
+
+          : > smoke/environment-urls
           for deployment_id in "${deployment_ids[@]}"; do
             status_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses?per_page=20"
             if ! curl --fail --silent --show-error \
@@ -76,22 +77,59 @@ jobs:
               "$status_url" > "smoke/deployment-${deployment_id}.json"; then
               continue
             fi
-            base_url=$(jq -r '[.[] | select(.state == "success") | .environment_url // empty][0] // empty' \
-              "smoke/deployment-${deployment_id}.json")
-            if [[ "$base_url" == https://*.vercel.app* ]]; then
+            jq -r '.[] | select(.state == "success") | .environment_url // empty' \
+              "smoke/deployment-${deployment_id}.json" >> smoke/environment-urls
+          done
+
+          candidates=(
+            "https://gaiajob.vercel.app"
+            "https://gaia-ethnyls-projects.vercel.app"
+            "https://gaia-git-main-ethnyls-projects.vercel.app"
+          )
+          while IFS= read -r candidate; do
+            [[ -n "$candidate" ]] && candidates+=("${candidate%/}")
+          done < smoke/environment-urls
+
+          declare -A seen=()
+          base_url=""
+          candidate_index=0
+          for candidate in "${candidates[@]}"; do
+            [[ "$candidate" == https://*.vercel.app ]] || continue
+            [[ -z "${seen[$candidate]:-}" ]] || continue
+            seen[$candidate]=1
+            candidate_index=$((candidate_index + 1))
+            printf '%s\n' "$candidate" > "smoke/candidate-${candidate_index}.url"
+            if ! curl --silent --show-error --location \
+              --connect-timeout 5 --max-time 15 \
+              --dump-header "smoke/candidate-${candidate_index}.headers" \
+              --output "smoke/candidate-${candidate_index}.body" \
+              --write-out '%{http_code}' \
+              "$candidate/" > "smoke/candidate-${candidate_index}.status"; then
+              printf '000\n' > "smoke/candidate-${candidate_index}.status"
+            fi
+            status=$(tr -d '\r\n' < "smoke/candidate-${candidate_index}.status")
+            if [[ "$status" == "200" ]] && \
+               grep -Fq "get a job you silly larp" "smoke/candidate-${candidate_index}.body"; then
+              base_url="$candidate"
               break
             fi
-            base_url=""
           done
 
           if [[ -z "$base_url" ]]; then
-            echo "No successful Vercel deployment URL was found" >&2
+            {
+              echo "No public Vercel URL served GAIA's application HTML."
+              echo "Candidate results:"
+              for file in smoke/candidate-*.url; do
+                index="${file%.url}"
+                echo "- $(cat "$file"): HTTP $(cat "${index}.status" 2>/dev/null || echo unknown)"
+              done
+            } | tee smoke/deployment-resolution-error >&2
             exit 1
           fi
-          base_url="${base_url%/}"
+
           printf '%s\n' "$base_url" > smoke/base-url
           echo "base_url=$base_url" >> "$GITHUB_OUTPUT"
-          echo "Resolved production URL: $base_url" >> "$GITHUB_STEP_SUMMARY"
+          echo "Resolved public production URL: $base_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trigger bounded runtime bootstrap
         env:
