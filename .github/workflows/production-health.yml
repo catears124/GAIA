@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/production-health.yml"
       - ".github/workflows/inventory.yml"
+      - "src/gaia/__init__.py"
+      - "src/gaia/db_base.py"
       - "src/gaia/wait_for_database.py"
       - "src/gaia/health.py"
       - "src/gaia/provider_health.py"
@@ -32,7 +34,7 @@ jobs:
     timeout-minutes: 25
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GAIA_CHECK_MAX_ACTIVITY_MINUTES: "90"
@@ -51,7 +53,7 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require direct Supabase connection
+      - name: Require Supabase pooler connection
         shell: bash
         run: test -n "$GAIA_DATABASE_URL"
       - name: Install GAIA
