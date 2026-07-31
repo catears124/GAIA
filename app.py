@@ -17,5 +17,11 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_INITIAL_SYNC", "0")
     os.environ.setdefault("GAIA_READ_ONLY", "1")
     os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")
+    # Public reads should fail closed quickly during provider recovery rather than
+    # consuming the full worker-scale database timeout.
+    os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
+from gaia.api_resilience import install_database_outage_guard  # noqa: E402
 from gaia.product_api import app  # noqa: E402,F401
+
+install_database_outage_guard(app)
