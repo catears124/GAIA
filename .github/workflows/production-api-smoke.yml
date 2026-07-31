@@ -18,20 +18,18 @@ on:
 
 permissions:
   contents: read
+  deployments: read
   statuses: write
 
 concurrency:
   group: production-api-smoke
   cancel-in-progress: true
 
-env:
-  GAIA_BASE_URL: https://gaiajob.vercel.app
-
 jobs:
   smoke:
     name: Verify deployed UI, recovery assets, and public API contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -47,26 +45,69 @@ jobs:
         if: github.event_name == 'push'
         run: sleep 45
 
-      - name: Trigger bounded runtime bootstrap
+      - name: Resolve active production deployment
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # A recreated Supabase project initializes on the first real API request.
-          # Give that one request the function's full recovery budget before measuring
-          # the normal low-latency API contract below.
+          set -euo pipefail
+          mkdir -p smoke
+          deployments_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/deployments?per_page=30"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$deployments_url" > smoke/deployments.json
+
+          mapfile -t deployment_ids < <(
+            jq -r '[.[] | select((.environment // "" | ascii_downcase) == "production"), .[]] | unique_by(.id) | .[].id' \
+              smoke/deployments.json
+          )
+          base_url=""
+          for deployment_id in "${deployment_ids[@]}"; do
+            status_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses?per_page=20"
+            if ! curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$status_url" > "smoke/deployment-${deployment_id}.json"; then
+              continue
+            fi
+            base_url=$(jq -r '[.[] | select(.state == "success") | .environment_url // empty][0] // empty' \
+              "smoke/deployment-${deployment_id}.json")
+            if [[ "$base_url" == https://*.vercel.app* ]]; then
+              break
+            fi
+            base_url=""
+          done
+
+          if [[ -z "$base_url" ]]; then
+            base_url="https://gaiajob.vercel.app"
+          fi
+          base_url="${base_url%/}"
+          printf '%s\n' "$base_url" > smoke/base-url
+          echo "base_url=$base_url" >> "$GITHUB_OUTPUT"
+          echo "Resolved production URL: $base_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger bounded runtime bootstrap
+        env:
+          GAIA_BASE_URL: ${{ steps.deployment.outputs.base_url }}
+        shell: bash
+        run: |
           curl --silent --show-error --location \
             --connect-timeout 5 --max-time 55 \
-            --output smoke-bootstrap.body \
+            --output smoke/bootstrap.body \
             --write-out '%{http_code}\n' \
-            "${GAIA_BASE_URL}/api/health" > smoke-bootstrap.status || true
+            "${GAIA_BASE_URL}/api/health" > smoke/bootstrap.status || true
 
       - name: Probe production
         id: probe
+        env:
+          GAIA_BASE_URL: ${{ steps.deployment.outputs.base_url }}
         shell: bash
         run: |
           set -uo pipefail
-          mkdir -p smoke
-          cp smoke-bootstrap.body smoke/bootstrap.body 2>/dev/null || true
-          cp smoke-bootstrap.status smoke/bootstrap.status 2>/dev/null || true
 
           fetch() {
             local name="$1" path="$2" max_time="$3" retries="$4"
@@ -103,6 +144,7 @@ jobs:
 
           {
             echo "### Production smoke"
+            echo "- URL: ${GAIA_BASE_URL}"
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
             echo "- Offline snapshot usable: ${snapshot_usable}"
