@@ -8,6 +8,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/static-snapshot.yml"
+      - "src/gaia/__init__.py"
+      - "src/gaia/db_base.py"
+      - "src/gaia/wait_for_database.py"
       - "src/gaia/static_snapshot.py"
       - "src/gaia/product_api.py"
       - "src/gaia/api.py"
@@ -26,7 +29,7 @@ jobs:
     timeout-minutes: 20
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "300"
       GH_TOKEN: ${{ github.token }}
