@@ -66,13 +66,24 @@ def test_snapshot_supports_arbitrary_offline_family_searches() -> None:
     assert 'headers.set("X-GAIA-Offline-Search", "1")' in script
 
 
-def test_offline_search_preserves_truthful_trust_and_cycle_filters() -> None:
+def test_offline_search_mirrors_canonical_trust_cycle_and_token_filters() -> None:
     script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert 'new Set(["exact", "year_confirmed", "source_confirmed"])' in script
+    assert 'target === "default"' in script
+    assert "TARGET_MATCHES.has(match)" in script
+    assert "return match === target" in script
     assert 'trust === "verified" && !item.verified' in script
     assert 'trust === "leads" && item.verified' in script
-    assert 'target === "exact"' in script
-    assert 'year === 2027 && season === "summer"' in script
-    assert 'target === "default" || target === "year_confirmed"' in script
+    assert "queryTokens.some(token => !haystack.includes(token))" in script
+    assert 'String(item.company || "").toLowerCase() !== company.toLowerCase()' in script
+
+
+def test_offline_facets_preserve_categories_and_remote_counts() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert "categoryCounts" in script
+    assert "remoteCount" in script
+    assert "categories: ranked(categoryCounts)" in script
+    assert "remote_count: remoteCount" in script
 
 
 def test_family_drawer_uses_snapshot_details_when_live_api_is_down() -> None:
