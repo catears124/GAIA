@@ -4,6 +4,11 @@
   const $ = selector => document.querySelector(selector);
   const formatNumber = value => new Intl.NumberFormat().format(Number(value || 0));
   const CACHE_KEY = "gaia:live-summary";
+  const REQUEST_TIMEOUT_MS = 8000;
+  const HEALTHY_REFRESH_MS = 30000;
+  const DEGRADED_REFRESH_MS = 10000;
+  let recoveryTimer = null;
+  let recoveryInFlight = null;
 
   const style = document.createElement("style");
   style.textContent = `
@@ -36,13 +41,23 @@
   async function fetchJson(path, attempts = 4) {
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       try {
-        const response = await fetch(path, { headers: { Accept: "application/json" }, cache: "no-store" });
+        const response = await fetch(path, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          signal: controller.signal,
+        });
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        return await response.json();
+        const value = await response.json();
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid JSON response");
+        return value;
       } catch (error) {
         lastError = error;
         if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 500 * (2 ** attempt)));
+      } finally {
+        clearTimeout(timeout);
       }
     }
     throw lastError;
@@ -54,7 +69,7 @@
       $("#metric-companies").textContent = formatNumber(stats.companies);
       $("#metric-new").textContent = formatNumber(stats.new_today ?? stats.new_24h);
     }
-    if (!health) return;
+    if (!health) return false;
     const node = $("#freshness");
     const inventory = health.inventory || {};
     const fresh = Number(inventory.fresh || 0);
@@ -63,7 +78,7 @@
     const running = Number(inventory.running || 0);
     const degraded = Number(inventory.degraded || 0);
     const percent = total ? (100 * fresh / total).toFixed(1) : "0.0";
-    const truthfullyHealthy = !cached && health.ok === true && health.stale !== true && inventory.healthy !== false && unhealthy === 0;
+    const truthfullyHealthy = !cached && health.ok === true && health.stale !== true && inventory.healthy !== false && unhealthy === 0 && total > 0;
     const label = node?.querySelector("span:last-child");
     if (label) {
       if (cached) {
@@ -81,23 +96,38 @@
       node.classList.remove("failed", "fresh", "stale");
       node.classList.add(truthfullyHealthy ? "fresh" : "stale");
     }
+    return truthfullyHealthy;
+  }
+
+  function scheduleRecovery(delay) {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null;
+      if (!document.hidden) recoverLiveSummary();
+    }, delay);
   }
 
   async function recoverLiveSummary() {
-    const cached = readCache();
-    if (cached) renderSummary(cached.stats, cached.health, true);
-    try {
-      const [stats, health] = await Promise.all([fetchJson("/api/stats"), fetchJson("/api/health")]);
-      if (health.ok === true && health.stale !== true) writeCache({ stats, health });
-      renderSummary(stats, health, false);
-    } catch {
-      const node = $("#freshness");
-      if (!cached && node) {
-        node.className = "freshness stale";
-        const label = node.querySelector("span:last-child");
-        if (label) label.textContent = "Live status delayed · retrying";
+    if (recoveryInFlight) return recoveryInFlight;
+    recoveryInFlight = (async () => {
+      const cached = readCache();
+      if (cached) renderSummary(cached.stats, cached.health, true);
+      try {
+        const [stats, health] = await Promise.all([fetchJson("/api/stats"), fetchJson("/api/health")]);
+        const healthy = renderSummary(stats, health, false);
+        if (healthy) writeCache({ stats, health });
+        scheduleRecovery(healthy ? HEALTHY_REFRESH_MS : DEGRADED_REFRESH_MS);
+      } catch {
+        const node = $("#freshness");
+        if (!cached && node) {
+          node.className = "freshness stale";
+          const label = node.querySelector("span:last-child");
+          if (label) label.textContent = "Live status delayed · retrying";
+        }
+        scheduleRecovery(DEGRADED_REFRESH_MS);
       }
-    }
+    })().finally(() => { recoveryInFlight = null; });
+    return recoveryInFlight;
   }
 
   function applyPreset(preset) {
@@ -144,28 +174,32 @@
     const button = $("#export-saved");
     button.disabled = true;
     button.textContent = "Building export…";
-    const rows = await Promise.all(keys.map(async key => {
-      try {
-        const item = await fetchJson(`/api/families/${encodeURIComponent(key)}?trust=all`, 2);
-        const first = item.openings?.[0] || {};
-        return [item.company, item.title, tracking[key] || "saved", first.apply_url || "", item.latest_posted_at || "", item.last_verified_at || ""];
-      } catch { return ["", key, tracking[key] || "saved", "", "", ""]; }
-    }));
-    const csv = [["Company", "Role", "Status", "Application URL", "Employer posted", "Last checked"], ...rows]
-      .map(row => row.map(csvCell).join(",")).join("\n");
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    link.download = `gaia-saved-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-    button.disabled = false;
-    button.textContent = "Export CSV";
+    try {
+      const rows = await Promise.all(keys.map(async key => {
+        try {
+          const item = await fetchJson(`/api/families/${encodeURIComponent(key)}?trust=all`, 2);
+          const first = item.openings?.[0] || {};
+          return [item.company, item.title, tracking[key] || "saved", first.apply_url || "", item.latest_posted_at || "", item.last_verified_at || ""];
+        } catch { return ["", key, tracking[key] || "saved", "", "", ""]; }
+      }));
+      const csv = [["Company", "Role", "Status", "Application URL", "Employer posted", "Last checked"], ...rows]
+        .map(row => row.map(csvCell).join(",")).join("\n");
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      link.download = `gaia-saved-${new Date().toISOString().slice(0, 10)}.csv`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Export CSV";
+    }
   }
 
   function loadOutageController() {
-    if (document.querySelector('script[data-gaia-outage-controller]')) return;
+    const alreadyLoaded = [...document.scripts].some(script => script.src.includes("/assets/outage-controller.js"));
+    if (alreadyLoaded) return;
     const script = document.createElement("script");
-    script.src = "/assets/outage-controller.js?v=1.2.0";
+    script.src = "/assets/outage-controller.js?v=1.2.1";
     script.dataset.gaiaOutageController = "true";
     script.async = true;
     document.head.appendChild(script);
@@ -175,9 +209,13 @@
     const preset = event.target.closest("[data-preset]");
     if (preset) applyPreset(preset.dataset.preset);
   });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearTimeout(recoveryTimer);
+    else recoverLiveSummary();
+  });
+  window.addEventListener("online", recoverLiveSummary);
   $("#copy-search")?.addEventListener("click", copySearch);
   $("#export-saved")?.addEventListener("click", exportSaved);
   loadOutageController();
   recoverLiveSummary();
-  setInterval(recoverLiveSummary, 15000);
 })();
