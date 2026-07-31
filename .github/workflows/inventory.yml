@@ -38,6 +38,7 @@ jobs:
     environment: production
     outputs:
       state: ${{ steps.gate.outputs.state }}
+      exit_code: ${{ steps.gate.outputs.exit_code }}
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
@@ -66,13 +67,24 @@ jobs:
         run: |
           if [ "${{ steps.config.outputs.configured }}" != true ]; then
             echo "state=invalid" >> "$GITHUB_OUTPUT"
+            echo "exit_code=2" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if python -m gaia.wait_for_database --timeout-seconds 600; then
-            echo "state=ready" >> "$GITHUB_OUTPUT"
-          else
-            echo "state=recovering" >> "$GITHUB_OUTPUT"
-          fi
+
+          set +e
+          python -m gaia.wait_for_database --timeout-seconds 600
+          code=$?
+          set -e
+
+          case "$code" in
+            0) state=ready ;;
+            1) state=recovering ;;
+            2) state=invalid ;;
+            *) state=failed ;;
+          esac
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "Database readiness classified as $state (exit $code)."
 
   repair:
     needs: database_gate
@@ -229,10 +241,13 @@ jobs:
           description="All provider inventory lanes completed"
           if [ "$gate" = invalid ]; then
             state=failure
-            description="Production database configuration is missing"
+            description="Production database configuration or credentials are invalid"
           elif [ "$gate" = recovering ]; then
             state=pending
             description="Database recovery active; inventory fanout suppressed"
+          elif [ "$gate" = failed ]; then
+            state=failure
+            description="Database readiness probe failed unexpectedly"
           elif [ "$gate" != ready ]; then
             state=failure
             description="Database readiness gate did not complete"
