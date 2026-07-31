@@ -6,17 +6,36 @@ from gaia.production_smoke import Probe, evaluate, snapshot_is_usable
 
 def probes() -> dict[str, Probe]:
     return {
-        "index": Probe(200, '<script src="emergency-outage.js"></script><script src="api-resilience.js"></script>'),
+        "index": Probe(
+            200,
+            '<script src="emergency-outage.js"></script><script src="api-resilience.js"></script>',
+        ),
         "emergency": Probe(200, "const MAX_EMERGENCY_AGE_MS = 1;"),
-        "controller": Probe(200, "function liveHealthProbe(){ return new XMLHttpRequest(); }"),
-        "snapshot": Probe(200, json.dumps({
-            "generated_at": datetime.now(UTC).isoformat(),
-            "max_stale_seconds": 86400,
-            "family_index": [{"family_key": "a"}],
-            "family_index_total": 1,
-            "family_index_complete": True,
-        })),
-        "health": Probe(200, json.dumps({"ok": True, "stale": False, "inventory": {"healthy": True}})),
+        "controller": Probe(
+            200, "function liveHealthProbe(){ return new XMLHttpRequest(); }"
+        ),
+        "snapshot": Probe(
+            200,
+            json.dumps(
+                {
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "max_stale_seconds": 86400,
+                    "family_index": [{"family_key": "a"}],
+                    "family_index_total": 1,
+                    "family_index_complete": True,
+                }
+            ),
+        ),
+        "health": Probe(
+            200,
+            json.dumps(
+                {
+                    "ok": True,
+                    "stale": False,
+                    "inventory": {"healthy": True, "fresh": 6, "total": 6},
+                }
+            ),
+        ),
         "stats": Probe(200, "{}"),
         "families": Probe(200, json.dumps({"items": [], "total": 0})),
     }
@@ -26,9 +45,39 @@ def test_healthy_contract_succeeds() -> None:
     assert evaluate(probes()).state == "success"
 
 
-def test_outage_requires_a_complete_nonempty_snapshot() -> None:
+def test_live_degraded_inventory_is_pending_not_healthy() -> None:
     evidence = probes()
-    evidence["health"] = Probe(500, "internal error")
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": False,
+                "stale": False,
+                "inventory": {"healthy": False, "fresh": 5, "total": 6},
+            }
+        ),
+    )
+
+    result = evaluate(evidence)
+
+    assert result.state == "pending"
+    assert result.description == "Production reachable; inventory catch-up 5/6 fresh"
+
+
+def test_truthful_database_outage_requires_a_complete_nonempty_snapshot() -> None:
+    evidence = probes()
+    evidence["health"] = Probe(
+        503,
+        json.dumps(
+            {
+                "ok": False,
+                "stale": True,
+                "reason": "database_unavailable",
+                "inventory": {"healthy": False, "total": 0},
+                "progress": {"stage": "database-recovery"},
+            }
+        ),
+    )
     assert evaluate(evidence).state == "pending"
     payload = json.loads(evidence["snapshot"].body)
     payload["family_index_complete"] = False
@@ -36,6 +85,16 @@ def test_outage_requires_a_complete_nonempty_snapshot() -> None:
     result = evaluate(evidence)
     assert result.state == "failure"
     assert "first-visit inventory snapshot is unusable" in result.description
+
+
+def test_generic_server_failure_is_not_mislabeled_database_recovery() -> None:
+    evidence = probes()
+    evidence["health"] = Probe(500, "internal error")
+
+    result = evaluate(evidence)
+
+    assert result.state == "failure"
+    assert "unclassified server failure" in result.description
 
 
 def test_snapshot_rejects_duplicate_blank_or_mismatched_family_indexes() -> None:
@@ -64,17 +123,74 @@ def test_snapshot_rejects_stale_future_and_unbounded_expiry() -> None:
     assert snapshot_is_usable(Probe(200, json.dumps(payload)), now=now) is False
 
 
-def test_live_health_cannot_be_stale_or_dishonest() -> None:
+def test_live_health_cannot_be_stale_dishonest_or_contradictory() -> None:
     evidence = probes()
-    evidence["health"] = Probe(200, json.dumps({"ok": True, "stale": True, "inventory": {"healthy": True}}))
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": True,
+                "stale": True,
+                "inventory": {"healthy": True, "fresh": 6, "total": 6},
+            }
+        ),
+    )
     assert evaluate(evidence).description == "Health API returned stale data as a live response"
-    evidence["health"] = Probe(200, json.dumps({"ok": True, "inventory": {"healthy": False}}))
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": True,
+                "stale": False,
+                "inventory": {"healthy": False, "fresh": 5, "total": 6},
+            }
+        ),
+    )
     assert "dishonestly" in evaluate(evidence).description
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": False,
+                "stale": False,
+                "inventory": {"healthy": True, "fresh": 6, "total": 6},
+            }
+        ),
+    )
+    assert "contradictory" in evaluate(evidence).description
+
+
+def test_live_health_requires_nonempty_consistent_inventory_counts() -> None:
+    evidence = probes()
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": False,
+                "stale": False,
+                "inventory": {"healthy": False, "fresh": 0, "total": 0},
+            }
+        ),
+    )
+    assert evaluate(evidence).state == "failure"
+    evidence["health"] = Probe(
+        200,
+        json.dumps(
+            {
+                "ok": False,
+                "stale": False,
+                "inventory": {"healthy": False, "fresh": 7, "total": 6},
+            }
+        ),
+    )
+    assert evaluate(evidence).state == "failure"
 
 
 def test_families_total_cannot_be_smaller_than_returned_page() -> None:
     evidence = probes()
-    evidence["families"] = Probe(200, json.dumps({"items": [{"family_key": "a"}], "total": 0}))
+    evidence["families"] = Probe(
+        200, json.dumps({"items": [{"family_key": "a"}], "total": 0})
+    )
     assert evaluate(evidence).state == "failure"
 
 
