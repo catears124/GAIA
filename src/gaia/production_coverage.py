@@ -60,11 +60,9 @@ def _attention_reason(row: dict[str, Any], *, now: datetime) -> str | None:
     if last_complete is None:
         return "never_completed"
     interval = _integer(row.get("interval_seconds"))
-    if interval is not None and interval > 0:
+    if interval is not None and interval > 0 and last_complete < now - timedelta(seconds=interval * 2):
         lease = _timestamp(row.get("lease_expires_at"))
-        running = lease is not None and lease > now
-        if not running and last_complete < now - timedelta(seconds=interval * 2):
-            return "overdue"
+        return "overdue_running" if lease is not None and lease > now else "overdue"
     return None
 
 
@@ -118,12 +116,29 @@ def evaluate_coverage(
                 SourceAttention(
                     source=source,
                     reason=reason,
-                    status=(str(raw.get("crawl_status") or raw.get("status")) if raw.get("crawl_status") or raw.get("status") else None),
-                    last_complete_at=(str(raw["last_complete_at"]) if raw.get("last_complete_at") else None),
+                    status=(
+                        str(raw.get("crawl_status") or raw.get("status"))
+                        if raw.get("crawl_status") or raw.get("status")
+                        else None
+                    ),
+                    last_complete_at=(
+                        str(raw["last_complete_at"])
+                        if raw.get("last_complete_at")
+                        else None
+                    ),
                 )
             )
 
     attention.sort(key=lambda item: (item.reason, item.source))
+    if unhealthy > len(attention):
+        return CoverageReport(
+            "failure",
+            f"Coverage diagnostics omitted {unhealthy - len(attention)} unhealthy configured source",
+            total,
+            fresh,
+            unhealthy,
+            attention,
+        )
     if health.get("ok") is True and (unhealthy or attention):
         return CoverageReport(
             "failure",
@@ -135,9 +150,11 @@ def evaluate_coverage(
         )
     if unhealthy or attention:
         count = max(unhealthy, len(attention))
+        noun = "source" if count == 1 else "sources"
+        verb = "needs" if count == 1 else "need"
         return CoverageReport(
             "pending",
-            f"Inventory catch-up {fresh}/{total}; {count} source{'s' if count != 1 else ''} need attention",
+            f"Inventory catch-up {fresh}/{total}; {count} {noun} {verb} attention",
             total,
             fresh,
             unhealthy,
@@ -172,7 +189,9 @@ def main() -> None:
         health = json.loads(args.health.read_text(encoding="utf-8"))
         coverage = json.loads(args.coverage.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        report = CoverageReport("failure", f"Could not parse production evidence: {error}", 0, 0, 0, [])
+        report = CoverageReport(
+            "failure", f"Could not parse production evidence: {error}", 0, 0, 0, []
+        )
     else:
         report = evaluate_coverage(health, coverage)
     payload = json.dumps(asdict(report), separators=(",", ":"), sort_keys=True)
