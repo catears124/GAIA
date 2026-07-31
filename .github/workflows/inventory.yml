@@ -26,14 +26,60 @@ permissions:
   contents: read
   statuses: write
 
-# PostgreSQL source leases are the data concurrency boundary. Limit runner fan-out
-# so a Supabase restart cannot turn ten simultaneous reconnect storms into a longer outage.
+concurrency:
+  group: production-inventory
+  cancel-in-progress: true
+
 jobs:
+  database_gate:
+    name: Check production database readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: production
+    outputs:
+      state: ${{ steps.gate.outputs.state }}
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Validate database configuration
+        id: config
+        shell: bash
+        run: |
+          if [ -z "$GAIA_DATABASE_URL" ]; then
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install GAIA
+        if: steps.config.outputs.configured == 'true'
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Probe database once for the whole workflow
+        id: gate
+        shell: bash
+        run: |
+          if [ "${{ steps.config.outputs.configured }}" != true ]; then
+            echo "state=invalid" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if python -m gaia.wait_for_database --timeout-seconds 600; then
+            echo "state=ready" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=recovering" >> "$GITHUB_OUTPUT"
+          fi
+
   repair:
-    if: github.event_name != 'schedule'
+    needs: database_gate
+    if: github.event_name != 'schedule' && needs.database_gate.outputs.state == 'ready'
     name: Repair production query indexes
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
@@ -54,8 +100,6 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Wait through transient database recovery
-        run: python -m gaia.wait_for_database --timeout-seconds 600
       - name: Repair postings indexes with retries
         shell: bash
         run: |
@@ -68,13 +112,15 @@ jobs:
               echo "Index repair failed after three attempts." >&2
               exit 1
             fi
-            python -m gaia.wait_for_database --timeout-seconds 300
+            python -m gaia.wait_for_database --timeout-seconds 180
           done
 
   inventory:
+    needs: database_gate
+    if: needs.database_gate.outputs.state == 'ready'
     name: Inventory · ${{ matrix.lane }}
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    timeout-minutes: 18
     environment: production
     strategy:
       fail-fast: false
@@ -141,8 +187,6 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Wait through transient database recovery
-        run: python -m gaia.wait_for_database --timeout-seconds 600
       - name: Drain due employer boards with bounded retries
         shell: bash
         run: |
@@ -164,12 +208,12 @@ jobs:
               echo "${{ matrix.lane }} failed after three attempts." >&2
               exit 1
             fi
-            python -m gaia.wait_for_database --timeout-seconds 300
+            python -m gaia.wait_for_database --timeout-seconds 180
           done
 
   status:
     name: Publish inventory pulse status
-    needs: [repair, inventory]
+    needs: [database_gate, repair, inventory]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -180,11 +224,21 @@ jobs:
       - name: Publish final commit status
         shell: bash
         run: |
+          gate="${{ needs.database_gate.outputs.state }}"
           state=success
           description="All provider inventory lanes completed"
-          if [ "${{ needs.inventory.result }}" != success ]; then
+          if [ "$gate" = invalid ]; then
             state=failure
-            description="One or more provider inventory lanes failed after recovery retries"
+            description="Production database configuration is missing"
+          elif [ "$gate" = recovering ]; then
+            state=pending
+            description="Database recovery active; inventory fanout suppressed"
+          elif [ "$gate" != ready ]; then
+            state=failure
+            description="Database readiness gate did not complete"
+          elif [ "${{ needs.inventory.result }}" != success ]; then
+            state=failure
+            description="One or more provider inventory lanes failed after retries"
           elif [ "${{ needs.repair.result }}" != success ] && [ "${{ needs.repair.result }}" != skipped ]; then
             state=failure
             description="Production index repair failed"
