@@ -7,23 +7,60 @@
   const REQUEST_TIMEOUT_MS = 8000;
   const HEALTHY_REFRESH_MS = 30000;
   const DEGRADED_REFRESH_MS = 10000;
+  const MOBILE_QUERY = window.matchMedia("(max-width: 720px)");
   let recoveryTimer = null;
   let recoveryInFlight = null;
 
   const style = document.createElement("style");
+  style.dataset.gaiaMobileProduct = "true";
   style.textContent = `
     .quick-actions{padding:.75rem .8rem .85rem;display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem!important;margin:0!important;border-top:1px solid var(--line)}
     .quick-actions>span{grid-column:1/-1;margin:0!important;font-size:.62rem!important}
     .quick-actions button{width:100%;min-width:0;min-height:38px;padding:.45rem .55rem!important;font-size:.72rem!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .quick-actions .utility{margin-left:0!important}
+    .mobile-filter-disclosure{display:contents}
+    .mobile-filter-summary{display:none}
     @media(max-width:720px){
-      .quick-actions{grid-template-columns:repeat(2,minmax(0,1fr));padding:.7rem;gap:.45rem!important}
-      .quick-actions>span{grid-column:1/-1}
-      .quick-actions button{font-size:.68rem!important;min-height:40px}
-      .quick-actions .utility{grid-column:1/-1}
-      .search-shell{overflow:hidden}
-      .topbar-actions{min-width:0}
-      .freshness{max-width:58vw;white-space:normal;line-height:1.25}
+      body{padding-bottom:env(safe-area-inset-bottom)}
+      .topbar{min-height:0!important;grid-template-columns:auto minmax(0,1fr) auto!important;gap:.35rem!important;padding:.35rem .75rem .25rem!important}
+      .brand{font-size:.8rem}
+      .topbar nav{grid-column:2;grid-row:1;justify-self:center!important;min-width:0;gap:0!important}
+      .nav-link{min-height:42px;padding:.5rem .58rem!important;font-size:.74rem!important}
+      .topbar-actions{display:contents!important}
+      .theme-toggle{grid-column:3;grid-row:1;min-width:36px!important;width:36px!important;height:36px!important;padding:0!important}
+      .freshness{grid-column:1/-1!important;grid-row:2;max-width:none!important;min-height:18px!important;padding:0 0 .1rem!important;font-size:.64rem!important;line-height:1.15!important;white-space:nowrap!important}
+      main{padding:0 .75rem calc(6rem + env(safe-area-inset-bottom))!important}
+      .page-intro{padding:1rem 0 .85rem!important}
+      .page-intro h1{max-width:100%;font-size:clamp(2rem,8.6vw,2.55rem)!important;line-height:.98!important;letter-spacing:-.055em!important}
+      .page-intro p{font-size:.78rem!important}
+      .metrics{margin-top:.75rem!important;border-radius:10px}
+      .metrics div{padding:.55rem .6rem!important}
+      .metrics strong{font-size:1.08rem!important}
+      .metrics span{font-size:.6rem!important;line-height:1.2}
+      .search-shell{display:flex;flex-direction:column;margin-top:.75rem!important;overflow:hidden;border-radius:12px}
+      .search-field{order:1;height:46px!important}
+      .quick-actions{order:2!important;display:flex!important;grid-template-columns:none!important;flex-wrap:nowrap!important;overflow-x:auto;padding:.55rem .6rem!important;gap:.4rem!important;margin:0!important;border-top:0!important;border-bottom:1px solid var(--line);scroll-snap-type:x proximity;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+      .quick-actions::-webkit-scrollbar{display:none}
+      .quick-actions>span{display:none!important}
+      .quick-actions button{width:auto!important;min-width:max-content!important;flex:0 0 auto;min-height:36px!important;padding:.45rem .72rem!important;font-size:.68rem!important;scroll-snap-align:start}
+      .quick-actions .utility{grid-column:auto!important;margin-left:0!important}
+      .mobile-filter-disclosure{order:3;display:block;border:0;background:var(--surface)}
+      .mobile-filter-summary{min-height:46px;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.65rem .8rem;list-style:none;color:var(--ink);font-size:.72rem;font-weight:800;cursor:pointer;user-select:none}
+      .mobile-filter-summary::-webkit-details-marker{display:none}
+      .filter-summary-meta{display:flex;align-items:center;gap:.55rem;color:var(--muted);font-size:.65rem;font-weight:700}
+      .mobile-filter-disclosure.has-active-filters .filter-summary-meta{color:var(--green)}
+      .filter-chevron{width:.52rem;height:.52rem;border-right:2px solid currentColor;border-bottom:2px solid currentColor;transform:rotate(45deg) translateY(-2px);transition:transform .16s ease}
+      .mobile-filter-disclosure[open] .filter-chevron{transform:rotate(225deg) translate(-1px,-1px)}
+      .mobile-filter-disclosure:not([open])>.filter-grid{display:none!important}
+      .mobile-filter-disclosure[open]>.filter-grid{display:grid!important}
+      .filter-grid label{padding:.5rem .6rem!important}
+      .filter-grid select,.filter-grid label>input[type="search"]{height:34px!important;font-size:.74rem!important}
+      .results-head{padding:.9rem 0 .45rem!important}
+      #result-note{display:none!important}
+      .job-list{border-radius:12px}
+      .job-row{padding:.72rem .75rem!important}
+      .pagination{padding-bottom:calc(5.5rem + env(safe-area-inset-bottom))!important}
+      .toast{bottom:calc(5.25rem + env(safe-area-inset-bottom))!important;max-width:calc(100% - 1.5rem);text-align:center}
     }
   `;
   document.head.appendChild(style);
@@ -130,6 +167,71 @@
     return recoveryInFlight;
   }
 
+  function installMobileFilterDisclosure() {
+    const grid = $(".filter-grid");
+    if (!grid || grid.closest(".mobile-filter-disclosure")) return;
+
+    const details = document.createElement("details");
+    details.className = "mobile-filter-disclosure";
+    details.id = "advanced-filters";
+    details.dataset.mobileOpen = "false";
+
+    const summary = document.createElement("summary");
+    summary.className = "mobile-filter-summary";
+    summary.innerHTML = '<span>Filters</span><span class="filter-summary-meta"><span id="active-filter-count">All jobs</span><span class="filter-chevron" aria-hidden="true"></span></span>';
+
+    grid.parentNode.insertBefore(details, grid);
+    details.append(summary, grid);
+
+    const defaults = {
+      trust: "all",
+      category: "",
+      company: "",
+      location: "",
+      target: "",
+      "posted-within": "0",
+      sort: "newest",
+      remote: false,
+    };
+
+    const updateCount = () => {
+      let count = 0;
+      for (const [id, defaultValue] of Object.entries(defaults)) {
+        const control = document.getElementById(id);
+        if (!control) continue;
+        const value = control.type === "checkbox" ? control.checked : control.value;
+        if (value !== defaultValue) count += 1;
+      }
+      const countNode = document.getElementById("active-filter-count");
+      if (countNode) countNode.textContent = count ? `${count} active` : "All jobs";
+      details.classList.toggle("has-active-filters", count > 0);
+      summary.setAttribute("aria-label", count ? `Filters, ${count} active` : "Filters, none active");
+    };
+
+    const syncViewport = event => {
+      if (event.matches) {
+        details.open = details.dataset.mobileOpen === "true";
+      } else {
+        details.open = true;
+      }
+    };
+
+    details.addEventListener("toggle", () => {
+      if (MOBILE_QUERY.matches) details.dataset.mobileOpen = String(details.open);
+    });
+    grid.addEventListener("change", updateCount);
+    grid.addEventListener("input", updateCount);
+    $("#clear-filters")?.addEventListener("click", () => setTimeout(updateCount, 0));
+    document.addEventListener("click", event => {
+      if (event.target.closest("[data-preset]")) setTimeout(updateCount, 0);
+    });
+    if (MOBILE_QUERY.addEventListener) MOBILE_QUERY.addEventListener("change", syncViewport);
+    else MOBILE_QUERY.addListener(syncViewport);
+
+    syncViewport(MOBILE_QUERY);
+    updateCount();
+  }
+
   function applyPreset(preset) {
     const presets = {
       new: { "posted-within": "1", trust: "verified" },
@@ -147,7 +249,7 @@
       else node.value = String(value);
     }
     ($("#trust") || $("#search"))?.dispatchEvent(new Event("change", { bubbles: true }));
-    $("#results")?.scrollIntoView({ behavior: "smooth" });
+    $("#results")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function copySearch() {
@@ -216,6 +318,7 @@
   window.addEventListener("online", recoverLiveSummary);
   $("#copy-search")?.addEventListener("click", copySearch);
   $("#export-saved")?.addEventListener("click", exportSaved);
+  installMobileFilterDisclosure();
   loadOutageController();
   recoverLiveSummary();
 })();
