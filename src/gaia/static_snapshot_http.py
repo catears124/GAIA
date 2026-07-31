@@ -41,6 +41,19 @@ def _key(path: str, **params: object) -> str:
     return f"{path}?{query}" if query else path
 
 
+def _family_total(payload: dict[str, object], *, page: int) -> int:
+    raw_total = payload.get("total")
+    if isinstance(raw_total, bool):
+        raise SnapshotExportError(f"families page {page} returned boolean total")
+    try:
+        total = int(raw_total)
+    except (TypeError, ValueError) as error:
+        raise SnapshotExportError(f"families page {page} returned invalid total") from error
+    if total <= 0:
+        raise SnapshotExportError(f"families page {page} returned non-positive total")
+    return total
+
+
 def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str, object]:
     base_url = base_url.rstrip("/")
     with httpx.Client(
@@ -55,6 +68,9 @@ def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str,
             raise SnapshotExportError("public health endpoint is not live and healthy")
         if inventory.get("healthy") is not True or health.get("stale") is True:
             raise SnapshotExportError("public inventory is unhealthy or stale")
+        inventory_total = int(inventory.get("total") or 0)
+        if inventory_total <= 0:
+            raise SnapshotExportError("public health endpoint reported empty inventory")
 
         responses: dict[str, object] = {
             "/api/health": health,
@@ -70,7 +86,7 @@ def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str,
 
         family_index: list[dict[str, object]] = []
         seen: set[str] = set()
-        expected_total = 0
+        expected_total: int | None = None
         max_pages = max(1, int(os.getenv("GAIA_STATIC_SNAPSHOT_MAX_PAGES", "100")))
         for page in range(1, max_pages + 1):
             payload = _request(
@@ -83,23 +99,37 @@ def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str,
             rows = payload.get("items")
             if not isinstance(rows, list):
                 raise SnapshotExportError("families endpoint returned a non-list items field")
-            expected_total = max(expected_total, int(payload.get("total") or 0))
-            for raw in rows:
-                if not isinstance(raw, dict):
-                    continue
-                key = str(raw.get("family_key") or "")
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                family_index.append(_compact_family(raw))
+            page_total = _family_total(payload, page=page)
+            if expected_total is None:
+                expected_total = page_total
+            elif page_total != expected_total:
+                raise SnapshotExportError(
+                    f"public family total changed during export: expected={expected_total} "
+                    f"page={page} reported={page_total}"
+                )
             if page == 1:
                 responses["/api/families"] = payload
-            if not rows or len(family_index) >= expected_total:
+            if not rows and len(family_index) < expected_total:
+                raise SnapshotExportError(
+                    f"public family export ended early: exported={len(family_index)} "
+                    f"expected={expected_total} page={page}"
+                )
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    raise SnapshotExportError(f"families page {page} returned a non-object row")
+                key = str(raw.get("family_key") or "").strip()
+                if not key:
+                    raise SnapshotExportError(f"families page {page} returned a blank family key")
+                if key in seen:
+                    raise SnapshotExportError(f"families page {page} repeated family key {key}")
+                seen.add(key)
+                family_index.append(_compact_family(raw))
+            if len(family_index) >= expected_total:
                 break
 
-        if expected_total <= 0 or not family_index:
+        if expected_total is None or not family_index:
             raise SnapshotExportError("public API returned no visible families")
-        if len(family_index) < expected_total:
+        if len(family_index) != expected_total:
             raise SnapshotExportError(
                 f"public family export incomplete: exported={len(family_index)} expected={expected_total}"
             )
