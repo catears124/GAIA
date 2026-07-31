@@ -6,6 +6,7 @@
   const CACHEABLE = new Set(["health", "stats", "facets", "families", "coverage", "universe"]);
   const MAX_STALE_MS = 24 * 60 * 60 * 1000;
   const MAX_CACHE_ENTRIES = 120;
+  const TARGET_MATCHES = new Set(["exact", "year_confirmed", "source_confirmed"]);
   const nativeFetch = window.fetch.bind(window);
   let staleBanner;
   let staticSnapshotPromise;
@@ -122,17 +123,20 @@
     return Math.max(Number.isFinite(posted) ? posted : 0, Number.isFinite(found) ? found : 0);
   }
 
+  function verifiedActivity(item) {
+    const value = Date.parse(item.last_verified_at || "");
+    return Number.isFinite(value) ? value : 0;
+  }
+
   function matchesTarget(item, target) {
     if (!target) return true;
-    const year = Number(item.year || 0);
-    const season = String(item.season || "").toLowerCase();
-    if (target === "exact") return year === 2027 && season === "summer";
-    if (target === "default" || target === "year_confirmed") return year === 2027;
-    return true;
+    const match = String(item.target_match || "");
+    if (target === "default") return TARGET_MATCHES.has(match);
+    return match === target;
   }
 
   function filterFamilyIndex(index, url) {
-    const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+    const queryTokens = (url.searchParams.get("q") || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
     const category = url.searchParams.get("category") || "";
     const target = url.searchParams.get("target") || "";
     const trust = url.searchParams.get("trust") || "all";
@@ -146,12 +150,12 @@
       const locations = Array.isArray(item.locations) ? item.locations : [];
       const locationText = locations.join(" ").toLowerCase();
       const haystack = `${item.title || ""} ${item.company || ""} ${locationText}`.toLowerCase();
-      if (q && !haystack.includes(q)) return false;
+      if (queryTokens.some(token => !haystack.includes(token))) return false;
       if (category && item.category !== category) return false;
       if (!matchesTarget(item, target)) return false;
       if (trust === "verified" && !item.verified) return false;
       if (trust === "leads" && item.verified) return false;
-      if (company && item.company !== company) return false;
+      if (company && String(item.company || "").toLowerCase() !== company.toLowerCase()) return false;
       if (locationQuery && !locationText.includes(locationQuery)) return false;
       if (remote && !(item.remote || locationText.includes("remote"))) return false;
       if (cutoff && itemActivity(item) < cutoff) return false;
@@ -168,12 +172,13 @@
     items.sort((left, right) => {
       if (sort === "company") {
         return String(left.company || "").localeCompare(String(right.company || "")) ||
-          String(left.title || "").localeCompare(String(right.title || ""));
+          String(left.title || "").localeCompare(String(right.title || "")) ||
+          String(left.family_key || "").localeCompare(String(right.family_key || ""));
       }
       if (sort === "verified") {
-        return Date.parse(right.last_verified_at || "") - Date.parse(left.last_verified_at || "");
+        return verifiedActivity(right) - verifiedActivity(left) || itemActivity(right) - itemActivity(left);
       }
-      return itemActivity(right) - itemActivity(left);
+      return itemActivity(right) - itemActivity(left) || verifiedActivity(right) - verifiedActivity(left);
     });
     const start = (page - 1) * pageSize;
     return { items: items.slice(start, start + pageSize), total: items.length, page, page_size: pageSize, offline: true };
@@ -187,15 +192,26 @@
     synthetic.searchParams.delete("location");
     synthetic.searchParams.delete("page");
     synthetic.searchParams.delete("page_size");
-    const counts = new Map();
+    const companyCounts = new Map();
+    const categoryCounts = new Map();
+    let remoteCount = 0;
     for (const item of filterFamilyIndex(snapshot.family_index, synthetic)) {
       const company = String(item.company || "").trim();
-      if (company) counts.set(company, (counts.get(company) || 0) + 1);
+      const category = String(item.category || "").trim();
+      const locations = Array.isArray(item.locations) ? item.locations.join(" ").toLowerCase() : "";
+      if (company) companyCounts.set(company, (companyCounts.get(company) || 0) + 1);
+      if (category) categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+      if (item.remote || locations.includes("remote")) remoteCount += 1;
     }
-    const companies = [...counts.entries()]
+    const ranked = counts => [...counts.entries()]
       .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
       .map(([value, count]) => ({ value, count }));
-    return { companies, offline: true };
+    return {
+      companies: ranked(companyCounts),
+      categories: ranked(categoryCounts),
+      remote_count: remoteCount,
+      offline: true,
+    };
   }
 
   function derivedSnapshotPayload(snapshot, request) {
