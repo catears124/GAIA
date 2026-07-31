@@ -10,6 +10,33 @@ from urllib.parse import urlencode
 from .product_api import live_facets, live_families, live_health, live_stats
 
 DEFAULT_OUTPUT = Path(__file__).with_name("frontend") / "last-known-inventory.json"
+FAMILY_FIELDS = (
+    "family_key",
+    "title",
+    "company",
+    "category",
+    "target_match",
+    "year",
+    "season",
+    "locations",
+    "opening_count",
+    "direct_openings",
+    "backstop_openings",
+    "verified",
+    "quality",
+    "latest_posted_at",
+    "posted_precision",
+    "first_detected_at",
+    "last_verified_at",
+)
+OPENING_FIELDS = (
+    "apply_url",
+    "source",
+    "source_mode",
+    "location",
+    "posted_at",
+    "first_detected_at",
+)
 
 
 def _key(path: str, **params: object) -> str:
@@ -42,8 +69,18 @@ def _families(**overrides: object) -> dict[str, object]:
     return live_families(**values)  # type: ignore[arg-type]
 
 
+def _compact_family(raw: dict[str, object]) -> dict[str, object]:
+    compact = {name: raw[name] for name in FAMILY_FIELDS if name in raw}
+    openings: list[dict[str, object]] = []
+    for opening in raw.get("openings") or []:
+        if isinstance(opening, dict):
+            openings.append({name: opening[name] for name in OPENING_FIELDS if name in opening})
+    compact["openings"] = openings
+    return compact
+
+
 def _family_index() -> tuple[list[dict[str, object]], int, bool]:
-    """Export the visible family feed once for offline filtering and pagination."""
+    """Export a compact visible-family feed for offline filtering and details."""
 
     page_size = 100
     max_pages = max(1, int(os.getenv("GAIA_STATIC_SNAPSHOT_MAX_PAGES", "100")))
@@ -64,7 +101,7 @@ def _family_index() -> tuple[list[dict[str, object]], int, bool]:
             if not key or key in seen:
                 continue
             seen.add(key)
-            items.append(raw)
+            items.append(_compact_family(raw))
         if not rows or len(items) >= expected_total:
             break
 
