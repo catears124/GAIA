@@ -96,3 +96,39 @@ def test_family_drawer_uses_snapshot_details_when_live_api_is_down() -> None:
     assert 'opening?.source_mode || ""' in script
     assert '"X-GAIA-Offline-Detail": "1"' in script
     assert "copy.openings = openings.filter" in script
+
+
+def test_outage_controller_probes_live_health_without_fetch_fallbacks() -> None:
+    script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
+    assert "new XMLHttpRequest()" in script
+    assert 'xhr.open("GET", `/api/health?live_probe=${Date.now()}`' in script
+    assert "PROBE_TIMEOUT_MS" in script
+    assert "data.ok === true" in script
+    assert "data.inventory?.healthy !== false" in script
+    assert "data.stale !== true" in script
+
+
+def test_outage_controller_restores_pagination_after_recovery() -> None:
+    script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
+    assert "gaiaPreofflineDisabled" in script
+    assert "gaiaPreofflineLabel" in script
+    assert "restorePagination()" in script
+    assert "Inventory offline" in script
+
+
+def test_recovery_reload_is_guarded_against_loops() -> None:
+    script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
+    assert "RECOVERY_RELOAD_GUARD_MS" in script
+    assert 'RELOAD_GUARD_KEY = "gaia:last-recovery-reload"' in script
+    assert "sessionStorage.setItem" in script
+    assert "location.reload()" in script
+
+
+def test_cached_summary_is_never_styled_as_healthy() -> None:
+    script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
+    assert "truthfullyHealthy = !cached" in script
+    assert "health.ok === true" in script
+    assert "health.stale !== true" in script
+    assert 'node.classList.add(truthfullyHealthy ? "fresh" : "stale")' in script
+    assert "cached snapshot" in script
+    assert 'outage-controller.js?v=1.2.0' in script
