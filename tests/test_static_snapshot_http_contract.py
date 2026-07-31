@@ -72,7 +72,7 @@ def test_build_snapshot_rejects_total_drift(monkeypatch) -> None:
 
 def test_build_snapshot_rejects_duplicate_family_keys(monkeypatch) -> None:
     responses = prefix() + [
-        {"total": 2, "items": [family("a\")]},
+        {"total": 2, "items": [family("a")]},
         {"total": 2, "items": [family("a")]},
     ]
     monkeypatch.setattr(snapshot.httpx, "Client", lambda **kwargs: FakeClient(responses, **kwargs))
