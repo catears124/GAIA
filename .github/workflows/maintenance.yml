@@ -10,6 +10,7 @@ on:
       - "src/gaia/discovery.py"
       - "src/gaia/provider_discovery.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/wait_for_database.py"
   schedule:
     - cron: "11 * * * *"
   workflow_dispatch:
@@ -20,11 +21,51 @@ permissions:
 
 concurrency:
   group: gaia-production-maintenance
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
+  readiness:
+    name: Gate maintenance on database readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+      configuration_valid: ${{ steps.gate.outputs.configuration_valid }}
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "20"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Validate configuration and wait briefly for PostgreSQL
+        id: gate
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ -z "$GAIA_DATABASE_URL" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "configuration_valid=false" >> "$GITHUB_OUTPUT"
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            exit 0
+          fi
+          echo "configuration_valid=true" >> "$GITHUB_OUTPUT"
+          python -m pip install --disable-pip-version-check -e . >/dev/null
+          if python -m gaia.wait_for_database --timeout-seconds 120; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "PostgreSQL recovery is still active; maintenance fanout suppressed."
+          fi
+
   prepare:
     name: Migrate and maintain source queue
+    needs: readiness
+    if: needs.readiness.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
@@ -32,7 +73,7 @@ jobs:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
+      GAIA_DB_TIMEOUT: "120"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "0"
@@ -44,17 +85,8 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase URLs
-        shell: bash
-        run: |
-          test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
-            exit 1
-          }
-          test -n "$GAIA_MIGRATION_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
-            exit 1
-          }
+      - name: Require migration database URL
+        run: test -n "$GAIA_MIGRATION_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
       - name: Repair postings indexes
@@ -66,14 +98,15 @@ jobs:
 
   discovery:
     name: Employer census and source validation
-    needs: prepare
+    needs: [readiness, prepare]
+    if: needs.readiness.outputs.ready == 'true' && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
+      GAIA_DB_TIMEOUT: "120"
       GAIA_READ_ONLY: "0"
       GAIA_HTTP_TIMEOUT: "45"
       GAIA_ENABLE_DISCOVERY: "1"
@@ -94,7 +127,7 @@ jobs:
 
   status:
     name: Publish maintenance status
-    needs: [prepare, discovery]
+    needs: [readiness, prepare, discovery]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -107,8 +140,13 @@ jobs:
         run: |
           state=success
           description="Source queue and employer census maintained"
-          if [ "${{ needs.prepare.result }}" != "success" ] || \
-             [ "${{ needs.discovery.result }}" != "success" ]; then
+          if [ "${{ needs.readiness.outputs.configuration_valid }}" != "true" ]; then
+            state=failure
+            description="Production maintenance database configuration is invalid"
+          elif [ "${{ needs.readiness.outputs.ready }}" != "true" ]; then
+            state=pending
+            description="Database recovery active; production maintenance suppressed"
+          elif [ "${{ needs.prepare.result }}" != "success" ] || [ "${{ needs.discovery.result }}" != "success" ]; then
             state=failure
             description="Production maintenance or discovery failed"
           fi
@@ -118,7 +156,7 @@ jobs:
             --arg description "$description" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state, context:$context, description:$description, target_url:$target_url}')
-          curl --fail --silent --show-error \
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
             -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
