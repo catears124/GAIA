@@ -17,6 +17,11 @@ _PERMANENT_CONFIGURATION_ERRORS = (
     "invalid integer value",
     "invalid sslmode value",
     "could not translate host name",
+    "password authentication failed",
+    "role does not exist",
+    "database does not exist",
+    "no pg_hba.conf entry",
+    "invalid port number",
 )
 
 
@@ -28,12 +33,21 @@ def is_retryable_database_error(error: BaseException) -> bool:
 
 
 def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
-    """Wait through transient Supabase failover/restart windows without stampeding it."""
+    """Wait through transient Supabase failover/restart windows without stampeding it.
+
+    Exit codes are intentionally stable for workflow callers: 0 means ready, 1 means
+    transient recovery exceeded the deadline, and 2 means the connection configuration
+    is invalid and retrying cannot help.
+    """
 
     deadline = time.monotonic() + max(1, timeout_seconds)
     attempt = 0
     last_error = "database unavailable"
-    url = _database_url(None)
+    try:
+        url = _database_url(None)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"database configuration is invalid: {exc}", file=sys.stderr, flush=True)
+        return 2
 
     while time.monotonic() < deadline:
         attempt += 1
