@@ -1,8 +1,8 @@
 """Vercel entrypoint for the GAIA FastAPI application.
 
 The public deployment reads PostgreSQL through Supabase's transaction pooler.
-A recreated empty Supabase project is initialized through POSTGRES_URL_NON_POOLING
-and repopulated from GAIA's bundled public registries on the first cold start.
+A recreated empty Supabase project is initialized during ASGI startup, never during
+Vercel's build-time import check, and then repopulated from bundled public registries.
 """
 
 from __future__ import annotations
@@ -17,13 +17,12 @@ sys.path.insert(0, str(ROOT / "src"))
 if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_INITIAL_SYNC", "0")
     os.environ.setdefault("GAIA_READ_ONLY", "1")
-    # Vercel owns the only current database credentials after a Supabase recreation.
-    # Runtime migration is fingerprinted, advisory-locked, and uses the non-pooling URL.
-    os.environ.setdefault("GAIA_AUTO_MIGRATE", "1")
+    # Vercel imports the ASGI module while building. Real network/database work belongs
+    # exclusively to the startup handler, which is advisory-locked and fingerprinted.
+    os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")
     os.environ.setdefault("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1")
     os.environ.setdefault("GAIA_BOOTSTRAP_BUDGET_SECONDS", "38")
     os.environ.setdefault("GAIA_CANDIDATE_PROBE_LIMIT", "6")
-    # Public reads fail closed quickly during provider recovery.
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
