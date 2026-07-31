@@ -131,8 +131,8 @@ legacy._order_clause = _live_order_clause
 _remove_get_routes("/api/health", "/api/stats", "/api/families", "/api/facets")
 
 
-@app.get("/api/health")
-def live_health() -> dict[str, object] | JSONResponse:
+@app.get("/api/health", response_model=None)
+def live_health():
     try:
         inventory = inventory_state(_health_database())
     except (psycopg.Error, OSError, TimeoutError, RuntimeError) as error:
