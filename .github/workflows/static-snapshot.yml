@@ -54,13 +54,14 @@ jobs:
         run: python -m gaia.wait_for_database --timeout-seconds 600
       - name: Export last-known public inventory
         run: python -m gaia.static_snapshot
-      - name: Validate snapshot
+      - name: Validate snapshot and offline index
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import json
           from pathlib import Path
+
           path = Path("src/gaia/frontend/last-known-inventory.json")
           payload = json.loads(path.read_text())
           responses = payload.get("responses", {})
@@ -71,7 +72,27 @@ jobs:
           families = responses["/api/families"]
           if not families.get("items"):
               raise SystemExit("snapshot contains no public roles")
-          print(f"snapshot responses={len(responses)} default_roles={len(families['items'])}")
+
+          index = payload.get("family_index")
+          expected = int(payload.get("family_index_total") or 0)
+          complete = payload.get("family_index_complete") is True
+          if not isinstance(index, list) or not index:
+              raise SystemExit("snapshot contains no offline-search family index")
+          if not complete or len(index) < expected:
+              raise SystemExit(
+                  f"offline-search family index incomplete: exported={len(index)} expected={expected}"
+              )
+          keys = [str(item.get("family_key") or "") for item in index if isinstance(item, dict)]
+          if len(keys) != len(set(keys)) or any(not key for key in keys):
+              raise SystemExit("offline-search family index contains missing or duplicate keys")
+
+          size_mb = path.stat().st_size / 1_000_000
+          if size_mb > 15:
+              raise SystemExit(f"snapshot is unexpectedly large: {size_mb:.2f} MB")
+          print(
+              f"snapshot responses={len(responses)} default_roles={len(families['items'])} "
+              f"offline_roles={len(index)} size_mb={size_mb:.2f}"
+          )
           PY
       - name: Commit changed snapshot
         shell: bash
