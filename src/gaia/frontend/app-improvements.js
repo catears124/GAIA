@@ -155,12 +155,22 @@
     button.textContent = "Export CSV";
   }
 
+  function loadOutageController() {
+    if (document.querySelector('script[data-gaia-outage-controller]')) return;
+    const script = document.createElement("script");
+    script.src = "/assets/outage-controller.js?v=1.1.0";
+    script.dataset.gaiaOutageController = "true";
+    script.async = true;
+    document.head.appendChild(script);
+  }
+
   document.addEventListener("click", event => {
     const preset = event.target.closest("[data-preset]");
     if (preset) applyPreset(preset.dataset.preset);
   });
   $("#copy-search")?.addEventListener("click", copySearch);
   $("#export-saved")?.addEventListener("click", exportSaved);
+  loadOutageController();
   recoverLiveSummary();
   setInterval(recoverLiveSummary, 15000);
 })();
