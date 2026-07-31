@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
+import psycopg
 from fastapi import HTTPException, Query
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from . import api as legacy
+from .db import Database
 from .health import inventory_state
 from .universe import universe_summary
 
@@ -73,13 +76,67 @@ def _remove_get_routes(*paths: str) -> None:
     ]
 
 
+def _health_database() -> Database:
+    """Use a short, isolated timeout so health probes never inherit worker deadlines."""
+    database = Database(url=legacy.db.url, schema=legacy.db.schema, migrate=False)
+    configured = int(float(os.getenv("GAIA_HEALTH_DB_TIMEOUT", "4")))
+    database.timeout = max(1, min(configured, 10))
+    return database
+
+
+def _database_unavailable(error: Exception) -> JSONResponse:
+    """Return truthful, cache-resistant outage evidence instead of a hanging 500."""
+    return JSONResponse(
+        status_code=503,
+        headers={"Cache-Control": "no-store, max-age=0"},
+        content={
+            "ok": False,
+            "read_only": True,
+            "running": False,
+            "stale": True,
+            "reason": "database_unavailable",
+            "detail": type(error).__name__,
+            "progress": {
+                "mode": "continuous-inventory",
+                "stage": "database-recovery",
+                "completed": 0,
+                "total": 0,
+                "current": None,
+                "started_at": None,
+                "elapsed_seconds": 0,
+            },
+            "last_summary": None,
+            "data": {
+                "last_run": None,
+                "last_success_at": None,
+                "sources": 0,
+                "failing_sources": 0,
+            },
+            "inventory": {
+                "total": 0,
+                "fresh": 0,
+                "unhealthy": 0,
+                "running": 0,
+                "never_completed": 0,
+                "overdue": 0,
+                "degraded": 0,
+                "healthy": False,
+                "fresh_percent": 0.0,
+            },
+        },
+    )
+
+
 legacy._order_clause = _live_order_clause
 _remove_get_routes("/api/health", "/api/stats", "/api/families", "/api/facets")
 
 
 @app.get("/api/health")
-def live_health() -> dict[str, object]:
-    inventory = inventory_state(legacy.db)
+def live_health() -> dict[str, object] | JSONResponse:
+    try:
+        inventory = inventory_state(_health_database())
+    except (psycopg.Error, OSError, TimeoutError, RuntimeError) as error:
+        return _database_unavailable(error)
     fully_initialized = int(inventory["never_completed"]) == 0 and int(inventory["total"]) > 0
     watermark = inventory.get("coverage_watermark") if fully_initialized else None
     failing = int(inventory["unhealthy"])
@@ -88,6 +145,7 @@ def live_health() -> dict[str, object]:
         "ok": bool(inventory["healthy"]),
         "read_only": os.getenv("GAIA_READ_ONLY", "0") == "1",
         "running": running,
+        "stale": False,
         "progress": {
             "mode": "continuous-inventory",
             "stage": "crawling" if running else "scheduled",
