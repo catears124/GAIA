@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from gaia import wait_for_database as readiness
 
 
-class FakeDatabaseError(Exception):
-    def __init__(self, message: str, sqlstate: str | None = None) -> None:
-        super().__init__(message)
-        self.sqlstate = sqlstate
+class PermanentDatabaseError(psycopg.OperationalError):
+    @property
+    def sqlstate(self) -> str:
+        return "28P01"
 
 
 class _ReadyConnection:
@@ -42,9 +43,12 @@ def test_probe_emits_ready_result(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_probe_keeps_permanent_sqlstate_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(readiness, "_database_url", lambda _value: "postgresql://example")
-    error = readiness.psycopg.OperationalError("bad password")
-    error.sqlstate = "28P01"
-    monkeypatch.setattr(readiness.psycopg, "connect", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+    error = PermanentDatabaseError("bad password")
+    monkeypatch.setattr(
+        readiness.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
 
     result = readiness.probe_database(timeout_seconds=2, max_delay_seconds=1)
 
@@ -56,7 +60,11 @@ def test_probe_keeps_permanent_sqlstate_invalid(monkeypatch: pytest.MonkeyPatch)
 
 def test_probe_does_not_mislabel_internal_failure_as_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(readiness, "_database_url", lambda _value: "postgresql://example")
-    monkeypatch.setattr(readiness.psycopg, "connect", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("driver exploded")))
+    monkeypatch.setattr(
+        readiness.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("driver exploded")),
+    )
 
     result = readiness.probe_database(timeout_seconds=2, max_delay_seconds=1)
 
