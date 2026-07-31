@@ -31,6 +31,12 @@ class _Connection:
         return False
 
 
+class _DatabaseError(Exception):
+    def __init__(self, message: str, sqlstate: str | None = None) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
 def test_wait_for_database_recovers_after_transient_failures(monkeypatch):
     attempts = 0
     clock = _Clock()
@@ -73,9 +79,15 @@ def test_wait_for_database_exits_after_deadline(monkeypatch):
 
 
 def test_sqlstate_authentication_failures_are_permanent():
-    error = psycopg.OperationalError("connection rejected")
-    error._sqlstate = "28P01"
-    assert wait_for_database.is_retryable_database_error(error) is False
+    assert wait_for_database.is_retryable_database_error(
+        _DatabaseError("connection rejected", "28P01")
+    ) is False
+
+
+def test_unknown_sqlstate_recovery_failures_remain_retryable():
+    assert wait_for_database.is_retryable_database_error(
+        _DatabaseError("database is starting up", "57P03")
+    ) is True
 
 
 def test_state_output_is_machine_readable(tmp_path):
