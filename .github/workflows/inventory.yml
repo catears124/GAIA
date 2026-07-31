@@ -5,16 +5,10 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/inventory.yml"
-      - "src/gaia/__init__.py"
-      - "src/gaia/db_base.py"
-      - "src/gaia/wait_for_database.py"
-      - "src/gaia/repair_indexes.py"
-      - "src/gaia/inventory.py"
-      - "src/gaia/inventory_runtime.py"
-      - "src/gaia/live_inventory.py"
-      - "src/gaia/db_write.py"
+      - "src/gaia/**"
+      - "pyproject.toml"
   schedule:
-    - cron: "4,14,24,34,44,54 * * * *"
+    - cron: "4,19,34,49 * * * *"
   workflow_dispatch:
     inputs:
       budget_seconds:
@@ -28,7 +22,10 @@ permissions:
 
 concurrency:
   group: production-inventory
-  cancel-in-progress: true
+  # Scheduled runs can legitimately take longer than the cadence. Cancelling the
+  # previous run repeatedly abandons leased sources and can permanently starve
+  # the tail of the queue, so let overlapping runs coordinate through DB leases.
+  cancel-in-progress: false
 
 jobs:
   database_gate:
@@ -132,7 +129,7 @@ jobs:
     if: needs.database_gate.outputs.state == 'ready'
     name: Inventory · ${{ matrix.lane }}
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 20
     environment: production
     strategy:
       fail-fast: false
