@@ -7,7 +7,6 @@ import socket
 import uuid
 
 import httpx
-from fastapi import FastAPI
 
 from .live_inventory import InventoryWorker, LiveDatabase
 
@@ -20,27 +19,85 @@ def _worker_id() -> str:
     return f"vercel-bootstrap:{deployment or socket.gethostname()}:{uuid.uuid4().hex[:8]}"
 
 
-def _claim_empty_database_bootstrap(database: LiveDatabase, worker_id: str) -> bool:
-    """Lease one recovery attempt across every concurrent serverless instance."""
-    lease_seconds = max(60, int(os.getenv("GAIA_BOOTSTRAP_LEASE_SECONDS", "180")))
+def _initialize_schema(database: LiveDatabase) -> None:
+    """Prefer the Supabase direct URL, then fall back to the transaction pooler."""
+    direct_error: Exception | None = None
+    try:
+        from .cli import run_migration
+
+        run_migration()
+    except Exception as exc:
+        direct_error = exc
+        LOGGER.warning("direct Supabase migration failed; trying pooler: %r", exc)
+        database.migrate()
+        from .employer_census import ECOSYSTEM_SCHEMA_STATEMENTS
+        from .universe import UNIVERSE_SCHEMA_STATEMENTS
+
+        with database.connect() as connection:
+            for statement in (*UNIVERSE_SCHEMA_STATEMENTS, *ECOSYSTEM_SCHEMA_STATEMENTS):
+                connection.execute(statement)
+
     with database.connect() as connection:
-        counts = connection.execute(
+        connection.execute(
+            """
+            INSERT INTO source_catalog(source, kind, scope, spec, validated, origin)
+            VALUES (
+                'google-careers', 'google-careers', 'current',
+                '{}'::jsonb, TRUE, 'runtime-bootstrap'
+            )
+            ON CONFLICT(source) DO UPDATE SET
+                kind=excluded.kind,
+                scope='current',
+                spec=excluded.spec,
+                validated=TRUE,
+                last_discovered_at=now()
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO crawl_targets(
+                source, enabled, scheduled, priority, interval_seconds, next_run_at
+            ) VALUES ('google-careers', TRUE, TRUE, 30, 1200, now())
+            ON CONFLICT(source) DO UPDATE SET
+                enabled=TRUE,
+                scheduled=TRUE,
+                next_run_at=LEAST(crawl_targets.next_run_at, now()),
+                updated_at=now()
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO worker_tasks(task_key, next_run_at)
+            VALUES
+                ('market-discovery', now()),
+                ('universe-discovery', now() + interval '1 hour'),
+                (%s, now())
+            ON CONFLICT(task_key) DO NOTHING
+            """,
+            (_BOOTSTRAP_TASK,),
+        )
+    if direct_error is not None:
+        LOGGER.info("schema initialized successfully through the pooled fallback")
+
+
+def _inventory_exists(database: LiveDatabase) -> bool:
+    with database.connect() as connection:
+        row = connection.execute(
             """
             SELECT
                 (SELECT COUNT(*) FROM postings) AS postings,
                 (SELECT COUNT(*) FROM families) AS families
             """
         ).fetchone()
-        if int(counts["postings"] or 0) > 0 or int(counts["families"] or 0) > 0:
-            return False
-        connection.execute(
-            """
-            INSERT INTO worker_tasks(task_key, next_run_at)
-            VALUES (%s, now())
-            ON CONFLICT(task_key) DO NOTHING
-            """,
-            (_BOOTSTRAP_TASK,),
-        )
+    return int(row["postings"] or 0) > 0 or int(row["families"] or 0) > 0
+
+
+def _claim_empty_database_bootstrap(database: LiveDatabase, worker_id: str) -> str:
+    """Return ready, claimed, or busy while leasing across serverless instances."""
+    if _inventory_exists(database):
+        return "ready"
+    lease_seconds = max(60, int(os.getenv("GAIA_BOOTSTRAP_LEASE_SECONDS", "180")))
+    with database.connect() as connection:
         row = connection.execute(
             """
             UPDATE worker_tasks
@@ -57,7 +114,7 @@ def _claim_empty_database_bootstrap(database: LiveDatabase, worker_id: str) -> b
             """,
             (worker_id, lease_seconds, _BOOTSTRAP_TASK),
         ).fetchone()
-    return row is not None
+    return "claimed" if row is not None else "busy"
 
 
 def _finish_empty_database_bootstrap(
@@ -85,28 +142,28 @@ def _finish_empty_database_bootstrap(
         )
 
 
-async def bootstrap_empty_database() -> None:
-    """Initialize and recover an empty project within one Vercel invocation."""
+async def bootstrap_empty_database() -> bool:
+    """Initialize and recover an empty project during a real runtime request."""
     if os.getenv("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1") != "1":
-        return
+        return True
 
     database = LiveDatabase(migrate=False)
     try:
-        # Vercel build imports never execute startup handlers. This is the first safe
-        # place to perform real network I/O with the runtime Supabase credentials.
-        await asyncio.to_thread(database.migrate)
+        await asyncio.to_thread(_initialize_schema, database)
     except Exception:
         LOGGER.exception("could not initialize the recreated Supabase schema")
-        return
+        return False
 
     worker_id = _worker_id()
     try:
-        claimed = _claim_empty_database_bootstrap(database, worker_id)
+        claim_state = _claim_empty_database_bootstrap(database, worker_id)
     except Exception:
         LOGGER.exception("could not inspect the recreated database")
-        return
-    if not claimed:
-        return
+        return False
+    if claim_state == "ready":
+        return True
+    if claim_state == "busy":
+        return False
 
     budget = max(10.0, min(float(os.getenv("GAIA_BOOTSTRAP_BUDGET_SECONDS", "38")), 45.0))
     probe_limit = os.environ.setdefault("GAIA_CANDIDATE_PROBE_LIMIT", "6")
@@ -154,17 +211,8 @@ async def bootstrap_empty_database() -> None:
         except Exception:
             LOGGER.exception("could not release empty database bootstrap lease")
 
-
-def install_runtime_bootstrap(app: FastAPI) -> None:
-    """Run the bounded recovery only on a genuinely empty production database."""
-    if getattr(app.state, "gaia_runtime_bootstrap_installed", False):
-        return
-    app.state.gaia_runtime_bootstrap_installed = True
-
-    async def startup() -> None:
-        try:
-            await bootstrap_empty_database()
-        except Exception:
-            LOGGER.exception("runtime bootstrap crashed")
-
-    app.add_event_handler("startup", startup)
+    try:
+        return _inventory_exists(database)
+    except Exception:
+        LOGGER.exception("could not verify recovered inventory")
+        return False
