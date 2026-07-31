@@ -1,0 +1,85 @@
+name: Publish static inventory snapshot
+
+on:
+  schedule:
+    - cron: "8,38 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/static-snapshot.yml"
+      - "src/gaia/static_snapshot.py"
+      - "src/gaia/product_api.py"
+      - "src/gaia/api.py"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gaia-static-inventory-snapshot
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "300"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Require production database
+        run: test -n "$GAIA_DATABASE_URL"
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Wait through transient database recovery
+        run: python -m gaia.wait_for_database --timeout-seconds 600
+      - name: Export last-known public inventory
+        run: python -m gaia.static_snapshot
+      - name: Validate snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("src/gaia/frontend/last-known-inventory.json")
+          payload = json.loads(path.read_text())
+          responses = payload.get("responses", {})
+          required = {"/api/health", "/api/stats", "/api/facets", "/api/families"}
+          missing = required - set(responses)
+          if missing:
+              raise SystemExit(f"snapshot missing required endpoints: {sorted(missing)}")
+          families = responses["/api/families"]
+          if not families.get("items"):
+              raise SystemExit("snapshot contains no public roles")
+          print(f"snapshot responses={len(responses)} default_roles={len(families['items'])}")
+          PY
+      - name: Commit changed snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          path=src/gaia/frontend/last-known-inventory.json
+          if git diff --quiet -- "$path"; then
+            echo "Snapshot is unchanged."
+            exit 0
+          fi
+          git config user.name "gaia-inventory-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$path"
+          git commit -m "data: refresh deployable inventory snapshot"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
