@@ -93,53 +93,157 @@ def _valid_database_outage(payload: object) -> bool:
     )
 
 
+def _inventory_counts(inventory: dict[str, object]) -> tuple[int, int] | None:
+    total = inventory.get("total")
+    fresh = inventory.get("fresh")
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or not isinstance(fresh, int)
+        or isinstance(fresh, bool)
+        or total <= 0
+        or fresh < 0
+        or fresh > total
+    ):
+        return None
+    return fresh, total
+
+
 def evaluate(probes: dict[str, Probe]) -> SmokeResult:
     required = {"index", "emergency", "controller", "snapshot", "health", "stats", "families"}
     missing = sorted(required - probes.keys())
     statuses = {name: probe.status for name, probe in probes.items()}
     if missing:
-        return SmokeResult("failure", f"Smoke evidence missing: {', '.join(missing)}", False, statuses)
+        return SmokeResult(
+            "failure", f"Smoke evidence missing: {', '.join(missing)}", False, statuses
+        )
 
     snapshot_usable = snapshot_is_usable(probes["snapshot"])
     index = probes["index"]
     if index.status != 200:
-        return SmokeResult("failure", f"Deployed UI unavailable (HTTP {index.status})", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure",
+            f"Deployed UI unavailable (HTTP {index.status})",
+            snapshot_usable,
+            statuses,
+        )
     if "emergency-outage.js" not in index.body or "api-resilience.js" not in index.body:
-        return SmokeResult("failure", "Deployed UI missing resilience runtimes", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure", "Deployed UI missing resilience runtimes", snapshot_usable, statuses
+        )
 
     emergency = probes["emergency"]
     if emergency.status != 200 or "MAX_EMERGENCY_AGE_MS" not in emergency.body:
-        return SmokeResult("failure", "Emergency inventory runtime missing or invalid", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure", "Emergency inventory runtime missing or invalid", snapshot_usable, statuses
+        )
 
     controller = probes["controller"]
-    if controller.status != 200 or "liveHealthProbe" not in controller.body or "XMLHttpRequest" not in controller.body:
-        return SmokeResult("failure", "Automatic outage recovery controller missing or stale", snapshot_usable, statuses)
+    if (
+        controller.status != 200
+        or "liveHealthProbe" not in controller.body
+        or "XMLHttpRequest" not in controller.body
+    ):
+        return SmokeResult(
+            "failure",
+            "Automatic outage recovery controller missing or stale",
+            snapshot_usable,
+            statuses,
+        )
 
     health = probes["health"]
     health_payload = _json(health.body)
+    degraded_inventory: tuple[int, int] | None = None
     if health.status == 200:
-        if not isinstance(health_payload, dict) or not isinstance(health_payload.get("inventory"), dict) or not isinstance(health_payload.get("ok"), bool):
-            return SmokeResult("failure", "Health API returned an invalid contract", snapshot_usable, statuses)
-        if health_payload["ok"] is True and health_payload["inventory"].get("healthy") is not True:
-            return SmokeResult("failure", "Health API dishonestly reports ok with unhealthy inventory", snapshot_usable, statuses)
+        if (
+            not isinstance(health_payload, dict)
+            or not isinstance(health_payload.get("inventory"), dict)
+            or not isinstance(health_payload.get("ok"), bool)
+        ):
+            return SmokeResult(
+                "failure", "Health API returned an invalid contract", snapshot_usable, statuses
+            )
+        inventory = health_payload["inventory"]
+        if not isinstance(inventory.get("healthy"), bool):
+            return SmokeResult(
+                "failure", "Health API omitted inventory health state", snapshot_usable, statuses
+            )
+        counts = _inventory_counts(inventory)
+        if counts is None:
+            return SmokeResult(
+                "failure",
+                "Health API returned invalid or empty inventory counts",
+                snapshot_usable,
+                statuses,
+            )
+        if health_payload["ok"] is True and inventory["healthy"] is not True:
+            return SmokeResult(
+                "failure",
+                "Health API dishonestly reports ok with unhealthy inventory",
+                snapshot_usable,
+                statuses,
+            )
+        if health_payload["ok"] is False and inventory["healthy"] is True:
+            return SmokeResult(
+                "failure",
+                "Health API reports contradictory inventory state",
+                snapshot_usable,
+                statuses,
+            )
         if health_payload.get("stale") is True:
-            return SmokeResult("failure", "Health API returned stale data as a live response", snapshot_usable, statuses)
+            return SmokeResult(
+                "failure", "Health API returned stale data as a live response", snapshot_usable, statuses
+            )
+        if health_payload["ok"] is False:
+            degraded_inventory = counts
     elif health.status == 503:
         if not _valid_database_outage(health_payload):
-            return SmokeResult("failure", "Health API returned an invalid database-outage contract", snapshot_usable, statuses)
+            return SmokeResult(
+                "failure",
+                "Health API returned an invalid database-outage contract",
+                snapshot_usable,
+                statuses,
+            )
         if snapshot_usable:
-            return SmokeResult("pending", "Database recovery active; deployed offline inventory is usable", True, statuses)
-        return SmokeResult("failure", "Database recovery active and first-visit inventory snapshot is unusable", False, statuses)
+            return SmokeResult(
+                "pending",
+                "Database recovery active; deployed offline inventory is usable",
+                True,
+                statuses,
+            )
+        return SmokeResult(
+            "failure",
+            "Database recovery active and first-visit inventory snapshot is unusable",
+            False,
+            statuses,
+        )
     elif health.status == 0:
-        return SmokeResult("failure", "Health API timed out or could not be reached", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure", "Health API timed out or could not be reached", snapshot_usable, statuses
+        )
     elif 500 <= health.status <= 599:
-        return SmokeResult("failure", f"Health API returned an unclassified server failure (HTTP {health.status})", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure",
+            f"Health API returned an unclassified server failure (HTTP {health.status})",
+            snapshot_usable,
+            statuses,
+        )
     else:
-        return SmokeResult("failure", f"Health API unavailable (HTTP {health.status})", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure",
+            f"Health API unavailable (HTTP {health.status})",
+            snapshot_usable,
+            statuses,
+        )
 
     stats_payload = _json(probes["stats"].body)
     if probes["stats"].status != 200 or not isinstance(stats_payload, dict):
-        return SmokeResult("failure", f"Stats API contract failed (HTTP {probes['stats'].status})", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure",
+            f"Stats API contract failed (HTTP {probes['stats'].status})",
+            snapshot_usable,
+            statuses,
+        )
 
     families_payload = _json(probes["families"].body)
     if (
@@ -150,9 +254,24 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
         or isinstance(families_payload.get("total"), bool)
         or families_payload["total"] < len(families_payload["items"])
     ):
-        return SmokeResult("failure", f"Families API contract failed (HTTP {probes['families'].status})", snapshot_usable, statuses)
+        return SmokeResult(
+            "failure",
+            f"Families API contract failed (HTTP {probes['families'].status})",
+            snapshot_usable,
+            statuses,
+        )
 
-    return SmokeResult("success", "Production UI and APIs passed black-box smoke checks", snapshot_usable, statuses)
+    if degraded_inventory is not None:
+        fresh, total = degraded_inventory
+        return SmokeResult(
+            "pending",
+            f"Production reachable; inventory catch-up {fresh}/{total} fresh",
+            snapshot_usable,
+            statuses,
+        )
+    return SmokeResult(
+        "success", "Production UI and APIs passed black-box smoke checks", snapshot_usable, statuses
+    )
 
 
 def load_probe(directory: Path, name: str) -> Probe:
