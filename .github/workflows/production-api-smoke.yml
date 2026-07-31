@@ -1,6 +1,17 @@
 name: Production API smoke
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - src/gaia/api_resilience.py
+      - src/gaia/request_bootstrap.py
+      - src/gaia/runtime_bootstrap.py
+      - src/gaia/db.py
+      - src/gaia/cli.py
+      - src/gaia/schema.sql
+      - .github/workflows/production-api-smoke.yml
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -32,12 +43,30 @@ jobs:
       - name: Install smoke evaluator
         run: python -m pip install --disable-pip-version-check --no-deps -e .
 
+      - name: Allow production deployment to settle
+        if: github.event_name == 'push'
+        run: sleep 45
+
+      - name: Trigger bounded runtime bootstrap
+        shell: bash
+        run: |
+          # A recreated Supabase project initializes on the first real API request.
+          # Give that one request the function's full recovery budget before measuring
+          # the normal low-latency API contract below.
+          curl --silent --show-error --location \
+            --connect-timeout 5 --max-time 55 \
+            --output smoke-bootstrap.body \
+            --write-out '%{http_code}\n' \
+            "${GAIA_BASE_URL}/api/health" > smoke-bootstrap.status || true
+
       - name: Probe production
         id: probe
         shell: bash
         run: |
           set -uo pipefail
           mkdir -p smoke
+          cp smoke-bootstrap.body smoke/bootstrap.body 2>/dev/null || true
+          cp smoke-bootstrap.status smoke/bootstrap.status 2>/dev/null || true
 
           fetch() {
             local name="$1" path="$2" max_time="$3" retries="$4"
@@ -77,6 +106,7 @@ jobs:
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
             echo "- Offline snapshot usable: ${snapshot_usable}"
+            echo "- Bootstrap request: HTTP $(cat smoke/bootstrap.status 2>/dev/null || echo unknown)"
             jq -r '.statuses | to_entries[] | "- \(.key): HTTP \(.value)"' smoke/result.json
           } >> "$GITHUB_STEP_SUMMARY"
 
