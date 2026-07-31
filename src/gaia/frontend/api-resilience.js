@@ -8,6 +8,7 @@
   const MAX_CACHE_ENTRIES = 120;
   const nativeFetch = window.fetch.bind(window);
   let staleBanner;
+  let staticSnapshotPromise;
 
   function requestUrl(input) {
     try {
@@ -15,6 +16,15 @@
     } catch {
       return null;
     }
+  }
+
+  function normalizedKey(input) {
+    const url = requestUrl(input);
+    if (!url) return null;
+    const params = [...url.searchParams.entries()].filter(([, value]) => value !== "" && value !== "0" && value !== "false");
+    params.sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    const query = new URLSearchParams(params).toString();
+    return `${url.pathname}${query ? `?${query}` : ""}`;
   }
 
   function isCacheable(input, init = {}) {
@@ -34,7 +44,7 @@
     return `${hours} hour${hours === 1 ? "" : "s"} old`;
   }
 
-  function showStaleBanner(cachedAt) {
+  function showStaleBanner(cachedAt, source = "cached") {
     const age = Number.isFinite(cachedAt) ? Date.now() - cachedAt : null;
     if (!staleBanner) {
       staleBanner = document.createElement("div");
@@ -58,7 +68,8 @@
       if (topbar?.parentNode) topbar.parentNode.insertBefore(staleBanner, topbar.nextSibling);
       else document.body.prepend(staleBanner);
     }
-    staleBanner.textContent = `Live database unavailable. Showing cached inventory${age === null ? "" : ` (${ageLabel(age)})`}.`;
+    const kind = source === "snapshot" ? "last deployed inventory" : "cached inventory";
+    staleBanner.textContent = `Live database unavailable. Showing ${kind}${age === null ? "" : ` (${ageLabel(age)})`}.`;
   }
 
   function clearStaleBanner() {
@@ -68,17 +79,16 @@
     window.dispatchEvent(new CustomEvent("gaia:live-data"));
   }
 
-  async function truthfulCachedBody(request, cached) {
+  async function truthfulBody(request, body) {
     const url = requestUrl(request);
-    const body = await cached.blob();
     if (url?.pathname !== "/api/health") return body;
     try {
-      const payload = JSON.parse(await body.text());
+      const payload = JSON.parse(typeof body === "string" ? body : await body.text());
       payload.ok = false;
       payload.stale = true;
       payload.running = false;
       payload.inventory = { ...(payload.inventory || {}), healthy: false, stale_snapshot: true };
-      return new Blob([JSON.stringify(payload)], { type: "application/json" });
+      return JSON.stringify(payload);
     } catch {
       return body;
     }
@@ -99,13 +109,58 @@
       const headers = new Headers(cached.headers);
       headers.set("X-GAIA-Stale", "1");
       headers.set("Cache-Control", "no-store");
-      const body = await truthfulCachedBody(request, cached);
-      showStaleBanner(cachedAt);
-      window.dispatchEvent(new CustomEvent("gaia:stale-data", { detail: { cachedAt: cachedAtRaw } }));
+      const original = await cached.blob();
+      const body = await truthfulBody(request, original);
+      showStaleBanner(cachedAt, "cached");
+      window.dispatchEvent(new CustomEvent("gaia:stale-data", { detail: { cachedAt: cachedAtRaw, source: "browser-cache" } }));
       return new Response(body, { status: 200, statusText: "Cached", headers });
     } catch {
       return null;
     }
+  }
+
+  async function loadStaticSnapshot() {
+    if (!staticSnapshotPromise) {
+      const minute = Math.floor(Date.now() / 60000);
+      staticSnapshotPromise = nativeFetch(`/assets/last-known-inventory.json?v=${minute}`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      }).then(response => {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json();
+      }).catch(() => null);
+    }
+    return staticSnapshotPromise;
+  }
+
+  async function staticSnapshotResponse(request) {
+    try {
+      const snapshot = await loadStaticSnapshot();
+      const generatedAtRaw = snapshot?.generated_at;
+      const generatedAt = generatedAtRaw ? Date.parse(generatedAtRaw) : Number.NaN;
+      const maxAge = Math.min(MAX_STALE_MS, Number(snapshot?.max_stale_seconds || 86400) * 1000);
+      if (!Number.isFinite(generatedAt) || Date.now() - generatedAt > maxAge) return null;
+      const key = normalizedKey(request);
+      const payload = key ? snapshot.responses?.[key] : null;
+      if (!payload) return null;
+      const body = await truthfulBody(request, JSON.stringify(payload));
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "X-GAIA-Stale": "1",
+        "X-GAIA-Snapshot": "1",
+        "X-GAIA-Cached-At": generatedAtRaw,
+      });
+      showStaleBanner(generatedAt, "snapshot");
+      window.dispatchEvent(new CustomEvent("gaia:stale-data", { detail: { cachedAt: generatedAtRaw, source: "deployed-snapshot" } }));
+      return new Response(body, { status: 200, statusText: "Snapshot", headers });
+    } catch {
+      return null;
+    }
+  }
+
+  async function fallbackResponse(request) {
+    return await cachedResponse(request) || await staticSnapshotResponse(request);
   }
 
   async function prune(cache) {
@@ -155,13 +210,13 @@
         return response;
       }
       if (response.status >= 500) {
-        const cached = await cachedResponse(request);
-        if (cached) return cached;
+        const fallback = await fallbackResponse(request);
+        if (fallback) return fallback;
       }
       return response;
     } catch (error) {
-      const cached = await cachedResponse(request);
-      if (cached) return cached;
+      const fallback = await fallbackResponse(request);
+      if (fallback) return fallback;
       throw error;
     }
   };
