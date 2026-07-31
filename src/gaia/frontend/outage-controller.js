@@ -4,6 +4,7 @@
   const RETRY_BASE_MS = 5000;
   const RETRY_MAX_MS = 60000;
   const PROBE_TIMEOUT_MS = 8000;
+  const MAX_HEALTH_AGE_MS = 15 * 60 * 1000;
   const RECOVERY_RELOAD_GUARD_MS = 30000;
   const RELOAD_GUARD_KEY = "gaia:last-recovery-reload";
   let attempts = 0;
@@ -14,6 +15,25 @@
   function offline() {
     return document.documentElement.dataset.gaiaOffline === "true" ||
       /could not load jobs|temporarily offline/i.test(document.querySelector("#empty-state")?.textContent || "");
+  }
+
+  function recoveryStatus() {
+    let status = document.querySelector("#gaia-recovery-status");
+    if (status) return status;
+    status = document.createElement("p");
+    status.id = "gaia-recovery-status";
+    status.className = "sr-only";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    status.setAttribute("aria-atomic", "true");
+    document.body.append(status);
+    return status;
+  }
+
+  function announce(message) {
+    const status = recoveryStatus();
+    if (status.textContent === message) return;
+    status.textContent = message;
   }
 
   function paginationNodes() {
@@ -54,6 +74,17 @@
     }
   }
 
+  function inventoryIsFresh(data) {
+    const total = Number(data.inventory?.total ?? data.inventory?.sources_total ?? 0);
+    if (!Number.isFinite(total) || total <= 0) return false;
+    const generatedAt = data.generated_at || data.inventory?.generated_at || data.inventory?.updated_at;
+    if (!generatedAt) return false;
+    const generatedMs = Date.parse(generatedAt);
+    if (!Number.isFinite(generatedMs)) return false;
+    const age = Date.now() - generatedMs;
+    return age >= -5 * 60 * 1000 && age <= MAX_HEALTH_AGE_MS;
+  }
+
   function liveHealthProbe() {
     return new Promise(resolve => {
       const xhr = new XMLHttpRequest();
@@ -65,7 +96,12 @@
         if (xhr.status < 200 || xhr.status >= 300) return resolve(false);
         try {
           const data = JSON.parse(xhr.responseText);
-          resolve(data.ok === true && data.inventory?.healthy !== false && data.stale !== true);
+          resolve(
+            data.ok === true &&
+            data.inventory?.healthy !== false &&
+            data.stale !== true &&
+            inventoryIsFresh(data)
+          );
         } catch {
           resolve(false);
         }
@@ -96,14 +132,18 @@
     if (!offline() || document.hidden || probeInFlight) return;
     probeInFlight = true;
     attempts += 1;
+    announce("Checking whether live internship inventory has recovered.");
     try {
       if (await liveHealthProbe()) {
         document.querySelector("#gaia-emergency-banner")?.remove();
         document.querySelector("#gaia-stale-data-banner")?.remove();
         delete document.documentElement.dataset.gaiaOffline;
         restorePagination();
+        announce("Live internship inventory recovered. Refreshing results.");
         window.dispatchEvent(new CustomEvent("gaia:live-data"));
         if (reloadAfterRecovery()) return;
+      } else {
+        announce("Live internship inventory is still unavailable. Cached results remain clearly marked.");
       }
       const button = document.querySelector("[data-retry]");
       if (button && !button.disabled) button.click();
@@ -117,6 +157,7 @@
     const isOffline = offline();
     if (isOffline) {
       disablePagination();
+      announce("Live internship inventory is unavailable. Automatic recovery checks are active.");
       schedule();
     } else {
       attempts = 0;
@@ -127,6 +168,7 @@
 
   function boot() {
     if (observer || !document.body) return;
+    recoveryStatus();
     observer = new MutationObserver(inspect);
     const empty = document.querySelector("#empty-state");
     if (empty) observer.observe(empty, { childList: true, subtree: true, attributes: true });
