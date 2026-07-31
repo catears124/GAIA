@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/inventory.yml"
+      - "src/gaia/__init__.py"
+      - "src/gaia/db_base.py"
       - "src/gaia/wait_for_database.py"
       - "src/gaia/repair_indexes.py"
       - "src/gaia/inventory.py"
@@ -110,7 +112,7 @@ jobs:
             kinds: domain,verification,google-careers
             workers: 2
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GAIA_READ_ONLY: "0"
@@ -130,11 +132,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require Supabase session connection
+      - name: Require Supabase pooler connection
         shell: bash
         run: |
           test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing GitHub Actions secret POSTGRES_URL_NON_POOLING." >&2
+            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
             exit 1
           }
       - name: Install GAIA
@@ -167,7 +169,7 @@ jobs:
 
   status:
     name: Publish inventory pulse status
-    needs: inventory
+    needs: [repair, inventory]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -180,18 +182,13 @@ jobs:
         run: |
           state=success
           description="All provider inventory lanes completed"
-          case "${{ needs.inventory.result }}" in
-            success)
-              ;;
-            cancelled)
-              state=failure
-              description="Provider inventory pulse was unexpectedly cancelled"
-              ;;
-            *)
-              state=failure
-              description="One or more provider inventory lanes failed after recovery retries"
-              ;;
-          esac
+          if [ "${{ needs.inventory.result }}" != success ]; then
+            state=failure
+            description="One or more provider inventory lanes failed after recovery retries"
+          elif [ "${{ needs.repair.result }}" != success ] && [ "${{ needs.repair.result }}" != skipped ]; then
+            state=failure
+            description="Production index repair failed"
+          fi
           payload=$(jq -n \
             --arg state "$state" \
             --arg context "gaia/production-inventory" \
