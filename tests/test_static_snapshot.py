@@ -46,7 +46,7 @@ def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp
     assert payload["responses"]["/api/health"]
     assert payload["responses"]["/api/stats"]
     assert payload["responses"]["/api/families"]["items"]
-    assert payload["family_index"] == [{"family_key": "one"}]
+    assert payload["family_index"] == [{"family_key": "one", "openings": []}]
     assert payload["family_index_total"] == 1
     assert payload["family_index_complete"] is True
     assert not output.with_suffix(".json.tmp").exists()
@@ -64,6 +64,40 @@ def test_snapshot_contains_common_first_visit_searches(monkeypatch) -> None:
     assert "/api/families?posted_within=1&trust=verified" in responses
     assert "/api/families?category=quant&target=default&trust=verified" in responses
     assert "/api/families?remote=true&trust=verified" in responses
+
+
+def test_compact_family_keeps_search_detail_and_apply_fields_only() -> None:
+    compact = static_snapshot._compact_family(
+        {
+            "family_key": "family",
+            "title": "Software Intern",
+            "company": "Example",
+            "target_match": "exact",
+            "description": "large field that should not ship",
+            "internal_debug": {"large": True},
+            "openings": [
+                {
+                    "apply_url": "https://example.com/apply",
+                    "source_mode": "direct",
+                    "location": ["Remote"],
+                    "description": "large opening description",
+                    "raw_payload": {"large": True},
+                }
+            ],
+        }
+    )
+
+    assert compact["family_key"] == "family"
+    assert compact["target_match"] == "exact"
+    assert "description" not in compact
+    assert "internal_debug" not in compact
+    assert compact["openings"] == [
+        {
+            "apply_url": "https://example.com/apply",
+            "source_mode": "direct",
+            "location": ["Remote"],
+        }
+    ]
 
 
 def test_family_index_paginates_until_every_visible_family_is_exported(monkeypatch) -> None:
