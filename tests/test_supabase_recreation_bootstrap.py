@@ -10,17 +10,9 @@ from gaia import db as db_module
 
 DATABASE_VARIABLES = (
     "GAIA_DATABASE_URL",
-    "GAIA_MIGRATION_DATABASE_URL",
-    "GAIA_ADMIN_DATABASE_URL",
     "POSTGRES_URL",
-    "POSTGRES_PRISMA_URL",
-    "POSTGRES_URL_NON_POOLING",
     "DATABASE_URL",
     "SUPABASE_DB_URL",
-    "POSTGRES_HOST",
-    "POSTGRES_USER",
-    "POSTGRES_PASSWORD",
-    "POSTGRES_DATABASE",
 )
 
 
@@ -29,66 +21,21 @@ def _clear_database_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(variable, raising=False)
 
 
-def test_standard_postgres_url_is_used_without_gaia_specific_secret(
+def test_standard_supabase_postgres_url_needs_no_gaia_specific_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_database_environment(monkeypatch)
     monkeypatch.setenv(
         "POSTGRES_URL",
-        "postgres://postgres.ref:secret@pooler.supabase.com:6543/postgres?supa=x",
+        "postgres://postgres.ref:secret@pooler.supabase.com:6543/postgres?supa=x&sslmode=require",
     )
 
     resolved = db_module._configured_database_url()  # noqa: SLF001
 
     assert resolved is not None
-    assert resolved.startswith("postgresql://")
+    assert resolved.startswith("postgres://")
     assert "supa=" not in resolved
     assert parse_qs(urlsplit(resolved).query)["sslmode"] == ["require"]
-
-
-def test_migrations_prefer_the_non_pooling_supabase_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_database_environment(monkeypatch)
-    monkeypatch.setenv("POSTGRES_URL", "postgresql://pooler/db")
-    monkeypatch.setenv("POSTGRES_URL_NON_POOLING", "postgresql://direct/db")
-
-    assert db_module._configured_database_url(migration=True) == "postgresql://direct/db"  # noqa: SLF001
-    assert db_module._configured_database_url() == "postgresql://pooler/db"  # noqa: SLF001
-
-
-def test_prisma_only_url_is_accepted_and_prisma_parameters_are_removed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_database_environment(monkeypatch)
-    monkeypatch.setenv(
-        "POSTGRES_PRISMA_URL",
-        "postgresql://user:pass@pooler.supabase.com/db?pgbouncer=true&connection_limit=1",
-    )
-
-    resolved = db_module._configured_database_url()  # noqa: SLF001
-    query = parse_qs(urlsplit(resolved or "").query)
-
-    assert resolved is not None
-    assert "pgbouncer" not in query
-    assert "connection_limit" not in query
-    assert query["sslmode"] == ["require"]
-
-
-def test_component_variables_build_a_url_with_escaped_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _clear_database_environment(monkeypatch)
-    monkeypatch.setenv("POSTGRES_HOST", "db.example.supabase.co:5432")
-    monkeypatch.setenv("POSTGRES_USER", "postgres.project")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "p@ss:/word")
-    monkeypatch.setenv("POSTGRES_DATABASE", "postgres")
-
-    resolved = db_module._configured_database_url()  # noqa: SLF001
-
-    assert resolved is not None
-    assert "p%40ss%3A%2Fword" in resolved
-    assert resolved.endswith("/postgres?sslmode=require")
 
 
 def test_database_construction_remains_safe_without_runtime_credentials(
@@ -104,34 +51,48 @@ def test_database_construction_remains_safe_without_runtime_credentials(
             pass
 
 
-def test_vercel_entrypoint_keeps_build_imports_free_of_database_io() -> None:
+def test_vercel_entrypoint_performs_no_database_work_during_build_import() -> None:
     source = Path("app.py").read_text(encoding="utf-8")
 
     assert 'os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")' in source
-    assert 'os.environ.setdefault("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1")' in source
-    assert "install_runtime_bootstrap(app)" in source
-    assert source.index("install_runtime_bootstrap(app)") < source.index(
+    assert "add_event_handler" not in source
+    assert "runtime_bootstrap" not in source
+    assert "install_request_bootstrap(app)" in source
+    assert source.index("install_request_bootstrap(app)") < source.index(
         "install_database_outage_guard(app)"
     )
 
 
-def test_runtime_bootstrap_migrates_then_materializes_registry_rows() -> None:
-    source = Path("src/gaia/runtime_bootstrap.py").read_text(encoding="utf-8")
+def test_request_bootstrap_lazy_loads_heavy_recovery_code() -> None:
+    source = Path("src/gaia/request_bootstrap.py").read_text(encoding="utf-8")
 
-    assert "await asyncio.to_thread(database.migrate)" in source
-    assert "lease_expires_at" in source
+    assert "from .runtime_bootstrap import bootstrap_empty_database" in source
+    assert source.index("async def _ensure_runtime_database") < source.index(
+        "from .runtime_bootstrap import bootstrap_empty_database"
+    )
+    assert "request.url.path.startswith(\"/api/\")" in source
+    assert "_NEXT_ATTEMPT_AT" in source
+    assert "asyncio.Lock()" in source
+
+
+def test_runtime_bootstrap_uses_only_existing_supabase_variables_and_is_bounded() -> None:
+    source = Path("src/gaia/runtime_bootstrap.py").read_text(encoding="utf-8")
+    cli_source = Path("src/gaia/cli.py").read_text(encoding="utf-8")
+
+    assert "from .cli import run_migration" in source
+    assert "database.migrate()" in source
+    assert "POSTGRES_URL_NON_POOLING" in cli_source
     assert "GAIA_BOOTSTRAP_BUDGET_SECONDS" in source
     assert "asyncio.wait_for" in source
     assert "include_universe=False" in source
     assert "database.rebuild_families()" in source
-    assert "postings" in source and "families" in source
 
 
-def test_runtime_migration_is_fingerprinted_and_advisory_locked() -> None:
-    source = Path("src/gaia/db.py").read_text(encoding="utf-8")
+def test_recreated_database_is_seeded_and_leased_before_registry_recovery() -> None:
+    source = Path("src/gaia/runtime_bootstrap.py").read_text(encoding="utf-8")
 
-    assert "gaia_schema_state" in source
-    assert "pg_advisory_xact_lock" in source
-    assert "POSTGRES_URL_NON_POOLING" in source
-    assert "runtime-bootstrap" in source
+    assert "google-careers" in source
     assert "market-discovery" in source
+    assert "empty-database-bootstrap" in source
+    assert "lease_expires_at" in source
+    assert "postings" in source and "families" in source
