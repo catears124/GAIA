@@ -29,9 +29,16 @@ def test_inventory_does_not_fan_out_during_database_recovery() -> None:
 
 def test_invalid_configuration_is_not_reported_as_recovery() -> None:
     text = workflow_text()
-    assert "state=invalid" in text
-    assert "Production database configuration is missing" in text
+    assert '2) state=invalid ;;' in text
+    assert "Production database configuration or credentials are invalid" in text
     assert "state=failure" in text
+    assert "exit_code: ${{ steps.gate.outputs.exit_code }}" in text
+
+
+def test_unexpected_readiness_failure_is_not_reported_as_recovery() -> None:
+    text = workflow_text()
+    assert '*) state=failed ;;' in text
+    assert "Database readiness probe failed unexpectedly" in text
 
 
 def test_obsolete_inventory_runs_are_cancelled() -> None:
