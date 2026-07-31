@@ -8,10 +8,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/static-snapshot.yml"
-      - "src/gaia/__init__.py"
-      - "src/gaia/db_base.py"
-      - "src/gaia/wait_for_database.py"
       - "src/gaia/static_snapshot.py"
+      - "src/gaia/static_snapshot_http.py"
       - "src/gaia/product_api.py"
       - "src/gaia/api.py"
 
@@ -26,12 +24,13 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_PUBLIC_BASE_URL: https://gaiajob.vercel.app
       GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "300"
+      GAIA_DB_TIMEOUT: "120"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -46,20 +45,34 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Require production database
-        run: test -n "$GAIA_DATABASE_URL"
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Wait through transient database recovery
-        run: python -m gaia.wait_for_database --timeout-seconds 600
-      - name: Export last-known public inventory
-        run: python -m gaia.static_snapshot
-      - name: Validate snapshot and offline index
+      - name: Export through healthy public API
+        id: api_export
+        continue-on-error: true
+        run: |
+          python -m gaia.static_snapshot_http --timeout-seconds 20
+          echo public-api > snapshot-source.txt
+      - name: Wait briefly for database fallback
+        id: db_gate
+        if: steps.api_export.outcome != 'success' && env.GAIA_DATABASE_URL != ''
+        continue-on-error: true
+        run: python -m gaia.wait_for_database --timeout-seconds 120
+      - name: Export directly from database fallback
+        id: db_export
+        if: steps.api_export.outcome != 'success' && steps.db_gate.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python -m gaia.static_snapshot
+          echo database > snapshot-source.txt
+      - name: Validate generated or retained snapshot
+        id: validate
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import json
+          from datetime import UTC, datetime
           from pathlib import Path
 
           path = Path("src/gaia/frontend/last-known-inventory.json")
@@ -67,34 +80,40 @@ jobs:
           responses = payload.get("responses", {})
           required = {"/api/health", "/api/stats", "/api/facets", "/api/families"}
           missing = required - set(responses)
-          if missing:
-              raise SystemExit(f"snapshot missing required endpoints: {sorted(missing)}")
-          families = responses["/api/families"]
-          if not families.get("items"):
-              raise SystemExit("snapshot contains no public roles")
-
           index = payload.get("family_index")
           expected = int(payload.get("family_index_total") or 0)
-          complete = payload.get("family_index_complete") is True
-          if not isinstance(index, list) or not index:
-              raise SystemExit("snapshot contains no offline-search family index")
-          if not complete or len(index) < expected:
+          generated = payload.get("generated_at")
+          if missing or not isinstance(index, list) or not index or expected <= 0:
               raise SystemExit(
-                  f"offline-search family index incomplete: exported={len(index)} expected={expected}"
+                  f"no usable snapshot: missing={sorted(missing)} index={len(index) if isinstance(index, list) else 'invalid'} expected={expected}"
               )
+          if payload.get("family_index_complete") is not True or len(index) < expected:
+              raise SystemExit(f"offline index incomplete: exported={len(index)} expected={expected}")
           keys = [str(item.get("family_key") or "") for item in index if isinstance(item, dict)]
           if len(keys) != len(set(keys)) or any(not key for key in keys):
-              raise SystemExit("offline-search family index contains missing or duplicate keys")
-
+              raise SystemExit("offline index contains missing or duplicate keys")
+          generated_at = datetime.fromisoformat(str(generated).replace("Z", "+00:00"))
+          age_hours = (datetime.now(UTC) - generated_at.astimezone(UTC)).total_seconds() / 3600
+          if age_hours > 168:
+              raise SystemExit(f"retained snapshot is too old: {age_hours:.1f} hours")
           size_mb = path.stat().st_size / 1_000_000
           if size_mb > 15:
               raise SystemExit(f"snapshot is unexpectedly large: {size_mb:.2f} MB")
-          print(
-              f"snapshot responses={len(responses)} default_roles={len(families['items'])} "
-              f"offline_roles={len(index)} size_mb={size_mb:.2f}"
-          )
+          print(f"snapshot roles={len(index)} age_hours={age_hours:.2f} size_mb={size_mb:.2f}")
           PY
+          if [ ! -f snapshot-source.txt ]; then
+            echo retained > snapshot-source.txt
+          fi
+          echo "source=$(cat snapshot-source.txt)" >> "$GITHUB_OUTPUT"
+      - name: Upload durable snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaia-inventory-snapshot-${{ github.run_id }}
+          path: src/gaia/frontend/last-known-inventory.json
+          retention-days: 30
+          if-no-files-found: error
       - name: Commit changed snapshot
+        if: steps.validate.outputs.source != 'retained'
         shell: bash
         run: |
           set -euo pipefail
@@ -108,9 +127,7 @@ jobs:
           git add "$path"
           git commit -m "data: refresh deployable inventory snapshot"
           for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then
-              exit 0
-            fi
+            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
             sleep $((attempt * 5))
           done
           exit 1
@@ -118,19 +135,16 @@ jobs:
         if: always()
         shell: bash
         run: |
-          case "${{ job.status }}" in
-            success)
-              state=success
-              description="Deployable inventory snapshot is current"
-              ;;
-            cancelled)
-              state=pending
-              description="Snapshot refresh superseded by a newer run"
-              ;;
-            *)
-              state=failure
-              description="Deployable inventory snapshot was not refreshed"
-              ;;
-          esac
+          source="${{ steps.validate.outputs.source }}"
+          if [ "${{ steps.validate.outcome }}" != success ]; then
+            state=failure
+            description="No usable deployable inventory snapshot exists"
+          elif [ "$source" = retained ]; then
+            state=pending
+            description="Database/API recovery active; retained snapshot remains usable"
+          else
+            state=success
+            description="Deployable inventory snapshot refreshed via ${source}"
+          fi
           payload=$(jq -n --arg state "$state" --arg context gaia/static-snapshot --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
           curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
