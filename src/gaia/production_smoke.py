@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,25 +29,51 @@ def _json(body: str) -> Any | None:
         return None
 
 
-def snapshot_is_usable(probe: Probe) -> bool:
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def snapshot_is_usable(probe: Probe, *, now: datetime | None = None) -> bool:
     payload = _json(probe.body)
     if probe.status != 200 or not isinstance(payload, dict):
         return False
     index = payload.get("family_index")
     total = payload.get("family_index_total")
-    generated = payload.get("generated_at")
-    return (
-        isinstance(generated, str)
-        and bool(generated.strip())
-        and isinstance(index, list)
-        and len(index) > 0
-        and payload.get("family_index_complete") is True
-        and isinstance(total, int)
-        and not isinstance(total, bool)
-        and total == len(index)
-        and len({str(item.get("family_key", "")) for item in index if isinstance(item, dict)})
-        == len(index)
-    )
+    generated = _timestamp(payload.get("generated_at"))
+    max_stale_seconds = payload.get("max_stale_seconds", 86_400)
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    if (
+        generated is None
+        or not isinstance(max_stale_seconds, int)
+        or isinstance(max_stale_seconds, bool)
+        or not 60 <= max_stale_seconds <= 604_800
+        or generated > current + timedelta(minutes=5)
+        or current - generated > timedelta(seconds=max_stale_seconds)
+        or not isinstance(index, list)
+        or not index
+        or payload.get("family_index_complete") is not True
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total != len(index)
+    ):
+        return False
+    keys: list[str] = []
+    for item in index:
+        if not isinstance(item, dict):
+            return False
+        key = item.get("family_key")
+        if not isinstance(key, str) or not key.strip():
+            return False
+        keys.append(key.strip())
+    return len(set(keys)) == len(keys)
 
 
 def evaluate(probes: dict[str, Probe]) -> SmokeResult:
