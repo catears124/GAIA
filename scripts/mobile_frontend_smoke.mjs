@@ -44,6 +44,32 @@ try {
     );
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
+    const describe = element => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return {
+        tag: element.tagName,
+        id: element.id || null,
+        className: typeof element.className === "string" ? element.className : null,
+        type: element.getAttribute("type"),
+        text: (element.textContent || "").trim().replace(/\s+/g, " ").slice(0, 100),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        display: style.display,
+        visibility: style.visibility,
+        position: style.position,
+        background: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        opacity: style.opacity,
+      };
+    };
+    const suspiciousElements = [...document.querySelectorAll("body *")]
+      .map(describe)
+      .filter(item =>
+        item.rect.width >= 16 && item.rect.width <= 42 &&
+        item.rect.height >= 14 && item.rect.height <= 32 &&
+        item.rect.y >= 700 && item.rect.y <= viewportHeight &&
+        item.display !== "none" && item.visibility !== "hidden" && item.opacity !== "0"
+      );
 
     return {
       url: location.href,
@@ -64,6 +90,11 @@ try {
       topbarHeight: topbar?.getBoundingClientRect().height ?? null,
       heroFontSize: hero ? Number.parseFloat(getComputedStyle(hero).fontSize) : null,
       enhancementScript: enhancementScript?.src ?? null,
+      elementsAtUnexpectedPill: document.elementsFromPoint(194, 782).map(describe),
+      suspiciousElements,
+      visibleInputs: [...document.querySelectorAll("input")]
+        .map(describe)
+        .filter(item => item.rect.width > 0 && item.rect.height > 0 && item.display !== "none"),
     };
   });
 
