@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -41,6 +41,70 @@ def _key(path: str, **params: object) -> str:
     return f"{path}?{query}" if query else path
 
 
+def _integer(value: object, *, name: str) -> int:
+    if isinstance(value, bool):
+        raise SnapshotExportError(f"public health endpoint returned boolean {name}")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise SnapshotExportError(f"public health endpoint returned invalid {name}") from error
+
+
+def _timestamp(value: object, *, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise SnapshotExportError(f"public health endpoint omitted {name}")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise SnapshotExportError(f"public health endpoint returned invalid {name}") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _validate_live_health(
+    health: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Accept fresh degraded inventory, but never stale, empty, or dishonest data."""
+
+    if health.get("stale") is True:
+        raise SnapshotExportError("public health endpoint returned stale inventory")
+    if not isinstance(health.get("ok"), bool):
+        raise SnapshotExportError("public health endpoint omitted boolean ok state")
+    inventory = health.get("inventory")
+    if not isinstance(inventory, dict):
+        raise SnapshotExportError("public health endpoint omitted inventory")
+    if not isinstance(inventory.get("healthy"), bool):
+        raise SnapshotExportError("public inventory omitted boolean healthy state")
+    if health["ok"] is True and inventory["healthy"] is not True:
+        raise SnapshotExportError("public health endpoint dishonestly reports ok")
+
+    total = _integer(inventory.get("total"), name="inventory total")
+    fresh = _integer(inventory.get("fresh"), name="fresh inventory count")
+    if total <= 0:
+        raise SnapshotExportError("public health endpoint reported empty inventory")
+    if fresh <= 0 or fresh > total:
+        raise SnapshotExportError(
+            f"public health endpoint reported invalid freshness fresh={fresh} total={total}"
+        )
+
+    activity = _timestamp(inventory.get("latest_activity_at"), name="latest inventory activity")
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    max_age_minutes = max(
+        15,
+        min(int(os.getenv("GAIA_STATIC_SNAPSHOT_MAX_ACTIVITY_MINUTES", "360")), 1440),
+    )
+    if activity > current + timedelta(minutes=5):
+        raise SnapshotExportError("public inventory activity timestamp is in the future")
+    if current - activity > timedelta(minutes=max_age_minutes):
+        raise SnapshotExportError(
+            f"public inventory activity is older than {max_age_minutes} minutes"
+        )
+    return inventory
+
+
 def _family_total(payload: dict[str, object], *, page: int) -> int:
     raw_total = payload.get("total")
     if isinstance(raw_total, bool):
@@ -60,17 +124,10 @@ def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str,
         base_url=base_url,
         timeout=httpx.Timeout(timeout_seconds, connect=min(10.0, timeout_seconds)),
         follow_redirects=True,
-        headers={"Accept": "application/json", "User-Agent": "gaia-static-snapshot/1"},
+        headers={"Accept": "application/json", "User-Agent": "gaia-static-snapshot/2"},
     ) as client:
         health = _request(client, "/api/health")
-        inventory = health.get("inventory")
-        if health.get("ok") is not True or not isinstance(inventory, dict):
-            raise SnapshotExportError("public health endpoint is not live and healthy")
-        if inventory.get("healthy") is not True or health.get("stale") is True:
-            raise SnapshotExportError("public inventory is unhealthy or stale")
-        inventory_total = int(inventory.get("total") or 0)
-        if inventory_total <= 0:
-            raise SnapshotExportError("public health endpoint reported empty inventory")
+        inventory = _validate_live_health(health)
 
         responses: dict[str, object] = {
             "/api/health": health,
@@ -160,6 +217,11 @@ def build_snapshot(base_url: str, *, timeout_seconds: float = 30.0) -> dict[str,
         "family_index_complete": True,
         "responses": responses,
         "export_source": "public-api",
+        "export_inventory_state": {
+            "healthy": inventory.get("healthy") is True,
+            "fresh": int(inventory["fresh"]),
+            "total": int(inventory["total"]),
+        },
     }
 
 
@@ -173,15 +235,22 @@ def write_snapshot(
     payload = build_snapshot(resolved_base, timeout_seconds=timeout_seconds)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, separators=(",", ":"), default=str), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, separators=(",", ":"), default=str), encoding="utf-8"
+    )
     temporary.replace(path)
     return path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export GAIA's deployable snapshot through its public API")
+    parser = argparse.ArgumentParser(
+        description="Export GAIA's deployable snapshot through its public API"
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--base-url", default=os.getenv("GAIA_PUBLIC_BASE_URL", "https://gaiajob.vercel.app"))
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("GAIA_PUBLIC_BASE_URL", "https://gaiajob.vercel.app"),
+    )
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     args = parser.parse_args()
     print(write_snapshot(args.output, base_url=args.base_url, timeout_seconds=args.timeout_seconds))
