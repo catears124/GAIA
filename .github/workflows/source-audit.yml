@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/source-audit.yml"
+      - "src/gaia/__init__.py"
+      - "src/gaia/db_base.py"
       - "src/gaia/wait_for_database.py"
       - "src/gaia/source_audit.py"
       - "src/gaia/live_inventory.py"
@@ -44,7 +46,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GAIA_HTTP_TIMEOUT: "50"
@@ -107,7 +109,7 @@ jobs:
     timeout-minutes: 25
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "240"
       GH_TOKEN: ${{ github.token }}
