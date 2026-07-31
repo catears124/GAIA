@@ -65,7 +65,7 @@ def test_broken_and_overdue_sources_are_distinguished() -> None:
     }
 
 
-def test_active_lease_prevents_false_overdue_classification() -> None:
+def test_active_lease_is_reported_as_running_overdue_not_hidden() -> None:
     report = evaluate_coverage(
         health(ok=False, total=1, fresh=0, unhealthy=1),
         {
@@ -80,8 +80,19 @@ def test_active_lease_prevents_false_overdue_classification() -> None:
         now=NOW,
     )
 
-    assert report.attention == []
     assert report.state == "pending"
+    assert report.attention[0].reason == "overdue_running"
+
+
+def test_aggregate_unhealthy_count_cannot_hide_unnamed_sources() -> None:
+    report = evaluate_coverage(
+        health(ok=False),
+        {"sources": [source("ready")]},
+        now=NOW,
+    )
+
+    assert report.state == "failure"
+    assert "omitted 1 unhealthy configured source" in report.description
 
 
 def test_green_health_with_unhealthy_sources_fails_closed() -> None:
