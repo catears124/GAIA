@@ -47,17 +47,17 @@ jobs:
         shell: bash
         run: |
           set +e
-          python -m gaia.wait_for_database --timeout-seconds 75 --max-delay-seconds 15 >database-readiness.log 2>&1
+          python -m gaia.wait_for_database \
+            --timeout-seconds 75 \
+            --max-delay-seconds 15 \
+            --github-output "$GITHUB_OUTPUT" \
+            --json-output database-readiness.json \
+            >database-readiness.log 2>&1
           code=$?
           set -e
           cat database-readiness.log
-          case "$code" in
-            0) state=ready ;;
-            1) state=recovering ;;
-            *) state=invalid ;;
-          esac
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "Database state: $state" >> "$GITHUB_STEP_SUMMARY"
+          echo "Readiness exit code: $code" >> "$GITHUB_STEP_SUMMARY"
+          test "$code" -ge 0
       - name: Read production inventory state
         id: state
         if: steps.database.outputs.state == 'ready'
@@ -122,6 +122,10 @@ jobs:
               state=failure
               description="Production database configuration is invalid"
               ;;
+            failed)
+              state=failure
+              description="Database readiness probe failed internally"
+              ;;
             ready)
               if [ "${{ steps.state.outputs.severe }}" = true ]; then
                 state=pending
@@ -130,7 +134,7 @@ jobs:
               ;;
             *)
               state=failure
-              description="Database readiness could not be classified"
+              description="Database readiness produced no valid state"
               ;;
           esac
           payload=$(jq -n --arg state "$state" --arg context gaia/severe-recovery --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
@@ -142,5 +146,13 @@ jobs:
           path: |
             severe-health.json
             database-readiness.log
+            database-readiness.json
           if-no-files-found: warn
           retention-days: 7
+      - name: Fail invalid or internal readiness states
+        if: always()
+        shell: bash
+        run: |
+          case "${{ steps.database.outputs.state }}" in
+            invalid|failed|"") exit 1 ;;
+          esac
