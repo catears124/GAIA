@@ -123,7 +123,7 @@ def run_migration() -> None:
 
 
 def run_reconcile() -> dict[str, int]:
-    """Build critical role families, optionally followed by auxiliary employer models."""
+    """Atomically rebuild every public read model, including employer coverage."""
     database = Database(migrate=False)
     with database.connect() as lock:
         lock.execute(
@@ -132,14 +132,10 @@ def run_reconcile() -> dict[str, int]:
         )
         try:
             database.rebuild_families()
-            result = {"families_rebuilt": 1}
-            include_universe = os.getenv("GAIA_RECONCILE_EMPLOYER_UNIVERSE", "1") == "1"
-            if not include_universe:
-                return result
             posting_census = rebuild_employer_universe(database)
             ecosystem_census = merge_observations_into_universe(database)
             return {
-                **result,
+                "families_rebuilt": 1,
                 **posting_census,
                 **{f"ecosystem_{key}": value for key, value in ecosystem_census.items()},
             }
