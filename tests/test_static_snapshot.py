@@ -40,11 +40,15 @@ def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp
     output = tmp_path / "snapshot.json"
     assert static_snapshot.write_snapshot(output) == output
     payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
     assert payload["generated_at"]
     assert payload["source_activity_at"] == "2026-07-31T00:00:00+00:00"
     assert payload["responses"]["/api/health"]
     assert payload["responses"]["/api/stats"]
     assert payload["responses"]["/api/families"]["items"]
+    assert payload["family_index"] == [{"family_key": "one"}]
+    assert payload["family_index_total"] == 1
+    assert payload["family_index_complete"] is True
     assert not output.with_suffix(".json.tmp").exists()
 
 
@@ -60,3 +64,48 @@ def test_snapshot_contains_common_first_visit_searches(monkeypatch) -> None:
     assert "/api/families?posted_within=1&trust=verified" in responses
     assert "/api/families?category=quant&target=default&trust=verified" in responses
     assert "/api/families?remote=true&trust=verified" in responses
+
+
+def test_family_index_paginates_until_every_visible_family_is_exported(monkeypatch) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def families(**kwargs: object) -> dict[str, object]:
+        page = int(kwargs["page"])
+        page_size = int(kwargs["page_size"])
+        calls.append((page, page_size))
+        start = (page - 1) * page_size
+        total = 205
+        rows = [
+            {"family_key": f"family-{index}", "title": f"Role {index}"}
+            for index in range(start, min(start + page_size, total))
+        ]
+        return {"items": rows, "total": total, "page": page}
+
+    monkeypatch.setattr(static_snapshot, "live_families", families)
+    items, total, complete = static_snapshot._family_index()
+
+    assert calls == [(1, 100), (2, 100), (3, 100)]
+    assert total == 205
+    assert complete is True
+    assert len(items) == 205
+    assert items[-1]["family_key"] == "family-204"
+
+
+def test_family_index_marks_snapshot_incomplete_when_safety_cap_is_reached(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MAX_PAGES", "2")
+    monkeypatch.setattr(
+        static_snapshot,
+        "live_families",
+        lambda **kwargs: {
+            "items": [
+                {"family_key": f"{kwargs['page']}-{index}"}
+                for index in range(100)
+            ],
+            "total": 500,
+        },
+    )
+
+    items, total, complete = static_snapshot._family_index()
+    assert len(items) == 200
+    assert total == 500
+    assert complete is False
