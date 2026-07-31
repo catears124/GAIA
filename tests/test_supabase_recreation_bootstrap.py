@@ -88,11 +88,12 @@ def test_runtime_bootstrap_uses_only_existing_supabase_variables_and_is_bounded(
     assert "database.rebuild_families()" in source
 
 
-def test_recreated_database_is_seeded_and_leased_before_registry_recovery() -> None:
+def test_recreated_database_uses_leases_and_validates_sources_before_cataloging() -> None:
     source = Path("src/gaia/runtime_bootstrap.py").read_text(encoding="utf-8")
 
-    assert "google-careers" in source
     assert "market-discovery" in source
     assert "empty-database-bootstrap" in source
     assert "lease_expires_at" in source
     assert "postings" in source and "families" in source
+    assert "INSERT INTO source_catalog" not in source
+    assert "no source is called validated" in source
