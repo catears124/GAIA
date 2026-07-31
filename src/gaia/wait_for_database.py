@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import psycopg
@@ -29,7 +31,17 @@ _PERMANENT_SQLSTATES = {
     "28P01",  # invalid_password
     "3D000",  # invalid_catalog_name
 }
-_STATE_BY_EXIT_CODE = {0: "ready", 1: "recovering", 2: "invalid"}
+_STATE_BY_EXIT_CODE = {0: "ready", 1: "recovering", 2: "invalid", 3: "failed"}
+
+
+@dataclass(frozen=True)
+class ReadinessResult:
+    exit_code: int
+    state: str
+    attempts: int
+    elapsed_seconds: float
+    reason: str
+    sqlstate: str | None = None
 
 
 def is_retryable_database_error(error: BaseException) -> bool:
@@ -42,42 +54,59 @@ def is_retryable_database_error(error: BaseException) -> bool:
     return not any(marker in message for marker in _PERMANENT_CONFIGURATION_ERRORS)
 
 
-def _write_state_output(exit_code: int, output_path: str | None) -> None:
-    """Publish a stable state for CI callers without forcing shell exit-code parsing."""
+def _single_line(value: object) -> str:
+    return " ".join(str(value).splitlines()).strip() or "database unavailable"
 
+
+def _write_outputs(result: ReadinessResult, output_path: str | None) -> None:
     if not output_path:
         return
-    state = _STATE_BY_EXIT_CODE.get(exit_code, "failed")
     path = Path(output_path)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"state={state}\n")
-        handle.write(f"exit_code={exit_code}\n")
+        handle.write(f"state={result.state}\n")
+        handle.write(f"exit_code={result.exit_code}\n")
+        handle.write(f"attempts={result.attempts}\n")
+        handle.write(f"elapsed_seconds={result.elapsed_seconds:.3f}\n")
+        handle.write(f"reason={result.reason[:500]}\n")
+        handle.write(f"sqlstate={result.sqlstate or ''}\n")
 
 
-def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
-    """Wait through transient Supabase failover/restart windows without stampeding it.
+def _write_json(result: ReadinessResult, path_value: str | None) -> None:
+    if not path_value:
+        return
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(asdict(result), sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
-    Exit codes are intentionally stable for workflow callers: 0 means ready, 1 means
-    transient recovery exceeded the deadline, and 2 means the connection configuration
-    is invalid and retrying cannot help.
-    """
 
-    deadline = time.monotonic() + max(1, timeout_seconds)
+def probe_database(*, timeout_seconds: int, max_delay_seconds: float) -> ReadinessResult:
+    """Return a machine-readable result for one bounded PostgreSQL readiness window."""
+
+    started = time.monotonic()
+    timeout_seconds = max(1, int(timeout_seconds))
+    max_delay_seconds = max(1.0, float(max_delay_seconds))
+    deadline = started + timeout_seconds
     attempt = 0
     last_error = "database unavailable"
+    last_sqlstate: str | None = None
+
     try:
         url = _database_url(None)
     except (KeyError, RuntimeError, TypeError, ValueError) as exc:
-        print(f"database configuration is invalid: {exc}", file=sys.stderr, flush=True)
-        return 2
+        return ReadinessResult(
+            exit_code=2,
+            state="invalid",
+            attempts=0,
+            elapsed_seconds=time.monotonic() - started,
+            reason=_single_line(exc),
+        )
 
     while time.monotonic() < deadline:
         attempt += 1
         remaining_before_connect = max(0.0, deadline - time.monotonic())
-        connect_timeout = max(
-            1,
-            min(15, max(1, int(max_delay_seconds)), max(1, int(remaining_before_connect))),
-        )
+        connect_timeout = max(1, min(15, int(max_delay_seconds), max(1, int(remaining_before_connect))))
         try:
             with psycopg.connect(
                 url,
@@ -86,17 +115,25 @@ def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
                 prepare_threshold=None,
             ) as connection:
                 connection.execute("SELECT 1").fetchone()
-            print(f"database ready after {attempt} attempt(s)")
-            return 0
+            return ReadinessResult(
+                exit_code=0,
+                state="ready",
+                attempts=attempt,
+                elapsed_seconds=time.monotonic() - started,
+                reason="database accepted a read probe",
+            )
         except psycopg.Error as exc:
-            last_error = str(exc).splitlines()[0]
+            last_error = _single_line(exc)
+            last_sqlstate = getattr(exc, "sqlstate", None)
             if not is_retryable_database_error(exc):
-                print(
-                    f"database configuration is invalid: {last_error}",
-                    file=sys.stderr,
-                    flush=True,
+                return ReadinessResult(
+                    exit_code=2,
+                    state="invalid",
+                    attempts=attempt,
+                    elapsed_seconds=time.monotonic() - started,
+                    reason=last_error,
+                    sqlstate=last_sqlstate,
                 )
-                return 2
             remaining = max(0.0, deadline - time.monotonic())
             if remaining <= 0:
                 break
@@ -107,13 +144,42 @@ def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-            time.sleep(delay)
+            if delay > 0:
+                time.sleep(delay)
+        except Exception as exc:  # A probe implementation failure is not a provider recovery signal.
+            return ReadinessResult(
+                exit_code=3,
+                state="failed",
+                attempts=attempt,
+                elapsed_seconds=time.monotonic() - started,
+                reason=_single_line(exc),
+            )
 
-    print(
-        f"database did not recover within {timeout_seconds}s: {last_error}",
-        file=sys.stderr,
+    return ReadinessResult(
+        exit_code=1,
+        state="recovering",
+        attempts=attempt,
+        elapsed_seconds=time.monotonic() - started,
+        reason=last_error,
+        sqlstate=last_sqlstate,
     )
-    return 1
+
+
+def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
+    """Compatibility wrapper returning the stable readiness exit code."""
+
+    result = probe_database(
+        timeout_seconds=timeout_seconds,
+        max_delay_seconds=max_delay_seconds,
+    )
+    stream = sys.stdout if result.exit_code == 0 else sys.stderr
+    print(
+        f"database state={result.state} attempts={result.attempts} "
+        f"elapsed={result.elapsed_seconds:.1f}s reason={result.reason}",
+        file=stream,
+        flush=True,
+    )
+    return result.exit_code
 
 
 def main() -> None:
@@ -131,15 +197,28 @@ def main() -> None:
     parser.add_argument(
         "--github-output",
         default=os.getenv("GITHUB_OUTPUT"),
-        help="Append state and exit_code outputs for GitHub Actions callers",
+        help="Append readiness outputs for GitHub Actions callers",
+    )
+    parser.add_argument(
+        "--json-output",
+        default=os.getenv("GAIA_DB_READINESS_JSON"),
+        help="Atomically write the complete readiness result as JSON",
     )
     args = parser.parse_args()
-    exit_code = wait_for_database(
+    result = probe_database(
         timeout_seconds=args.timeout_seconds,
-        max_delay_seconds=max(1.0, args.max_delay_seconds),
+        max_delay_seconds=args.max_delay_seconds,
     )
-    _write_state_output(exit_code, args.github_output)
-    raise SystemExit(exit_code)
+    _write_outputs(result, args.github_output)
+    _write_json(result, args.json_output)
+    stream = sys.stdout if result.exit_code == 0 else sys.stderr
+    print(
+        f"database state={result.state} attempts={result.attempts} "
+        f"elapsed={result.elapsed_seconds:.1f}s reason={result.reason}",
+        file=stream,
+        flush=True,
+    )
+    raise SystemExit(result.exit_code)
 
 
 if __name__ == "__main__":
