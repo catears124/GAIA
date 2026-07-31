@@ -63,16 +63,23 @@
     const running = Number(inventory.running || 0);
     const degraded = Number(inventory.degraded || 0);
     const percent = total ? (100 * fresh / total).toFixed(1) : "0.0";
+    const truthfullyHealthy = !cached && health.ok === true && health.stale !== true && inventory.healthy !== false && unhealthy === 0;
     const label = node?.querySelector("span:last-child");
     if (label) {
-      label.textContent = unhealthy
-        ? `${percent}% current · ${formatNumber(unhealthy)} catching up${running ? ` · ${running} crawling` : ""}${cached ? " · cached" : ""}`
-        : `${formatNumber(total)} sources current${running ? ` · ${running} crawling` : ""}${cached ? " · cached" : ""}`;
+      if (cached) {
+        label.textContent = `${formatNumber(fresh)} / ${formatNumber(total)} last known current · cached snapshot`;
+      } else if (truthfullyHealthy) {
+        label.textContent = `${formatNumber(total)} sources current${running ? ` · ${running} crawling` : ""}`;
+      } else {
+        label.textContent = `${percent}% current · ${formatNumber(unhealthy)} unhealthy${running ? ` · ${running} crawling` : ""}`;
+      }
     }
     if (node) {
-      node.title = `${formatNumber(fresh)} of ${formatNumber(total)} validated sources are current. ${formatNumber(degraded)} degraded.`;
+      node.title = cached
+        ? `Last known status only. ${formatNumber(fresh)} of ${formatNumber(total)} sources were current when cached.`
+        : `${formatNumber(fresh)} of ${formatNumber(total)} validated sources are current. ${formatNumber(degraded)} degraded.`;
       node.classList.remove("failed", "fresh", "stale");
-      node.classList.add(unhealthy === 0 ? "fresh" : "stale");
+      node.classList.add(truthfullyHealthy ? "fresh" : "stale");
     }
   }
 
@@ -81,7 +88,7 @@
     if (cached) renderSummary(cached.stats, cached.health, true);
     try {
       const [stats, health] = await Promise.all([fetchJson("/api/stats"), fetchJson("/api/health")]);
-      writeCache({ stats, health });
+      if (health.ok === true && health.stale !== true) writeCache({ stats, health });
       renderSummary(stats, health, false);
     } catch {
       const node = $("#freshness");
@@ -158,7 +165,7 @@
   function loadOutageController() {
     if (document.querySelector('script[data-gaia-outage-controller]')) return;
     const script = document.createElement("script");
-    script.src = "/assets/outage-controller.js?v=1.1.0";
+    script.src = "/assets/outage-controller.js?v=1.2.0";
     script.dataset.gaiaOutageController = "true";
     script.async = true;
     document.head.appendChild(script);
