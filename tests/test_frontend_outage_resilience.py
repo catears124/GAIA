@@ -7,9 +7,11 @@ FRONTEND = Path(__file__).parents[1] / "src" / "gaia" / "frontend"
 def test_resilience_layer_loads_before_application_fetches() -> None:
     html = (FRONTEND / "index.html").read_text(encoding="utf-8")
     resilience = html.index("api-resilience.js")
+    detail = html.index("offline-family-detail.js")
     application = html.index("app-v2.js")
-    assert resilience < application
+    assert resilience < detail < application
     assert 'api-resilience.js?v=2.0.0' in html
+    assert 'offline-family-detail.js?v=1.0.0' in html
 
 
 def test_resilience_layer_only_intercepts_safe_api_reads() -> None:
@@ -71,3 +73,15 @@ def test_offline_search_preserves_truthful_trust_and_cycle_filters() -> None:
     assert 'target === "exact"' in script
     assert 'year === 2027 && season === "summer"' in script
     assert 'target === "default" || target === "year_confirmed"' in script
+
+
+def test_family_drawer_uses_snapshot_details_when_live_api_is_down() -> None:
+    script = (FRONTEND / "offline-family-detail.js").read_text(encoding="utf-8")
+    assert r'^\/api\/families\/([^/]+)$' in script
+    assert "snapshot?.family_index" in script
+    assert "candidate?.family_key === request.key" in script
+    assert 'trust === "verified"' in script
+    assert 'trust === "leads"' in script
+    assert 'opening?.source_mode || ""' in script
+    assert '"X-GAIA-Offline-Detail": "1"' in script
+    assert "copy.openings = openings.filter" in script
