@@ -76,6 +76,23 @@ def snapshot_is_usable(probe: Probe, *, now: datetime | None = None) -> bool:
     return len(set(keys)) == len(keys)
 
 
+def _valid_database_outage(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    inventory = payload.get("inventory")
+    progress = payload.get("progress")
+    return (
+        payload.get("ok") is False
+        and payload.get("stale") is True
+        and payload.get("reason") == "database_unavailable"
+        and isinstance(inventory, dict)
+        and inventory.get("healthy") is False
+        and inventory.get("total") == 0
+        and isinstance(progress, dict)
+        and progress.get("stage") == "database-recovery"
+    )
+
+
 def evaluate(probes: dict[str, Probe]) -> SmokeResult:
     required = {"index", "emergency", "controller", "snapshot", "health", "stats", "families"}
     missing = sorted(required - probes.keys())
@@ -107,10 +124,16 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
             return SmokeResult("failure", "Health API dishonestly reports ok with unhealthy inventory", snapshot_usable, statuses)
         if health_payload.get("stale") is True:
             return SmokeResult("failure", "Health API returned stale data as a live response", snapshot_usable, statuses)
-    elif 500 <= health.status <= 599:
+    elif health.status == 503:
+        if not _valid_database_outage(health_payload):
+            return SmokeResult("failure", "Health API returned an invalid database-outage contract", snapshot_usable, statuses)
         if snapshot_usable:
-            return SmokeResult("pending", "Database/API recovery active; deployed offline inventory is usable", True, statuses)
-        return SmokeResult("failure", "Database/API offline and first-visit inventory snapshot is unusable", False, statuses)
+            return SmokeResult("pending", "Database recovery active; deployed offline inventory is usable", True, statuses)
+        return SmokeResult("failure", "Database recovery active and first-visit inventory snapshot is unusable", False, statuses)
+    elif health.status == 0:
+        return SmokeResult("failure", "Health API timed out or could not be reached", snapshot_usable, statuses)
+    elif 500 <= health.status <= 599:
+        return SmokeResult("failure", f"Health API returned an unclassified server failure (HTTP {health.status})", snapshot_usable, statuses)
     else:
         return SmokeResult("failure", f"Health API unavailable (HTTP {health.status})", snapshot_usable, statuses)
 
