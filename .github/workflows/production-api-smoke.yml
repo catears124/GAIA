@@ -20,7 +20,7 @@ jobs:
   smoke:
     name: Verify deployed UI, recovery assets, and public API contract
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -40,10 +40,10 @@ jobs:
           mkdir -p smoke
 
           fetch() {
-            local name="$1" path="$2"
+            local name="$1" path="$2" max_time="$3" retries="$4"
             if ! curl --silent --show-error --location \
-              --connect-timeout 10 --max-time 30 \
-              --retry 2 --retry-all-errors --retry-delay 2 \
+              --connect-timeout 5 --max-time "$max_time" \
+              --retry "$retries" --retry-all-errors --retry-delay 1 \
               --dump-header "smoke/${name}.headers" \
               --output "smoke/${name}.body" \
               --write-out '%{http_code}' \
@@ -53,13 +53,14 @@ jobs:
             fi
           }
 
-          fetch index /
-          fetch emergency /assets/emergency-outage.js
-          fetch controller /assets/outage-controller.js
-          fetch snapshot /assets/last-known-inventory.json
-          fetch health /api/health
-          fetch stats /api/stats
-          fetch families '/api/families?page=1&page_size=12&sort=newest'
+          fetch index / 12 1 &
+          fetch emergency /assets/emergency-outage.js 12 1 &
+          fetch controller /assets/outage-controller.js 12 1 &
+          fetch snapshot /assets/last-known-inventory.json 12 1 &
+          fetch health /api/health 12 1 &
+          fetch stats /api/stats 12 0 &
+          fetch families '/api/families?page=1&page_size=12&sort=newest' 12 0 &
+          wait
 
           python -m gaia.production_smoke smoke --output smoke/result.json
           state=$(jq -r '.state' smoke/result.json)
