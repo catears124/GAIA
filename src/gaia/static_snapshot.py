@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -12,7 +13,11 @@ DEFAULT_OUTPUT = Path(__file__).with_name("frontend") / "last-known-inventory.js
 
 
 def _key(path: str, **params: object) -> str:
-    values = [(name, str(value).lower() if isinstance(value, bool) else str(value)) for name, value in params.items() if value not in (None, "", False, 0)]
+    values = [
+        (name, str(value).lower() if isinstance(value, bool) else str(value))
+        for name, value in params.items()
+        if value not in (None, "", False, 0)
+    ]
     values.sort()
     query = urlencode(values)
     return f"{path}?{query}" if query else path
@@ -37,36 +42,75 @@ def _families(**overrides: object) -> dict[str, object]:
     return live_families(**values)  # type: ignore[arg-type]
 
 
+def _family_index() -> tuple[list[dict[str, object]], int, bool]:
+    """Export the visible family feed once for offline filtering and pagination."""
+
+    page_size = 100
+    max_pages = max(1, int(os.getenv("GAIA_STATIC_SNAPSHOT_MAX_PAGES", "100")))
+    items: list[dict[str, object]] = []
+    seen: set[str] = set()
+    expected_total = 0
+
+    for page in range(1, max_pages + 1):
+        payload = _families(page=page, page_size=page_size)
+        expected_total = max(expected_total, int(payload.get("total") or 0))
+        rows = payload.get("items") or []
+        if not isinstance(rows, list):
+            rows = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            key = str(raw.get("family_key") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(raw)
+        if not rows or len(items) >= expected_total:
+            break
+
+    complete = expected_total == 0 or len(items) >= expected_total
+    return items, expected_total, complete
+
+
 def build_snapshot() -> dict[str, object]:
     responses: dict[str, object] = {
         "/api/health": live_health(),
         "/api/stats": live_stats(),
         "/api/facets": live_facets(),
         _key("/api/facets", trust="verified"): live_facets(trust="verified"),
-        _key("/api/facets", target="exact", trust="verified"): live_facets(trust="verified", target="exact"),
+        _key("/api/facets", target="exact", trust="verified"): live_facets(
+            trust="verified", target="exact"
+        ),
     }
 
-    # Keep enough default pages for useful first-visit browsing during a database outage.
+    # Retain exact common routes for instant fallback and backwards compatibility.
     for page in range(1, 6):
         params = {} if page == 1 else {"page": page}
         responses[_key("/api/families", **params)] = _families(page=page)
 
     presets = [
-        ({"posted_within": 1, "trust": "verified"}, "new verified"),
-        ({"target": "exact", "trust": "verified"}, "summer 2027"),
-        ({"category": "software", "target": "default", "trust": "verified"}, "software 2027"),
-        ({"category": "quant", "target": "default", "trust": "verified"}, "quant 2027"),
-        ({"remote": True, "trust": "verified"}, "remote verified"),
+        {"posted_within": 1, "trust": "verified"},
+        {"target": "exact", "trust": "verified"},
+        {"category": "software", "target": "default", "trust": "verified"},
+        {"category": "quant", "target": "default", "trust": "verified"},
+        {"remote": True, "trust": "verified"},
     ]
-    for params, _label in presets:
+    for params in presets:
         responses[_key("/api/families", **params)] = _families(**params)
 
+    family_index, family_index_total, family_index_complete = _family_index()
     health = responses["/api/health"]
     inventory = health.get("inventory", {}) if isinstance(health, dict) else {}
     return {
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
-        "source_activity_at": inventory.get("latest_activity_at") if isinstance(inventory, dict) else None,
+        "source_activity_at": inventory.get("latest_activity_at")
+        if isinstance(inventory, dict)
+        else None,
         "max_stale_seconds": 86_400,
+        "family_index": family_index,
+        "family_index_total": family_index_total,
+        "family_index_complete": family_index_complete,
         "responses": responses,
     }
 
@@ -75,13 +119,17 @@ def write_snapshot(path: Path = DEFAULT_OUTPUT) -> Path:
     payload = build_snapshot()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, separators=(",", ":"), default=str), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(payload, separators=(",", ":"), default=str), encoding="utf-8"
+    )
     temporary.replace(path)
     return path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export a deployable last-known GAIA inventory snapshot")
+    parser = argparse.ArgumentParser(
+        description="Export a deployable last-known GAIA inventory snapshot"
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     output = write_snapshot(args.output)
