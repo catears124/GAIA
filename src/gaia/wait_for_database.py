@@ -10,6 +10,22 @@ import psycopg
 
 from .db_base import _database_url
 
+_PERMANENT_CONFIGURATION_ERRORS = (
+    "invalid uri query parameter",
+    "invalid connection option",
+    "missing \"=\" after",
+    "invalid integer value",
+    "invalid sslmode value",
+    "could not translate host name",
+)
+
+
+def is_retryable_database_error(error: BaseException) -> bool:
+    """Separate transient database recovery from broken connection configuration."""
+
+    message = str(error).casefold()
+    return not any(marker in message for marker in _PERMANENT_CONFIGURATION_ERRORS)
+
 
 def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
     """Wait through transient Supabase failover/restart windows without stampeding it."""
@@ -33,6 +49,13 @@ def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
             return 0
         except psycopg.Error as exc:
             last_error = str(exc).splitlines()[0]
+            if not is_retryable_database_error(exc):
+                print(
+                    f"database configuration is invalid: {last_error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 2
             remaining = max(0.0, deadline - time.monotonic())
             if remaining <= 0:
                 break
