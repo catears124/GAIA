@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -105,10 +104,10 @@ def test_database_construction_remains_safe_without_runtime_credentials(
             pass
 
 
-def test_vercel_entrypoint_enables_locked_migration_and_empty_database_recovery() -> None:
+def test_vercel_entrypoint_keeps_build_imports_free_of_database_io() -> None:
     source = Path("app.py").read_text(encoding="utf-8")
 
-    assert 'os.environ.setdefault("GAIA_AUTO_MIGRATE", "1")' in source
+    assert 'os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")' in source
     assert 'os.environ.setdefault("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1")' in source
     assert "install_runtime_bootstrap(app)" in source
     assert source.index("install_runtime_bootstrap(app)") < source.index(
@@ -116,9 +115,10 @@ def test_vercel_entrypoint_enables_locked_migration_and_empty_database_recovery(
     )
 
 
-def test_runtime_bootstrap_is_bounded_leased_and_materializes_registry_rows() -> None:
+def test_runtime_bootstrap_migrates_then_materializes_registry_rows() -> None:
     source = Path("src/gaia/runtime_bootstrap.py").read_text(encoding="utf-8")
 
+    assert "await asyncio.to_thread(database.migrate)" in source
     assert "lease_expires_at" in source
     assert "GAIA_BOOTSTRAP_BUDGET_SECONDS" in source
     assert "asyncio.wait_for" in source
