@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - app.py
+      - vercel.json
       - src/gaia/api_resilience.py
       - src/gaia/request_bootstrap.py
       - src/gaia/runtime_bootstrap.py
