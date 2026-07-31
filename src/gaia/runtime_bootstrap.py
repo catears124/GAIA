@@ -86,11 +86,19 @@ def _finish_empty_database_bootstrap(
 
 
 async def bootstrap_empty_database() -> None:
-    """Recover an empty project from public registries within one Vercel invocation."""
+    """Initialize and recover an empty project within one Vercel invocation."""
     if os.getenv("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1") != "1":
         return
 
     database = LiveDatabase(migrate=False)
+    try:
+        # Vercel build imports never execute startup handlers. This is the first safe
+        # place to perform real network I/O with the runtime Supabase credentials.
+        await asyncio.to_thread(database.migrate)
+    except Exception:
+        LOGGER.exception("could not initialize the recreated Supabase schema")
+        return
+
     worker_id = _worker_id()
     try:
         claimed = _claim_empty_database_bootstrap(database, worker_id)
@@ -130,8 +138,6 @@ async def bootstrap_empty_database() -> None:
         error = repr(exc)
         LOGGER.exception("empty database bootstrap failed")
     finally:
-        # Registry rows are persisted before provider probes. Rebuild even after a
-        # bounded timeout so the public feed can immediately expose recovered leads.
         try:
             database.rebuild_families()
         except Exception as exc:
@@ -159,8 +165,6 @@ def install_runtime_bootstrap(app: FastAPI) -> None:
         try:
             await bootstrap_empty_database()
         except Exception:
-            # Startup must remain available so public endpoints can return the truthful
-            # 503 contract even when Supabase itself is unreachable.
             LOGGER.exception("runtime bootstrap crashed")
 
     app.add_event_handler("startup", startup)
