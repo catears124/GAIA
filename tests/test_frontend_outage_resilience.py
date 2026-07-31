@@ -9,6 +9,7 @@ def test_resilience_layer_loads_before_application_fetches() -> None:
     resilience = html.index("api-resilience.js")
     application = html.index("app-v2.js")
     assert resilience < application
+    assert 'api-resilience.js?v=2.0.0' in html
 
 
 def test_resilience_layer_only_intercepts_safe_api_reads() -> None:
