@@ -61,8 +61,10 @@ jobs:
             "$deployments_url" > smoke/deployments.json
 
           mapfile -t deployment_ids < <(
-            jq -r '[.[] | select((.environment // "" | ascii_downcase) == "production"), .[]] | unique_by(.id) | .[].id' \
-              smoke/deployments.json
+            jq -r '(
+              map(select(((.environment // "") | ascii_downcase) == "production"))
+              + map(select(((.environment // "") | ascii_downcase) != "production"))
+            ) | .[].id' smoke/deployments.json
           )
           base_url=""
           for deployment_id in "${deployment_ids[@]}"; do
@@ -83,7 +85,8 @@ jobs:
           done
 
           if [[ -z "$base_url" ]]; then
-            base_url="https://gaiajob.vercel.app"
+            echo "No successful Vercel deployment URL was found" >&2
+            exit 1
           fi
           base_url="${base_url%/}"
           printf '%s\n' "$base_url" > smoke/base-url
