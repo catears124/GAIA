@@ -28,30 +28,39 @@ class _Database:
         self.families_rebuilt += 1
 
 
-def test_critical_reconcile_skips_auxiliary_employer_census(monkeypatch) -> None:
+def test_reconcile_rebuilds_all_public_read_models(monkeypatch) -> None:
     database = _Database()
-    monkeypatch.setenv("GAIA_RECONCILE_EMPLOYER_UNIVERSE", "0")
+    calls: list[str] = []
     monkeypatch.setattr(cli, "Database", lambda migrate=False: database)
     monkeypatch.setattr(
         cli,
         "rebuild_employer_universe",
-        lambda _database: (_ for _ in ()).throw(AssertionError("auxiliary census ran")),
+        lambda _database: calls.append("postings") or {"employers": 7, "evidence": 9, "frontier": 4},
     )
     monkeypatch.setattr(
         cli,
         "merge_observations_into_universe",
-        lambda _database: (_ for _ in ()).throw(AssertionError("ecosystem merge ran")),
+        lambda _database: calls.append("ecosystem") or {"observations": 3, "merged": 2, "inserted": 1},
     )
 
-    assert cli.run_reconcile() == {"families_rebuilt": 1}
+    assert cli.run_reconcile() == {
+        "families_rebuilt": 1,
+        "employers": 7,
+        "evidence": 9,
+        "frontier": 4,
+        "ecosystem_observations": 3,
+        "ecosystem_merged": 2,
+        "ecosystem_inserted": 1,
+    }
     assert database.families_rebuilt == 1
+    assert calls == ["postings", "ecosystem"]
 
 
-def test_production_reconcile_prioritizes_public_feed() -> None:
+def test_production_reconcile_includes_employer_universe() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "reconcile.yml"
     ).read_text(encoding="utf-8")
 
-    assert 'GAIA_RECONCILE_EMPLOYER_UNIVERSE: "0"' in workflow
-    assert "Public role-feed reconciliation is running" in workflow
-    assert "Public role feed is current" in workflow
+    assert "GAIA_RECONCILE_EMPLOYER_UNIVERSE" not in workflow
+    assert "Rebuild critical public role feed and employer universe" in workflow
+    assert "Public role feed and employer universe are current" in workflow
