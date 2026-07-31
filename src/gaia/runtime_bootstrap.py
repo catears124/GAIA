@@ -38,33 +38,8 @@ def _initialize_schema(database: LiveDatabase) -> None:
                 connection.execute(statement)
 
     with database.connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO source_catalog(source, kind, scope, spec, validated, origin)
-            VALUES (
-                'google-careers', 'google-careers', 'current',
-                '{}'::jsonb, TRUE, 'runtime-bootstrap'
-            )
-            ON CONFLICT(source) DO UPDATE SET
-                kind=excluded.kind,
-                scope='current',
-                spec=excluded.spec,
-                validated=TRUE,
-                last_discovered_at=now()
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO crawl_targets(
-                source, enabled, scheduled, priority, interval_seconds, next_run_at
-            ) VALUES ('google-careers', TRUE, TRUE, 30, 1200, now())
-            ON CONFLICT(source) DO UPDATE SET
-                enabled=TRUE,
-                scheduled=TRUE,
-                next_run_at=LEAST(crawl_targets.next_run_at, now()),
-                updated_at=now()
-            """
-        )
+        # Discovery is due immediately, but no source is called validated until its
+        # collector completes a real employer-board enumeration.
         connection.execute(
             """
             INSERT INTO worker_tasks(task_key, next_run_at)
