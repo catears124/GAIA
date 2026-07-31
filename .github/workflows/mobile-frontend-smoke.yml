@@ -1,0 +1,96 @@
+name: Mobile frontend smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/gaia/frontend/index.html"
+      - "src/gaia/frontend/app-improvements.js"
+      - "src/gaia/frontend/app-v2.js"
+      - "src/gaia/frontend/product-v2.css"
+      - "src/gaia/frontend/dark-mode.css"
+      - "scripts/mobile_frontend_smoke.mjs"
+      - ".github/workflows/mobile-frontend-smoke.yml"
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-mobile-frontend-smoke
+  cancel-in-progress: true
+
+jobs:
+  mobile:
+    name: Verify rendered 390x844 production layout
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Allow Vercel production deployment to settle
+        if: github.event_name == 'push'
+        run: sleep 45
+
+      - name: Install browser runtime
+        shell: bash
+        run: |
+          printf '%s\n' '{"private":true,"type":"module"}' > package.json
+          npm install --no-save --package-lock=false playwright@1.54.1
+          npx playwright install --with-deps chromium
+
+      - name: Run rendered mobile product smoke
+        id: smoke
+        continue-on-error: true
+        env:
+          GAIA_BASE_URL: https://gaiajob.vercel.app
+          GAIA_MOBILE_SMOKE_OUTPUT: mobile-smoke
+        run: node scripts/mobile_frontend_smoke.mjs
+
+      - name: Publish mobile frontend status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        shell: bash
+        run: |
+          if [ "$SMOKE_OUTCOME" = success ]; then
+            state=success
+            description="Rendered 390x844 mobile product smoke passed"
+          else
+            state=failure
+            description="Rendered mobile product smoke failed"
+          fi
+          payload=$(jq -n \
+            --arg state "$state" \
+            --arg context gaia/mobile-frontend \
+            --arg description "$description" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
+
+      - name: Upload mobile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-frontend-smoke-${{ github.run_id }}
+          path: mobile-smoke/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail mobile regressions
+        if: always()
+        run: test "${{ steps.smoke.outcome }}" = success
