@@ -12,6 +12,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_DATABASE_VARIABLES = (
+    "GAIA_DATABASE_URL",
+    "POSTGRES_URL",
+    "DATABASE_URL",
+    "SUPABASE_DB_URL",
+)
+_DATABASE_NOT_CONFIGURED = (
+    "PostgreSQL is not configured. Set GAIA_DATABASE_URL (or DATABASE_URL) "
+    "to the Supabase pooler connection string."
+)
+_SCHEMA_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _normalize_database_url(value: str) -> str:
     """Remove integration metadata that libpq does not recognize."""
@@ -24,6 +36,13 @@ def _normalize_database_url(value: str) -> str:
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
     )
+
+
+def _configured_database_url() -> str | None:
+    for variable in _DATABASE_VARIABLES:
+        if value := os.getenv(variable):
+            return _normalize_database_url(value)
+    return None
 
 
 def _is_legacy_path(value: str | Path | None) -> bool:
@@ -43,14 +62,8 @@ def _is_legacy_path(value: str | Path | None) -> bool:
 # Vercel's Supabase integration provides POSTGRES_URL automatically. Normalize it
 # into GAIA's explicit name before importing the database implementation so local,
 # Vercel, and standalone Supabase environments share one code path.
-database_url = os.getenv("GAIA_DATABASE_URL")
-if not database_url:
-    for variable in ("POSTGRES_URL", "DATABASE_URL", "SUPABASE_DB_URL"):
-        if value := os.getenv(variable):
-            database_url = value
-            break
-if database_url:
-    os.environ["GAIA_DATABASE_URL"] = _normalize_database_url(database_url)
+if database_url := _configured_database_url():
+    os.environ["GAIA_DATABASE_URL"] = database_url
 
 from .db_base import (  # noqa: E402
     EMPLOYER_DATE_MODES,
@@ -90,7 +103,13 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
 
 
 class Database(WriteMixin, ReadMixin, BaseDatabase):
-    """GAIA's PostgreSQL repository and query service."""
+    """GAIA's PostgreSQL repository and query service.
+
+    Constructing the repository is intentionally safe without database credentials.
+    Web frameworks and build systems import application modules before runtime secrets
+    are necessarily available. Configuration is therefore required only when a real
+    database operation begins, not while importing the ASGI application.
+    """
 
     def __init__(
         self,
@@ -105,15 +124,34 @@ class Database(WriteMixin, ReadMixin, BaseDatabase):
         # automatic production migrations globally.
         if migrate is None and _is_legacy_path(url):
             migrate = True
+
+        if url is None and _configured_database_url() is None:
+            self.url: str | None = None
+            self.path = self
+            self.schema = schema or os.getenv("GAIA_SCHEMA", "public")
+            if not _SCHEMA_PATTERN.fullmatch(self.schema):
+                raise ValueError(f"invalid PostgreSQL schema name: {self.schema!r}")
+            self.timeout = max(1, int(float(os.getenv("GAIA_DB_TIMEOUT", "60"))))
+            return
+
         super().__init__(url, schema=schema, migrate=migrate)
+
+    def _require_configuration(self) -> None:
+        if self.url is None:
+            raise RuntimeError(_DATABASE_NOT_CONFIGURED)
 
     @contextmanager
     def connect(self) -> Iterator[_PsycopgConnectionAdapter]:
+        self._require_configuration()
         # BaseDatabase owns transaction commit/rollback and connection cleanup.
         # Replace only the compatibility adapter so bulk writes use a cursor,
         # which is where psycopg3 implements executemany().
         with BaseDatabase.connect(self) as adapter:
             yield _PsycopgConnectionAdapter(adapter._connection)
+
+    def migrate(self) -> None:
+        self._require_configuration()
+        BaseDatabase.migrate(self)
 
 
 __all__ = [
