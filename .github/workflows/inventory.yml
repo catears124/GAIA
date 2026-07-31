@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/inventory.yml"
+      - "src/gaia/wait_for_database.py"
       - "src/gaia/repair_indexes.py"
       - "src/gaia/inventory.py"
       - "src/gaia/inventory_runtime.py"
@@ -23,14 +24,14 @@ permissions:
   contents: read
   statuses: write
 
-# PostgreSQL source leases are the only concurrency boundary. Workflow-level
-# serialization created a permanent queue whenever a pulse outlived its cadence.
+# PostgreSQL source leases are the data concurrency boundary. Limit runner fan-out
+# so a Supabase restart cannot turn ten simultaneous reconnect storms into a longer outage.
 jobs:
   repair:
     if: github.event_name != 'schedule'
     name: Repair production query indexes
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
@@ -51,6 +52,8 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+      - name: Wait through transient database recovery
+        run: python -m gaia.wait_for_database --timeout-seconds 600
       - name: Repair postings indexes with retries
         shell: bash
         run: |
@@ -63,17 +66,17 @@ jobs:
               echo "Index repair failed after three attempts." >&2
               exit 1
             fi
-            sleep $((attempt * 15))
+            python -m gaia.wait_for_database --timeout-seconds 300
           done
 
   inventory:
     name: Inventory · ${{ matrix.lane }}
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 28
     environment: production
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 6
       matrix:
         include:
           - lane: greenhouse-lever
@@ -117,10 +120,6 @@ jobs:
       GAIA_SKIP_CATALOG_SYNC: "1"
       GAIA_DEFER_FAMILY_REBUILD: "1"
       GAIA_WORKER_KINDS: ${{ matrix.kinds }}
-      # GAIA only serves internships. Blank Workday searches enumerated entire
-      # enterprise boards (often 1,000–2,000 rows) and made a 90-minute freshness
-      # target mathematically impossible. Query-scoped collection covers the actual
-      # 2027 intern/co-op surface and completes fast enough to remain continuously fresh.
       GAIA_WORKDAY_FULL_INVENTORY: "0"
       GAIA_WORKDAY_MAX_PER_TERM: "1200"
       GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
@@ -140,6 +139,8 @@ jobs:
           }
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+      - name: Wait through transient database recovery
+        run: python -m gaia.wait_for_database --timeout-seconds 600
       - name: Drain due employer boards with bounded retries
         shell: bash
         run: |
@@ -161,7 +162,7 @@ jobs:
               echo "${{ matrix.lane }} failed after three attempts." >&2
               exit 1
             fi
-            sleep $((attempt * 20))
+            python -m gaia.wait_for_database --timeout-seconds 300
           done
 
   status:
@@ -188,7 +189,7 @@ jobs:
               ;;
             *)
               state=failure
-              description="One or more provider inventory lanes failed after retries"
+              description="One or more provider inventory lanes failed after recovery retries"
               ;;
           esac
           payload=$(jq -n \
