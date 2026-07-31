@@ -90,6 +90,29 @@ try {
     initialFailures.push("production HTML did not load the cache-busted enhancement asset");
   }
 
+  await page.locator("#theme-toggle").click();
+  await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
+  await page.screenshot({ path: `${outputDir}/dark-viewport.png`, fullPage: false });
+  const darkMode = await page.evaluate(() => {
+    const details = document.querySelector("#advanced-filters");
+    const firstJob = document.querySelector("#job-grid .job-row");
+    return {
+      theme: document.documentElement.dataset.theme ?? null,
+      filtersOpen: Boolean(details?.open),
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+      firstJobTop: firstJob?.getBoundingClientRect().top ?? null,
+      bodyBackground: getComputedStyle(document.body).backgroundColor,
+    };
+  });
+  report.darkMode = darkMode;
+  if (darkMode.theme !== "dark") initialFailures.push("theme toggle did not enter dark mode");
+  if (darkMode.filtersOpen) initialFailures.push("dark mode unexpectedly opened advanced filters");
+  if (darkMode.documentWidth > darkMode.viewportWidth + 1) initialFailures.push("dark mode has horizontal overflow");
+  if (darkMode.firstJobTop === null || darkMode.firstJobTop >= report.viewportHeight) {
+    initialFailures.push("dark mode pushed the first job below the phone viewport");
+  }
+
   await page.locator('[data-preset="summer2027"]').click();
   await page.waitForFunction(() =>
     document.querySelector("#active-filter-count")?.textContent?.includes("2 active")
