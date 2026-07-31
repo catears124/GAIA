@@ -18,7 +18,7 @@ env:
 
 jobs:
   smoke:
-    name: Verify deployed UI and public API contract
+    name: Verify deployed UI, recovery assets, and public API contract
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -43,21 +43,44 @@ jobs:
           }
 
           fetch index / || true
+          fetch emergency /assets/emergency-outage.js || true
+          fetch controller /assets/outage-controller.js || true
+          fetch snapshot /assets/last-known-inventory.json || true
           fetch health /api/health || true
           fetch stats /api/stats || true
           fetch families '/api/families?page=1&page_size=12&sort=newest' || true
 
-          index_status=$(cat smoke/index.status 2>/dev/null || echo 000)
-          health_status=$(cat smoke/health.status 2>/dev/null || echo 000)
-          stats_status=$(cat smoke/stats.status 2>/dev/null || echo 000)
-          families_status=$(cat smoke/families.status 2>/dev/null || echo 000)
+          status() { cat "smoke/$1.status" 2>/dev/null || echo 000; }
+          index_status=$(status index)
+          emergency_status=$(status emergency)
+          controller_status=$(status controller)
+          snapshot_status=$(status snapshot)
+          health_status=$(status health)
+          stats_status=$(status stats)
+          families_status=$(status families)
+
+          snapshot_usable=false
+          if [ "$snapshot_status" = 200 ] && jq -e '
+            (.generated_at | type == "string") and
+            (.family_index | type == "array" and length > 0) and
+            (.family_index_complete == true) and
+            (.family_index_total | type == "number" and . > 0)
+          ' smoke/snapshot.body >/dev/null 2>&1; then
+            snapshot_usable=true
+          fi
 
           if [ "$index_status" != 200 ]; then
             state=failure
             description="Deployed UI unavailable (HTTP ${index_status})"
-          elif ! grep -q 'api-resilience.js' smoke/index.body; then
+          elif ! grep -q 'emergency-outage.js' smoke/index.body || ! grep -q 'api-resilience.js' smoke/index.body; then
             state=failure
-            description="Deployed UI missing resilience runtime"
+            description="Deployed UI missing resilience runtimes"
+          elif [ "$emergency_status" != 200 ] || ! grep -q 'MAX_EMERGENCY_AGE_MS' smoke/emergency.body; then
+            state=failure
+            description="Emergency inventory runtime missing or invalid"
+          elif [ "$controller_status" != 200 ] || ! grep -q 'liveHealthProbe' smoke/controller.body || ! grep -q 'XMLHttpRequest' smoke/controller.body; then
+            state=failure
+            description="Automatic outage recovery controller missing or stale"
           elif [ "$health_status" = 200 ]; then
             if ! jq -e 'type == "object" and (.inventory | type == "object") and (.ok | type == "boolean")' smoke/health.body >/dev/null 2>&1; then
               state=failure
@@ -67,8 +90,13 @@ jobs:
               description="Health API dishonestly reports ok with unhealthy inventory"
             fi
           elif [[ "$health_status" =~ ^5 ]]; then
-            state=pending
-            description="Production database/API recovery active (HTTP ${health_status})"
+            if [ "$snapshot_usable" = true ]; then
+              state=pending
+              description="Database/API recovery active; deployed offline inventory is usable"
+            else
+              state=failure
+              description="Database/API offline and first-visit inventory snapshot is unusable"
+            fi
           else
             state=failure
             description="Health API unavailable (HTTP ${health_status})"
@@ -86,6 +114,7 @@ jobs:
 
           printf '%s\n' "$state" > smoke/state
           printf '%s\n' "$description" > smoke/description
+          printf '%s\n' "$snapshot_usable" > smoke/snapshot-usable
           echo "state=$state" >> "$GITHUB_OUTPUT"
           echo "description=$description" >> "$GITHUB_OUTPUT"
 
@@ -94,6 +123,9 @@ jobs:
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
             echo "- UI: ${index_status}"
+            echo "- Emergency runtime: ${emergency_status}"
+            echo "- Recovery controller: ${controller_status}"
+            echo "- Offline snapshot: ${snapshot_status} (usable=${snapshot_usable})"
             echo "- Health: ${health_status}"
             echo "- Stats: ${stats_status}"
             echo "- Families: ${families_status}"
