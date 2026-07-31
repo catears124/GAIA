@@ -10,10 +10,13 @@ on:
       - ".github/workflows/static-snapshot.yml"
       - "src/gaia/static_snapshot.py"
       - "src/gaia/static_snapshot_http.py"
+      - "src/gaia/snapshot_validation.py"
+      - "src/gaia/restore_snapshot_artifact.py"
       - "src/gaia/product_api.py"
       - "src/gaia/api.py"
 
 permissions:
+  actions: read
   contents: write
   statuses: write
 
@@ -47,6 +50,12 @@ jobs:
           cache: pip
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+      - name: Restore latest durable snapshot artifact
+        id: artifact_restore
+        continue-on-error: true
+        run: |
+          python -m gaia.restore_snapshot_artifact --max-artifacts 50
+          echo artifact-restored > snapshot-source.txt
       - name: Export through healthy public API
         id: api_export
         continue-on-error: true
@@ -65,47 +74,29 @@ jobs:
         run: |
           python -m gaia.static_snapshot
           echo database > snapshot-source.txt
-      - name: Validate generated or retained snapshot
+      - name: Validate generated or recovered snapshot
         id: validate
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
-          from datetime import UTC, datetime
           from pathlib import Path
+          from gaia.snapshot_validation import validate_snapshot_file
 
-          path = Path("src/gaia/frontend/last-known-inventory.json")
-          payload = json.loads(path.read_text())
-          responses = payload.get("responses", {})
-          required = {"/api/health", "/api/stats", "/api/facets", "/api/families"}
-          missing = required - set(responses)
-          index = payload.get("family_index")
-          expected = int(payload.get("family_index_total") or 0)
-          generated = payload.get("generated_at")
-          if missing or not isinstance(index, list) or not index or expected <= 0:
-              raise SystemExit(
-                  f"no usable snapshot: missing={sorted(missing)} index={len(index) if isinstance(index, list) else 'invalid'} expected={expected}"
-              )
-          if payload.get("family_index_complete") is not True or len(index) < expected:
-              raise SystemExit(f"offline index incomplete: exported={len(index)} expected={expected}")
-          keys = [str(item.get("family_key") or "") for item in index if isinstance(item, dict)]
-          if len(keys) != len(set(keys)) or any(not key for key in keys):
-              raise SystemExit("offline index contains missing or duplicate keys")
-          generated_at = datetime.fromisoformat(str(generated).replace("Z", "+00:00"))
-          age_hours = (datetime.now(UTC) - generated_at.astimezone(UTC)).total_seconds() / 3600
-          if age_hours > 168:
-              raise SystemExit(f"retained snapshot is too old: {age_hours:.1f} hours")
-          size_mb = path.stat().st_size / 1_000_000
-          if size_mb > 15:
-              raise SystemExit(f"snapshot is unexpectedly large: {size_mb:.2f} MB")
-          print(f"snapshot roles={len(index)} age_hours={age_hours:.2f} size_mb={size_mb:.2f}")
+          report = validate_snapshot_file(
+              Path("src/gaia/frontend/last-known-inventory.json"), max_age_hours=168
+          )
+          print(
+              f"snapshot roles={report.roles} expected={report.expected_roles} "
+              f"age_hours={report.age_hours:.2f} size_mb={report.size_mb:.2f}"
+          )
           PY
           if [ ! -f snapshot-source.txt ]; then
             echo retained > snapshot-source.txt
           fi
           echo "source=$(cat snapshot-source.txt)" >> "$GITHUB_OUTPUT"
       - name: Upload durable snapshot artifact
+        if: steps.validate.outcome == 'success' && (steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database')
         uses: actions/upload-artifact@v4
         with:
           name: gaia-inventory-snapshot-${{ github.run_id }}
@@ -113,7 +104,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - name: Commit changed snapshot
-        if: steps.validate.outputs.source != 'retained'
+        if: steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database'
         shell: bash
         run: |
           set -euo pipefail
@@ -139,9 +130,9 @@ jobs:
           if [ "${{ steps.validate.outcome }}" != success ]; then
             state=failure
             description="No usable deployable inventory snapshot exists"
-          elif [ "$source" = retained ]; then
+          elif [ "$source" = retained ] || [ "$source" = artifact-restored ]; then
             state=pending
-            description="Database/API recovery active; retained snapshot remains usable"
+            description="Database/API recovery active; recovered snapshot remains usable"
           else
             state=success
             description="Deployable inventory snapshot refreshed via ${source}"
