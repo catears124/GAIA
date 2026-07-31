@@ -22,96 +22,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install smoke evaluator
+        run: python -m pip install --disable-pip-version-check --no-deps -e .
+
       - name: Probe production
         id: probe
         shell: bash
         run: |
           set -uo pipefail
           mkdir -p smoke
-          state=success
-          description="Production UI and APIs passed black-box smoke checks"
 
           fetch() {
             local name="$1" path="$2"
-            curl --silent --show-error --location \
+            if ! curl --silent --show-error --location \
               --connect-timeout 10 --max-time 30 \
               --retry 2 --retry-all-errors --retry-delay 2 \
               --dump-header "smoke/${name}.headers" \
               --output "smoke/${name}.body" \
               --write-out '%{http_code}' \
-              "${GAIA_BASE_URL}${path}" > "smoke/${name}.status"
+              "${GAIA_BASE_URL}${path}" > "smoke/${name}.status"; then
+              printf '000\n' > "smoke/${name}.status"
+              : > "smoke/${name}.body"
+            fi
           }
 
-          fetch index / || true
-          fetch emergency /assets/emergency-outage.js || true
-          fetch controller /assets/outage-controller.js || true
-          fetch snapshot /assets/last-known-inventory.json || true
-          fetch health /api/health || true
-          fetch stats /api/stats || true
-          fetch families '/api/families?page=1&page_size=12&sort=newest' || true
+          fetch index /
+          fetch emergency /assets/emergency-outage.js
+          fetch controller /assets/outage-controller.js
+          fetch snapshot /assets/last-known-inventory.json
+          fetch health /api/health
+          fetch stats /api/stats
+          fetch families '/api/families?page=1&page_size=12&sort=newest'
 
-          status() { cat "smoke/$1.status" 2>/dev/null || echo 000; }
-          index_status=$(status index)
-          emergency_status=$(status emergency)
-          controller_status=$(status controller)
-          snapshot_status=$(status snapshot)
-          health_status=$(status health)
-          stats_status=$(status stats)
-          families_status=$(status families)
-
-          snapshot_usable=false
-          if [ "$snapshot_status" = 200 ] && jq -e '
-            (.generated_at | type == "string") and
-            (.family_index | type == "array" and length > 0) and
-            (.family_index_complete == true) and
-            (.family_index_total | type == "number" and . > 0)
-          ' smoke/snapshot.body >/dev/null 2>&1; then
-            snapshot_usable=true
-          fi
-
-          if [ "$index_status" != 200 ]; then
-            state=failure
-            description="Deployed UI unavailable (HTTP ${index_status})"
-          elif ! grep -q 'emergency-outage.js' smoke/index.body || ! grep -q 'api-resilience.js' smoke/index.body; then
-            state=failure
-            description="Deployed UI missing resilience runtimes"
-          elif [ "$emergency_status" != 200 ] || ! grep -q 'MAX_EMERGENCY_AGE_MS' smoke/emergency.body; then
-            state=failure
-            description="Emergency inventory runtime missing or invalid"
-          elif [ "$controller_status" != 200 ] || ! grep -q 'liveHealthProbe' smoke/controller.body || ! grep -q 'XMLHttpRequest' smoke/controller.body; then
-            state=failure
-            description="Automatic outage recovery controller missing or stale"
-          elif [ "$health_status" = 200 ]; then
-            if ! jq -e 'type == "object" and (.inventory | type == "object") and (.ok | type == "boolean")' smoke/health.body >/dev/null 2>&1; then
-              state=failure
-              description="Health API returned an invalid contract"
-            elif jq -e '.ok == true and ((.inventory.healthy // false) != true)' smoke/health.body >/dev/null 2>&1; then
-              state=failure
-              description="Health API dishonestly reports ok with unhealthy inventory"
-            fi
-          elif [[ "$health_status" =~ ^5 ]]; then
-            if [ "$snapshot_usable" = true ]; then
-              state=pending
-              description="Database/API recovery active; deployed offline inventory is usable"
-            else
-              state=failure
-              description="Database/API offline and first-visit inventory snapshot is unusable"
-            fi
-          else
-            state=failure
-            description="Health API unavailable (HTTP ${health_status})"
-          fi
-
-          if [ "$state" = success ]; then
-            if [ "$stats_status" != 200 ] || ! jq -e 'type == "object"' smoke/stats.body >/dev/null 2>&1; then
-              state=failure
-              description="Stats API contract failed (HTTP ${stats_status})"
-            elif [ "$families_status" != 200 ] || ! jq -e '(.items | type == "array") and (.total | type == "number")' smoke/families.body >/dev/null 2>&1; then
-              state=failure
-              description="Families API contract failed (HTTP ${families_status})"
-            fi
-          fi
-
+          python -m gaia.production_smoke smoke --output smoke/result.json
+          state=$(jq -r '.state' smoke/result.json)
+          description=$(jq -r '.description' smoke/result.json)
+          snapshot_usable=$(jq -r '.snapshot_usable' smoke/result.json)
           printf '%s\n' "$state" > smoke/state
           printf '%s\n' "$description" > smoke/description
           printf '%s\n' "$snapshot_usable" > smoke/snapshot-usable
@@ -122,13 +75,8 @@ jobs:
             echo "### Production smoke"
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
-            echo "- UI: ${index_status}"
-            echo "- Emergency runtime: ${emergency_status}"
-            echo "- Recovery controller: ${controller_status}"
-            echo "- Offline snapshot: ${snapshot_status} (usable=${snapshot_usable})"
-            echo "- Health: ${health_status}"
-            echo "- Stats: ${stats_status}"
-            echo "- Families: ${families_status}"
+            echo "- Offline snapshot usable: ${snapshot_usable}"
+            jq -r '.statuses | to_entries[] | "- \(.key): HTTP \(.value)"' smoke/result.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish commit status
