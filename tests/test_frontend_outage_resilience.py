@@ -129,6 +129,37 @@ def test_cached_summary_is_never_styled_as_healthy() -> None:
     assert "truthfullyHealthy = !cached" in script
     assert "health.ok === true" in script
     assert "health.stale !== true" in script
+    assert "total > 0" in script
     assert 'node.classList.add(truthfullyHealthy ? "fresh" : "stale")' in script
     assert "cached snapshot" in script
-    assert 'outage-controller.js?v=1.2.0' in script
+
+
+def test_summary_requests_are_bounded_and_non_overlapping() -> None:
+    script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
+    assert "REQUEST_TIMEOUT_MS = 8000" in script
+    assert "new AbortController()" in script
+    assert "setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)" in script
+    assert "if (recoveryInFlight) return recoveryInFlight" in script
+    assert "scheduleRecovery" in script
+    assert "setInterval(recoverLiveSummary" not in script
+
+
+def test_hidden_tabs_suspend_summary_polling_and_resume_immediately() -> None:
+    script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
+    assert 'document.addEventListener("visibilitychange"' in script
+    assert "if (document.hidden) clearTimeout(recoveryTimer)" in script
+    assert 'window.addEventListener("online", recoverLiveSummary)' in script
+
+
+def test_outage_controller_is_loaded_at_most_once() -> None:
+    script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
+    assert 'script.src.includes("/assets/outage-controller.js")' in script
+    assert 'outage-controller.js?v=1.2.1' in script
+    assert "if (alreadyLoaded) return" in script
+
+
+def test_saved_export_always_restores_button_state() -> None:
+    script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
+    assert "try {" in script
+    assert "finally {" in script
+    assert 'button.textContent = "Export CSV"' in script
