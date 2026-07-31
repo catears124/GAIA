@@ -46,3 +46,27 @@ def test_live_recovery_removes_stale_banner() -> None:
     script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
     assert "clearStaleBanner()" in script
     assert 'new CustomEvent("gaia:live-data")' in script
+
+
+def test_snapshot_supports_arbitrary_offline_family_searches() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert "filterFamilyIndex" in script
+    assert "offlineFamilies" in script
+    assert "offlineFacets" in script
+    assert 'url.pathname === "/api/families"' in script
+    assert 'url.pathname === "/api/facets"' in script
+    assert 'url.searchParams.get("q")' in script
+    assert 'url.searchParams.get("location")' in script
+    assert 'url.searchParams.get("company")' in script
+    assert 'url.searchParams.get("posted_within")' in script
+    assert 'url.searchParams.get("sort")' in script
+    assert 'headers.set("X-GAIA-Offline-Search", "1")' in script
+
+
+def test_offline_search_preserves_truthful_trust_and_cycle_filters() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert 'trust === "verified" && !item.verified' in script
+    assert 'trust === "leads" && item.verified' in script
+    assert 'target === "exact"' in script
+    assert 'year === 2027 && season === "summer"' in script
+    assert 'target === "default" || target === "year_confirmed"' in script
