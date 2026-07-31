@@ -42,6 +42,30 @@ employer_ecosystems:
     sectors: [enterprise-software, developer-tools, infrastructure]
     internship_signal: 0.26
     technical_signal: 0.84
+  - kind: yc-directory
+    name: yc-developer-tools
+    url: https://www.ycombinator.com/companies/industry/developer-tools
+    sectors: [developer-tools, infrastructure, cloud, databases]
+    internship_signal: 0.28
+    technical_signal: 0.95
+  - kind: yc-directory
+    name: yc-cybersecurity
+    url: https://www.ycombinator.com/companies/industry/cybersecurity
+    sectors: [cybersecurity, infrastructure, identity, privacy]
+    internship_signal: 0.27
+    technical_signal: 0.93
+  - kind: yc-directory
+    name: yc-fintech
+    url: https://www.ycombinator.com/companies/industry/fintech
+    sectors: [fintech, payments, banking, risk]
+    internship_signal: 0.26
+    technical_signal: 0.80
+  - kind: yc-directory
+    name: yc-robotics
+    url: https://www.ycombinator.com/companies/industry/robotics
+    sectors: [robotics, hardware, autonomy, manufacturing]
+    internship_signal: 0.30
+    technical_signal: 0.96
 
 # Provider-level sources are allowed here; employers are discovered from data, not named in code.
 native_sources:
