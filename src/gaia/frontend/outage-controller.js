@@ -5,6 +5,7 @@
   const RETRY_MAX_MS = 60000;
   let attempts = 0;
   let timer;
+  let observer;
 
   function offline() {
     return document.documentElement.dataset.gaiaOffline === "true" ||
@@ -48,14 +49,17 @@
     }
   }
 
-  const observer = new MutationObserver(inspect);
-  window.addEventListener("DOMContentLoaded", () => {
+  function boot() {
+    if (observer || !document.body) return;
+    observer = new MutationObserver(inspect);
     const empty = document.querySelector("#empty-state");
-    const bannerHost = document.body;
     if (empty) observer.observe(empty, { childList: true, subtree: true, attributes: true });
-    observer.observe(bannerHost, { childList: true, subtree: false });
+    observer.observe(document.body, { childList: true, subtree: false });
     inspect();
-  });
+  }
+
+  if (document.readyState === "loading") window.addEventListener("DOMContentLoaded", boot, { once: true });
+  else boot();
   window.addEventListener("online", () => schedule(true));
   window.addEventListener("focus", () => schedule(true));
   document.addEventListener("visibilitychange", () => {
