@@ -6,7 +6,7 @@ on:
     paths:
       - ".github/workflows/candidate-drain-sprint.yml"
   schedule:
-    - cron: "4,19,34,49 * * * *"
+    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
     inputs:
       batches:
