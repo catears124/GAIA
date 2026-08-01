@@ -52,7 +52,7 @@ def _remove_legacy_coverage_route(app: FastAPI) -> None:
 
 
 def install_coverage_api(app: FastAPI) -> None:
-    """Install complete source diagnostics, including targets with no health row yet."""
+    """Install complete source, growth, and visible-inventory diagnostics."""
     if getattr(app.state, "gaia_coverage_api_installed", False):
         return
     app.state.gaia_coverage_api_installed = True
@@ -61,13 +61,19 @@ def install_coverage_api(app: FastAPI) -> None:
     @app.get("/api/coverage")
     def live_coverage() -> dict[str, object]:
         from . import api as legacy
-        from .health import inventory_state
+        from .health import (
+            inventory_state,
+            listing_freshness_state,
+            source_growth_state,
+        )
 
         data = legacy.db.coverage()
         with legacy.db.connect() as connection:
             rows = connection.execute(SOURCE_DIAGNOSTICS_SQL).fetchall()
         sources = [legacy.db._json_row(row) for row in rows]  # noqa: SLF001
         inventory = inventory_state(legacy.db)
+        growth = source_growth_state(legacy.db)
+        listing_freshness = listing_freshness_state(legacy.db)
         contract = dict(data.get("contract") or {})
         contract.update(
             {
@@ -80,8 +86,21 @@ def install_coverage_api(app: FastAPI) -> None:
                 "degraded_sources": int(inventory["degraded"]),
                 "historical_sources": int(inventory["historical"]),
                 "coverage_watermark": inventory.get("coverage_watermark"),
+                "source_candidates": int(growth["candidate_total"]),
+                "due_source_candidates": int(growth["due"]),
+                "new_unique_sources_24h": int(growth["new_unique_24h"]),
+                "latest_unique_source_at": growth.get("latest_unique_source_at"),
+                "newest_employer_posted_at": listing_freshness.get(
+                    "newest_employer_posted_at"
+                ),
+                "newest_found_at": listing_freshness.get("newest_found_at"),
+                "newest_visible_activity_at": listing_freshness.get(
+                    "newest_visible_activity_at"
+                ),
             }
         )
         data["contract"] = contract
         data["sources"] = sources
+        data["source_growth"] = growth
+        data["listing_freshness"] = listing_freshness
         return data
