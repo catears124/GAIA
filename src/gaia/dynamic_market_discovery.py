@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +99,28 @@ def deserialize_candidates(rows: list[dict[str, Any]]) -> list[Collector]:
     return candidates
 
 
+def posting_freshness(postings: list[Posting]) -> dict[str, Any]:
+    """Measure employer-provided dates instead of equating rediscovery with freshness."""
+    now = datetime.now(UTC)
+    dated: list[datetime] = []
+    for posting in postings:
+        if posting.posted_at is None:
+            continue
+        value = posting.posted_at
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        dated.append(value.astimezone(UTC))
+
+    freshest = max(dated) if dated else None
+    return {
+        "dated_postings": len(dated),
+        "freshest_employer_posted_at": freshest.isoformat() if freshest else None,
+        "employer_posted_last_24h": sum(value >= now - timedelta(days=1) for value in dated),
+        "employer_posted_last_72h": sum(value >= now - timedelta(days=3) for value in dated),
+        "employer_posted_last_7d": sum(value >= now - timedelta(days=7) for value in dated),
+    }
+
+
 def _client(concurrency: int) -> httpx.AsyncClient:
     timeout = httpx.Timeout(float(os.getenv("GAIA_HTTP_TIMEOUT", "45")))
     limits = httpx.Limits(
@@ -138,15 +162,22 @@ async def build_market_snapshot(
 
     candidates = candidate_collectors(postings, settings)
     serialized = serialize_candidates(candidates)
-    summary: dict[str, int | bool] = {
+    kind_counts = Counter(str(row["kind"]) for row in serialized)
+    summary: dict[str, Any] = {
         "enabled": bool(search_results),
         "queries": len(search_results),
         "successful_queries": successful_searches,
         "market_postings": len(postings),
+        "explicit_target_postings": sum(
+            posting.target_match == "exact" for posting in postings
+        ),
         "candidate_sources": len(serialized),
+        "candidate_source_kinds": dict(sorted(kind_counts.items())),
+        **posting_freshness(postings),
     }
     return {
         "version": SNAPSHOT_VERSION,
+        "captured_at": datetime.now(UTC).isoformat(),
         "summary": summary,
         "candidates": serialized,
     }
@@ -158,7 +189,7 @@ async def ingest_market_snapshot(
     *,
     probe_limit: int,
     concurrency: int,
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     """Validate captured source evidence before adding it to production inventory."""
     if int(snapshot.get("version") or 0) != SNAPSHOT_VERSION:
         raise ValueError("unsupported dynamic market snapshot version")
@@ -185,7 +216,7 @@ async def ingest_market_snapshot(
 
     catalog_sources = worker.store.sync_catalog()
     base_summary = snapshot.get("summary")
-    summary: dict[str, int | bool] = dict(base_summary) if isinstance(base_summary, dict) else {}
+    summary: dict[str, Any] = dict(base_summary) if isinstance(base_summary, dict) else {}
     summary.update(
         {
             "candidate_rows_written": saved,
@@ -203,7 +234,7 @@ async def run_dynamic_market_discovery(
     *,
     probe_limit: int,
     concurrency: int,
-) -> dict[str, int | bool]:
+) -> dict[str, Any]:
     """Search, capture, validate, and schedule newly discovered employer sources."""
     snapshot = await build_market_snapshot(concurrency=concurrency)
     return await ingest_market_snapshot(
