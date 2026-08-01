@@ -30,6 +30,11 @@ def test_install_recognizes_additional_shared_hosted_ats_products() -> None:
     assert provider_kind("https://acme.jobsoid.com/job/123") == "jobsoid"
     assert provider_kind("https://acme.join.com/jobs/123") == "join"
     assert provider_kind("https://acme.zohorecruit.com/jobs/123") == "zoho-recruit"
+    assert provider_kind("https://jobs.eightfold.ai/careers/job/123") == "eightfold"
+    assert provider_kind("https://acme.phenompeople.com/us/en/job/123") == "phenom"
+    assert provider_kind("https://acme.avature.net/careers/JobDetail/123") == "avature"
+    assert provider_kind("https://jobs.dayforcehcm.com/en-US/acme/jobs/123") == "dayforce"
+    assert provider_kind("https://www.paycomonline.net/v4/ats/web.php/jobs/123") == "paycom"
 
 
 def test_install_recovers_provider_links_from_embedded_elements() -> None:
@@ -51,6 +56,50 @@ def test_install_recovers_provider_links_from_embedded_elements() -> None:
     assert "https://acme.applytojob.com/apply/123" in links
     assert "https://acme.jobs.personio.de/widget/job-list.js" in links
     assert "https://acme.join.com/jobs" in links
+
+
+def test_install_recovers_jobposting_json_ld_and_career_redirects() -> None:
+    install_coverage_extensions()
+
+    links = dict(
+        career._links(
+            """
+            <script type="application/ld+json">
+            {
+              "@context": "https://schema.org",
+              "@type": "JobPosting",
+              "title": "Software Engineering Intern",
+              "url": "https://jobs.eightfold.ai/careers/job/123",
+              "applicationUrl": "/careers/software-intern"
+            }
+            </script>
+            <meta http-equiv="refresh" content="0; URL=https://acme.avature.net/careers">
+            """,
+            "https://www.acme.example/jobs",
+        )
+    )
+
+    assert links["https://jobs.eightfold.ai/careers/job/123"] == "json-ld:JobPosting"
+    assert links["https://www.acme.example/careers/software-intern"] == "json-ld:JobPosting"
+    assert links["https://acme.avature.net/careers"] == "meta:refresh"
+
+
+def test_structured_recovery_ignores_non_job_schema_urls() -> None:
+    install_coverage_extensions()
+
+    links = dict(
+        career._links(
+            """
+            <script type="application/ld+json">
+            {"@type":"Organization","url":"https://www.acme.example/about"}
+            </script>
+            <script type="application/ld+json">not valid json</script>
+            """,
+            "https://www.acme.example/careers",
+        )
+    )
+
+    assert "https://www.acme.example/about" not in links
 
 
 def test_embedded_link_recovery_ignores_unrelated_assets_and_forms() -> None:

@@ -169,9 +169,45 @@ jobs:
             python -m gaia.wait_for_database --timeout-seconds 120
           done
 
+  runtime_fallback:
+    needs: database_gate
+    if: needs.database_gate.outputs.state != 'ready'
+    name: Advance inventory through live runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    outputs:
+      state: ${{ steps.tick.outputs.state }}
+      description: ${{ steps.tick.outputs.description }}
+    steps:
+      - name: Run bounded production maintenance tick
+        id: tick
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fallback
+          http_status=$(curl --silent --show-error --location \
+            --request POST \
+            --user-agent "GAIA-inventory-fallback/${GITHUB_RUN_ID}" \
+            --connect-timeout 10 --max-time 210 \
+            --retry 3 --retry-all-errors --retry-delay 3 \
+            --output fallback/tick.json \
+            --write-out '%{http_code}' \
+            https://gaiajob.vercel.app/api/maintenance/tick || printf '000')
+          if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' fallback/tick.json >/dev/null; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Live runtime fallback failed HTTP ${http_status}" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          operation=$(jq -r '.status' fallback/tick.json)
+          fresh=$(jq -r '.inventory.fresh // 0' fallback/tick.json)
+          total=$(jq -r '.inventory.total // 0' fallback/tick.json)
+          echo "state=success" >> "$GITHUB_OUTPUT"
+          echo "description=Live runtime tick ${operation}; sources ${fresh}/${total} fresh" >> "$GITHUB_OUTPUT"
+          jq . fallback/tick.json >> "$GITHUB_STEP_SUMMARY"
+
   status:
     name: Publish inventory pulse status
-    needs: [database_gate, repair, inventory]
+    needs: [database_gate, repair, inventory, runtime_fallback]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -183,16 +219,20 @@ jobs:
         shell: bash
         run: |
           gate="${{ needs.database_gate.outputs.state }}"
+          fallback="${{ needs.runtime_fallback.result }}"
           state=success
           description="All provider inventory lanes completed"
-          if [ "$gate" = invalid ]; then
-            state=failure; description="Production database configuration or credentials are invalid"
-          elif [ "$gate" = recovering ]; then
-            state=pending; description="Database recovery active; inventory fanout suppressed"
-          elif [ "$gate" = failed ]; then
-            state=failure; description="Database readiness probe failed unexpectedly"
-          elif [ "$gate" != ready ]; then
-            state=failure; description="Database readiness gate did not complete"
+          if [ "$gate" != ready ]; then
+            if [ "$fallback" = success ]; then
+              state=success
+              description="${{ needs.runtime_fallback.outputs.description }}"
+            elif [ "$gate" = recovering ]; then
+              state=pending; description="Database recovery active and live runtime fallback failed"
+            elif [ "$gate" = invalid ]; then
+              state=failure; description="Actions DB credentials invalid and live runtime fallback failed"
+            else
+              state=failure; description="Database gate and live runtime fallback failed"
+            fi
           elif [ "${{ needs.inventory.result }}" != success ]; then
             state=failure; description="One or more provider inventory lanes failed after retries"
           elif [ "${{ needs.repair.result }}" != success ] && [ "${{ needs.repair.result }}" != skipped ]; then
