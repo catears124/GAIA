@@ -18,7 +18,12 @@ from .employer_census import (
     ECOSYSTEM_SCHEMA_STATEMENTS,
     merge_observations_into_universe,
 )
-from .health import production_report
+from .health import (
+    DEFAULT_MAX_CANDIDATE_DUE_MINUTES,
+    DEFAULT_MAX_LISTING_ACTIVITY_HOURS,
+    DEFAULT_MAX_SOURCE_DISCOVERY_HOURS,
+    production_report,
+)
 from .live_inventory import InventoryWorker, LiveDatabase
 from .universe import (
     UNIVERSE_SCHEMA_STATEMENTS,
@@ -59,6 +64,36 @@ def parser() -> argparse.ArgumentParser:
         "--min-active-listings",
         type=int,
         default=int(os.getenv("GAIA_CHECK_MIN_ACTIVE_LISTINGS", "25")),
+    )
+    check.add_argument(
+        "--max-listing-activity-hours",
+        type=int,
+        default=int(
+            os.getenv(
+                "GAIA_CHECK_MAX_LISTING_ACTIVITY_HOURS",
+                str(DEFAULT_MAX_LISTING_ACTIVITY_HOURS),
+            )
+        ),
+    )
+    check.add_argument(
+        "--max-source-discovery-hours",
+        type=int,
+        default=int(
+            os.getenv(
+                "GAIA_CHECK_MAX_SOURCE_DISCOVERY_HOURS",
+                str(DEFAULT_MAX_SOURCE_DISCOVERY_HOURS),
+            )
+        ),
+    )
+    check.add_argument(
+        "--max-candidate-due-minutes",
+        type=int,
+        default=int(
+            os.getenv(
+                "GAIA_CHECK_MAX_CANDIDATE_DUE_MINUTES",
+                str(DEFAULT_MAX_CANDIDATE_DUE_MINUTES),
+            )
+        ),
     )
     check.add_argument(
         "--require-healthy",
@@ -165,6 +200,9 @@ def run_check(args: argparse.Namespace) -> int:
         min_active_listings=max(1, args.min_active_listings),
         require_healthy=bool(args.require_healthy),
         require_universe=bool(args.require_universe),
+        max_listing_activity_hours=max(1, args.max_listing_activity_hours),
+        max_source_discovery_hours=max(1, args.max_source_discovery_hours),
+        max_candidate_due_minutes=max(1, args.max_candidate_due_minutes),
     )
     rendered = _render_json(report)
     print(rendered)
