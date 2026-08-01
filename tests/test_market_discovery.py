@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import httpx
 import pytest
 
@@ -9,6 +11,11 @@ from gaia.market_collectors import WorkdaySearchCollector
 from gaia.market_discovery import discover_github_market
 from gaia.models import Posting
 from gaia.source_catalog import load_catalog, merge_catalog, save_catalog
+
+REQUIRES_TEST_DATABASE = pytest.mark.skipif(
+    not os.getenv("GAIA_TEST_DATABASE_URL"),
+    reason="catalog persistence requires an isolated PostgreSQL test database",
+)
 
 
 def github_settings() -> dict[str, object]:
@@ -84,6 +91,7 @@ async def test_dynamic_feed_cannot_infer_missing_2027_year():
     assert postings[0].target_match == "unknown"
 
 
+@REQUIRES_TEST_DATABASE
 def test_source_catalog_persists_discovered_collectors(tmp_path):
     db = Database(tmp_path / "gaia.db")
     collector = WorkdaySearchCollector(
@@ -103,6 +111,7 @@ def test_source_catalog_persists_discovered_collectors(tmp_path):
     assert loaded[0].terms == ("2027 intern", "2027 co-op")
 
 
+@REQUIRES_TEST_DATABASE
 def test_source_catalog_persists_verification_lead_evidence(tmp_path):
     db = Database(tmp_path / "gaia.db")
     lead = Posting(
@@ -131,6 +140,7 @@ def test_source_catalog_persists_verification_lead_evidence(tmp_path):
     assert loaded[0].urls == [lead.apply_url]
 
 
+@REQUIRES_TEST_DATABASE
 def test_source_catalog_never_restores_aggregators_as_trusted_verification(tmp_path):
     db = Database(tmp_path / "gaia.db")
     lead = Posting(
