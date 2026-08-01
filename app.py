@@ -26,6 +26,11 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "600")
     os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "42")
     os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "6")
+    os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "300")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "150")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "8")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "8")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
