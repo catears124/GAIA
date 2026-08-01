@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
@@ -17,6 +19,7 @@ DEFAULT_QUERIES = (
     '"2027 SWE" internships in:name,description,readme',
     '"2027 quant" internships in:name,description,readme',
 )
+RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 
 
 def _github_headers() -> dict[str, str]:
@@ -27,6 +30,41 @@ def _github_headers() -> dict[str, str]:
     if token := os.getenv("GITHUB_TOKEN") or os.getenv("GAIA_GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(30.0, max(1.0, float(retry_after)))
+        except ValueError:
+            pass
+    reset = response.headers.get("x-ratelimit-reset")
+    if reset:
+        try:
+            return min(30.0, max(1.0, float(reset) - time.time() + 1.0))
+        except ValueError:
+            pass
+    return min(30.0, 2.0 ** (attempt + 1))
+
+
+async def _get_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    attempts: int = 4,
+) -> httpx.Response:
+    response: httpx.Response | None = None
+    for attempt in range(max(1, attempts)):
+        response = await client.get(url, params=params, headers=headers)
+        if response.status_code not in RETRYABLE_STATUSES:
+            return response
+        if attempt + 1 < attempts:
+            await asyncio.sleep(_retry_delay(response, attempt))
+    assert response is not None
+    return response
 
 
 async def discover_github_market(
@@ -41,16 +79,18 @@ async def discover_github_market(
     per_query = max(1, min(20, int(config.get("repos_per_query", 10))))
     max_repos = max(1, int(config.get("max_repositories", 30)))
     cutoff_days = max(7, int(config.get("pushed_within_days", 180)))
+    search_delay = max(0.0, float(config.get("search_delay_seconds", 2.25)))
     cutoff = datetime.now(UTC) - timedelta(days=cutoff_days)
     headers = _github_headers()
 
     repositories: dict[str, dict[str, Any]] = {}
     health: list[CollectorResult] = []
-    for query in queries:
+    for query_index, query in enumerate(queries):
         digest = hashlib.sha1(query.encode()).hexdigest()[:10]
         source = f"market-discovery:github:{digest}"
         try:
-            response = await client.get(
+            response = await _get_with_retries(
+                client,
                 "https://api.github.com/search/repositories",
                 params={
                     "q": query,
@@ -97,9 +137,11 @@ async def discover_github_market(
                     rows_scanned=0,
                     error=None if blocked else repr(exc),
                     status="blocked" if blocked else "broken",
-                    note=f"GitHub repository search failed: {query}",
+                    note=f"GitHub repository search failed after retries: {query}",
                 )
             )
+        if search_delay and query_index + 1 < len(queries):
+            await asyncio.sleep(search_delay)
 
     ranked = sorted(
         repositories.values(),
@@ -115,13 +157,17 @@ async def discover_github_market(
         source = f"market-index:github:{full_name}"
         try:
             branch = quote(str(repository.get("default_branch") or "main"), safe="")
-            response = await client.get(
-                f"https://raw.githubusercontent.com/{full_name}/{branch}/README.md"
+            response = await _get_with_retries(
+                client,
+                f"https://raw.githubusercontent.com/{full_name}/{branch}/README.md",
+                attempts=3,
             )
             if response.status_code == 404:
-                response = await client.get(
+                response = await _get_with_retries(
+                    client,
                     f"https://api.github.com/repos/{full_name}/readme",
                     headers={**headers, "Accept": "application/vnd.github.raw+json"},
+                    attempts=3,
                 )
             response.raise_for_status()
             # Dynamically found repositories are discovery surfaces, not trusted year labels.
@@ -156,7 +202,7 @@ async def discover_github_market(
                     rows_scanned=0,
                     error=None if blocked else repr(exc),
                     status="blocked" if blocked else "broken",
-                    note=f"could not read {full_name} README",
+                    note=f"could not read {full_name} README after retries",
                 )
             )
 
