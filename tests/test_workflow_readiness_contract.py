@@ -18,10 +18,10 @@ def test_all_database_gates_preserve_wait_exit_codes() -> None:
         assert "set +e" in text, name
         assert "code=$?" in text, name
         assert "set -e" in text, name
-        assert '0) state=ready ;;' in text or "0)\n              state=ready" in text, name
-        assert '1) state=recovering ;;' in text or "1)\n              state=recovering" in text, name
-        assert '2) state=invalid ;;' in text or "2)\n              state=invalid" in text, name
-        assert '*) state=failed ;;' in text or "*)\n              state=failed" in text, name
+        assert '0) state=ready ;;' in text or "0)\n              state=ready" in text or "0) state=ready;" in text, name
+        assert '1) state=recovering ;;' in text or "1)\n              state=recovering" in text or "1) state=recovering;" in text, name
+        assert '2) state=invalid ;;' in text or "2)\n              state=invalid" in text or "2) state=invalid;" in text, name
+        assert '*) state=failed ;;' in text or "*)\n              state=failed" in text or "*) state=failed;" in text, name
         assert 'echo "exit_code=$code" >> "$GITHUB_OUTPUT"' in text, name
 
 
@@ -57,3 +57,19 @@ def test_unexpected_probe_errors_are_distinct_from_recovery() -> None:
     for name in WORKFLOWS:
         text = workflow(name)
         assert "probe failed unexpectedly" in text.lower(), name
+
+
+def test_database_workflows_do_not_depend_on_one_stale_supabase_secret() -> None:
+    fallback = "secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING"
+    for name in ("maintenance", "reconcile"):
+        text = workflow(name)
+        assert fallback in text, name
+        assert "Missing all supported database secrets" in text, name
+
+
+def test_maintenance_uses_session_url_fallback_for_migrations() -> None:
+    text = workflow("maintenance")
+    assert (
+        "secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL"
+        in text
+    )
