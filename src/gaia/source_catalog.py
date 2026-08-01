@@ -109,11 +109,16 @@ def save_candidates(
 ) -> int:
     """Record source evidence without allowing it into the production crawler."""
     rows = []
+    recursive = origin.startswith(("recursive-source:", "candidate-probe:"))
     for collector in collectors:
         described = _spec(collector)
         if described is None:
             continue
         kind, spec = described
+        if recursive and kind == "google-careers":
+            # Native global sources are seeded from configuration once. Re-adding
+            # them for every discovered provider inflates evidence and probe work.
+            continue
         rows.append(
             (
                 canonical_source_name(collector.name),
