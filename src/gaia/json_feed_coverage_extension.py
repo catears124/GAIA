@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from urllib.parse import urljoin
 
 from . import career_surface_collector as career
@@ -42,7 +42,7 @@ _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "trackerrms.com": "tracker-rms",
     "pcrecruiter.net": "pcrecruiter",
 }
-_ORIGINAL_DOCUMENT_LINKS = career._document_links
+_ORIGINAL_DOCUMENT_LINKS: Callable[[str, str], tuple[list[tuple[str, str]], bool]] | None = None
 _INSTALLED = False
 
 
@@ -103,6 +103,7 @@ def _json_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
 
 
 def _document_links_with_json(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
+    assert _ORIGINAL_DOCUMENT_LINKS is not None
     links, is_feed = _ORIGINAL_DOCUMENT_LINKS(body, base_url)
     json_links, is_job_feed = _json_links(body, base_url)
     merged = {url: label for url, label in links}
@@ -114,12 +115,13 @@ def _document_links_with_json(body: str, base_url: str) -> tuple[list[tuple[str,
 def install_json_feed_coverage_extension() -> None:
     """Install generic JSON job-feed traversal and additional ATS recognition."""
 
-    global _INSTALLED
+    global _INSTALLED, _ORIGINAL_DOCUMENT_LINKS
     if _INSTALLED:
         return
-    _INSTALLED = True
+    _ORIGINAL_DOCUMENT_LINKS = career._document_links
     career.PROVIDER_HOST_FRAGMENTS.update(_EXTRA_PROVIDER_HOST_FRAGMENTS)
     career._document_links = _document_links_with_json
+    _INSTALLED = True
 
 
 __all__ = ["install_json_feed_coverage_extension"]
