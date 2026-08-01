@@ -80,6 +80,16 @@ JOB_ID_RE = re.compile(
     r"(?:/|[?&])(?:job|jobs|jobid|job_id|gh_jid|req|requisition)[=/_-]?[0-9a-f-]{3,}",
     re.I,
 )
+MULTIPART_PUBLIC_SUFFIXES = {
+    "co.uk",
+    "com.au",
+    "com.br",
+    "com.mx",
+    "co.jp",
+    "co.in",
+    "co.nz",
+    "com.sg",
+}
 
 
 @dataclass(slots=True)
@@ -90,6 +100,7 @@ class _Enumeration:
     sitemap_documents: int = 0
     landing_pages: int = 0
     reachable_landings: int = 0
+    reachable_career_landings: int = 0
     blocked: int = 0
     stale: int = 0
     hard_errors: int = 0
@@ -106,6 +117,16 @@ def provider_kind(url: str) -> str | None:
 
 def _origin(host: str) -> str:
     return f"https://{host.casefold().strip().strip('/')}"
+
+
+def _registrable_domain(host: str) -> str:
+    labels = host.casefold().split(".")
+    if len(labels) < 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    if suffix in MULTIPART_PUBLIC_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return suffix
 
 
 def _normalized_http_url(url: str) -> str | None:
@@ -155,10 +176,8 @@ def career_seed_urls(host: str, seed_urls: list[str] | tuple[str, ...] = ()) -> 
     if provider_kind(_origin(host)) is None:
         output.extend(f"{_origin(host)}{path}" for path in CAREER_PATHS)
         if not host.startswith(("jobs.", "careers.")):
-            labels = host.split(".")
-            if len(labels) >= 2:
-                base = ".".join(labels[-2:])
-                output.extend((f"https://jobs.{base}/", f"https://careers.{base}/"))
+            base = _registrable_domain(host)
+            output.extend((f"https://jobs.{base}/", f"https://careers.{base}/"))
     return list(dict.fromkeys(output))
 
 
@@ -217,16 +236,6 @@ class CareerSurfaceCollector(SitemapDomainCollector):
         self.max_depth = max(1, int(os.getenv("GAIA_CAREER_MAX_DEPTH", "2")))
         self.fetch_concurrency = max(1, int(os.getenv("GAIA_CAREER_CONCURRENCY", "12")))
 
-    async def _get(self, client: httpx.AsyncClient, url: str) -> httpx.Response | None:
-        try:
-            response = await client.get(url)
-            if response.status_code in {404, 410}:
-                return None
-            response.raise_for_status()
-            return response
-        except httpx.HTTPError:
-            return None
-
     async def _enumerate_sitemaps(
         self,
         client: httpx.AsyncClient,
@@ -277,7 +286,6 @@ class CareerSurfaceCollector(SitemapDomainCollector):
                     continue
                 if provider_kind(normalized_location):
                     result.provider_urls.add(normalized_location)
-                    result.pages.add(normalized_location)
                 elif _same_host(normalized_location, self.host) and _careerish(normalized_location):
                     result.pages.add(normalized_location)
                 if len(result.pages) >= self.max_pages:
@@ -334,15 +342,22 @@ class CareerSurfaceCollector(SitemapDomainCollector):
                 if content_type and "html" not in content_type and "text" not in content_type:
                     continue
                 final_url = str(response.url)
+                links = _links(response.text, final_url)
+                schemas = json_ld_jobs(response.text)
                 result.reachable_landings += 1
+                if (
+                    _careerish(final_url)
+                    or schemas
+                    or any(provider_kind(link) or _careerish(link, label) for link, label in links)
+                ):
+                    result.reachable_career_landings += 1
                 result.cached_html[canonical_url(final_url)] = response.text
-                if json_ld_jobs(response.text) or _detailish(final_url):
+                if schemas or _detailish(final_url):
                     result.pages.add(final_url)
-                for link, label in _links(response.text, final_url):
+                for link, label in links:
                     kind = provider_kind(link)
                     if kind:
                         result.provider_urls.add(link)
-                        result.pages.add(link)
                         continue
                     if not _same_host(link, self.host):
                         continue
@@ -431,10 +446,11 @@ class CareerSurfaceCollector(SitemapDomainCollector):
                 postings.extend(recovered)
 
         discovered = {item.canonical_apply_url: item for item in postings}
-        complete = bool(enumeration.reachable_landings) and not enumeration.truncated
-        if enumeration.provider_urls and blocked and not discovered:
-            complete = False
-        if hard_errors and not discovered:
+        career_surface_found = bool(
+            enumeration.sitemap_documents or enumeration.reachable_career_landings
+        )
+        complete = career_surface_found and not enumeration.truncated
+        if hard_errors and not discovered and not enumeration.reachable_career_landings:
             complete = False
 
         if complete and discovered:
@@ -463,7 +479,9 @@ class CareerSurfaceCollector(SitemapDomainCollector):
         ]
         note = (
             f"career graph: {enumeration.sitemap_documents} sitemaps, "
-            f"{enumeration.landing_pages} landing pages, {len(page_urls)} candidate pages, "
+            f"{enumeration.landing_pages} landing pages, "
+            f"{enumeration.reachable_career_landings} career landings, "
+            f"{len(page_urls)} candidate pages, "
             f"{len(enumeration.provider_urls)} provider links, {len(discovered)} jobs"
         )
         if enumeration.truncated:
