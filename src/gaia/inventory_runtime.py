@@ -53,6 +53,9 @@ FALLBACK_KINDS = {"verification"}
 COVERAGE_KINDS = SUPPORTED_CATALOG_KINDS - FALLBACK_KINDS
 BAD_COMPLETION_STATUSES = {"broken", "blocked", "truncated", "partial", "dormant"}
 VALID_CANDIDATE_STATUSES = {"ok", "empty"}
+CANDIDATE_PROBE_TASK = "candidate-probe"
+MARKET_DISCOVERY_TASK = "market-discovery"
+UNIVERSE_DISCOVERY_TASK = "universe-discovery"
 
 
 class RuntimeInventoryStore(InventoryStore):
@@ -141,7 +144,10 @@ class RuntimeInventoryStore(InventoryStore):
         return len(payload)
 
     def ensure_task(self, key: str) -> None:
-        initial_delay = 3600 if key == "universe-discovery" else 300
+        initial_delay = {
+            UNIVERSE_DISCOVERY_TASK: 3600,
+            CANDIDATE_PROBE_TASK: 60,
+        }.get(key, 300)
         with self.database.connect() as connection:
             connection.execute(
                 """
@@ -151,6 +157,23 @@ class RuntimeInventoryStore(InventoryStore):
                 """,
                 (key, initial_delay),
             )
+
+    def task_is_overdue(self, key: str, *, delay_seconds: int) -> bool:
+        """Return true when an unleased task has exceeded its scheduling grace."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM worker_tasks
+                    WHERE task_key=%s
+                      AND next_run_at <= now() - (%s * interval '1 second')
+                      AND (lease_expires_at IS NULL OR lease_expires_at<now())
+                ) AS overdue
+                """,
+                (key, max(0, delay_seconds)),
+            ).fetchone()
+        return bool(row["overdue"])
 
     def has_due_coverage_targets(self) -> bool:
         with self.database.connect() as connection:
@@ -318,11 +341,17 @@ class _RecursiveDiscoveryCollector(Collector):
 
 
 class InventoryWorker(BaseInventoryWorker):
-    """Production worker: validated inventory first, quarantined discovery second."""
+    """Production worker with reserved capacity for source expansion."""
 
     def __init__(self, database: Database, *, concurrency: int = 12) -> None:
         super().__init__(database, concurrency=concurrency)
         self.store = RuntimeInventoryStore(database, self.store.worker_id)
+        self.candidate_probe_interval = max(
+            60, int(os.getenv("GAIA_CANDIDATE_PROBE_INTERVAL", "300"))
+        )
+        self.discovery_starvation_seconds = max(
+            5 * 60, int(os.getenv("GAIA_DISCOVERY_STARVATION_SECONDS", "1800"))
+        )
 
     def _candidate_collectors(self, postings: list[Posting]) -> list[Collector]:
         generated = merge_catalog(
@@ -359,11 +388,6 @@ class InventoryWorker(BaseInventoryWorker):
             return None
         collector.name = target.source
         return _RecursiveDiscoveryCollector(self, collector)
-
-    async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
-        if self.store.has_due_coverage_targets():
-            return False
-        return await super()._run_discovery_if_due(client)
 
     async def _probe_candidate(
         self,
@@ -437,6 +461,85 @@ class InventoryWorker(BaseInventoryWorker):
         )
         return False
 
+    async def _probe_due_candidates(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        limit: int,
+    ) -> tuple[int, int]:
+        claimed = self.store.claim_candidates(
+            limit=limit,
+            lease_seconds=self.lease_seconds,
+        )
+        promoted = 0
+        if claimed:
+            promoted = sum(
+                await asyncio.gather(
+                    *(self._probe_candidate(client, target) for target in claimed)
+                )
+            )
+        if promoted:
+            self.store.sync_catalog()
+            self.database.rebuild_families()
+        return len(claimed), promoted
+
+    async def _run_candidate_probe_if_due(self, client: httpx.AsyncClient) -> bool:
+        """Drain source candidates independently of expensive market refreshes."""
+        self.store.ensure_task(CANDIDATE_PROBE_TASK)
+        if not self.store.claim_task(CANDIDATE_PROBE_TASK, lease_seconds=self.lease_seconds):
+            return False
+
+        limit = max(1, int(os.getenv("GAIA_CANDIDATE_PROBE_LIMIT", "24")))
+        try:
+            claimed, promoted = await self._probe_due_candidates(client, limit=limit)
+        except Exception as exc:
+            LOGGER.exception("candidate probe task failed")
+            self.store.finish_task(
+                CANDIDATE_PROBE_TASK,
+                interval_seconds=60,
+                status="broken",
+                error=repr(exc),
+            )
+        else:
+            # Keep draining at one-minute cadence while a full batch exists; back
+            # off to the normal cadence once the due queue is smaller than a batch.
+            interval = 60 if claimed >= limit else self.candidate_probe_interval
+            self.store.finish_task(
+                CANDIDATE_PROBE_TASK,
+                interval_seconds=interval,
+                status="ok",
+            )
+            self.summary.discovery_runs += 1
+            LOGGER.info(
+                "candidate probe claimed=%s promoted=%s next_seconds=%s",
+                claimed,
+                promoted,
+                interval,
+            )
+        return True
+
+    async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
+        # Candidate validation is cheap relative to market enumeration and must not
+        # wait for every fast-cadence board to become current.
+        if await self._run_candidate_probe_if_due(client):
+            return True
+
+        self.store.ensure_task(MARKET_DISCOVERY_TASK)
+        self.store.ensure_task(UNIVERSE_DISCOVERY_TASK)
+        coverage_due = self.store.has_due_coverage_targets()
+        market_starved = self.store.task_is_overdue(
+            MARKET_DISCOVERY_TASK,
+            delay_seconds=self.discovery_starvation_seconds,
+        )
+        if coverage_due and not market_starved:
+            return False
+        if coverage_due and market_starved:
+            LOGGER.warning(
+                "market discovery exceeded %ss grace; reserving one expansion cycle",
+                self.discovery_starvation_seconds,
+            )
+        return await super()._run_discovery_if_due(client)
+
     async def _refresh_market(self, client: httpx.AsyncClient, *, include_universe: bool) -> None:
         """Use curated lists as evidence only; never let search results mutate production."""
         discovery_postings: list[Posting] = []
@@ -472,17 +575,7 @@ class InventoryWorker(BaseInventoryWorker):
         )
 
         limit = max(1, int(os.getenv("GAIA_CANDIDATE_PROBE_LIMIT", "24")))
-        claimed = self.store.claim_candidates(
-            limit=limit,
-            lease_seconds=self.lease_seconds,
-        )
-        promoted = 0
-        if claimed:
-            promoted = sum(
-                await asyncio.gather(
-                    *(self._probe_candidate(client, target) for target in claimed)
-                )
-            )
+        claimed, promoted = await self._probe_due_candidates(client, limit=limit)
 
         self.store.sync_catalog()
         self.database.rebuild_families()
@@ -490,6 +583,6 @@ class InventoryWorker(BaseInventoryWorker):
         LOGGER.info(
             "discovery evidence=%s probed=%s promoted=%s dynamic_github_search=disabled",
             len(candidates),
-            len(claimed),
+            claimed,
             promoted,
         )

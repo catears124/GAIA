@@ -26,6 +26,7 @@ on:
       - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
       - "tests/test_recursive_source_candidates.py"
+      - "tests/test_source_expansion_scheduler.py"
   push:
     branches: [main, coverage-repair-20260731]
     paths:
@@ -52,6 +53,7 @@ on:
       - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
       - "tests/test_recursive_source_candidates.py"
+      - "tests/test_source_expansion_scheduler.py"
   workflow_dispatch:
 
 permissions:
@@ -110,6 +112,7 @@ jobs:
           tests/test_prior_year_intelligence.py
           tests/test_production_coverage.py
           tests/test_recursive_source_candidates.py
+          tests/test_source_expansion_scheduler.py
       - name: Verify employer coverage contracts
         shell: bash
         run: |
@@ -119,6 +122,7 @@ jobs:
             tests/test_continuous_inventory.py \
             tests/test_prior_year_intelligence.py \
             tests/test_recursive_source_candidates.py \
+            tests/test_source_expansion_scheduler.py \
             tests/test_maintenance_api.py \
             tests/test_production_coverage.py \
             tests/test_critical_reconcile.py \
