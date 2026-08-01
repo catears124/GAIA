@@ -35,7 +35,10 @@ def database_unavailable_response(error: Exception, endpoint: str) -> JSONRespon
 
 
 def install_database_outage_guard(app: FastAPI) -> None:
-    """Convert database failures on public API routes into truthful HTTP 503s."""
+    """Install truthful inventory routes, then shield expected database outages."""
+    from .inventory_truth_api import install_inventory_truth_api
+
+    install_inventory_truth_api(app)
 
     @app.middleware("http")
     async def database_outage_guard(
