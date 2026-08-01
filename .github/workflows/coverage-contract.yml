@@ -9,7 +9,9 @@ on:
       - ".github/workflows/runtime-coverage.yml"
       - "src/gaia/career_surface_collector.py"
       - "src/gaia/cli.py"
+      - "src/gaia/coverage_api.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/health.py"
       - "src/gaia/inventory_runtime.py"
       - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
@@ -26,6 +28,7 @@ on:
       - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
       - "tests/test_recursive_source_candidates.py"
+      - "tests/test_source_growth_health.py"
   push:
     branches: [main, coverage-repair-20260731]
     paths:
@@ -35,7 +38,9 @@ on:
       - ".github/workflows/runtime-coverage.yml"
       - "src/gaia/career_surface_collector.py"
       - "src/gaia/cli.py"
+      - "src/gaia/coverage_api.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/health.py"
       - "src/gaia/inventory_runtime.py"
       - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
@@ -52,6 +57,7 @@ on:
       - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
       - "tests/test_recursive_source_candidates.py"
+      - "tests/test_source_growth_health.py"
   workflow_dispatch:
 
 permissions:
@@ -99,6 +105,9 @@ jobs:
         run: >-
           ruff check
           src/gaia/career_surface_collector.py
+          src/gaia/cli.py
+          src/gaia/coverage_api.py
+          src/gaia/health.py
           src/gaia/inventory_runtime.py
           src/gaia/maintenance_api.py
           src/gaia/production_coverage.py
@@ -110,6 +119,7 @@ jobs:
           tests/test_prior_year_intelligence.py
           tests/test_production_coverage.py
           tests/test_recursive_source_candidates.py
+          tests/test_source_growth_health.py
       - name: Verify employer coverage contracts
         shell: bash
         run: |
@@ -119,6 +129,7 @@ jobs:
             tests/test_continuous_inventory.py \
             tests/test_prior_year_intelligence.py \
             tests/test_recursive_source_candidates.py \
+            tests/test_source_growth_health.py \
             tests/test_maintenance_api.py \
             tests/test_production_coverage.py \
             tests/test_critical_reconcile.py \
