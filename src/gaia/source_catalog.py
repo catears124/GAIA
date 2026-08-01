@@ -4,6 +4,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
+from .career_surface_collector import CareerSurfaceCollector
 from .collectors import (
     AshbyCollector,
     Collector,
@@ -242,7 +243,7 @@ def _collector(kind: str, spec: dict[str, Any]) -> Collector | None:
             str(spec["company"]), str(spec["origin"]), str(spec["company_id"])
         )
     if kind == "domain":
-        return SitemapDomainCollector(
+        return CareerSurfaceCollector(
             str(spec["company"]),
             str(spec["host"]),
             [str(url) for url in spec.get("seed_urls") or []],

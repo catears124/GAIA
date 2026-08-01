@@ -49,8 +49,8 @@ def test_source_cadence_is_independent_and_dormant_sources_still_run() -> None:
     assert InventoryStore._default_interval("greenhouse", "historical") == 24 * 3600
 
 
-def test_fallbacks_are_scheduled_but_do_not_define_market_coverage() -> None:
-    assert FALLBACK_KINDS == {"domain", "verification"}
+def test_validated_career_graphs_define_market_coverage() -> None:
+    assert FALLBACK_KINDS == {"verification"}
     assert FALLBACK_KINDS <= SUPPORTED_CATALOG_KINDS
     assert FALLBACK_KINDS.isdisjoint(COVERAGE_KINDS)
-    assert {"greenhouse", "lever", "ashby", "workday-search"} <= COVERAGE_KINDS
+    assert {"greenhouse", "lever", "ashby", "workday-search", "domain"} <= COVERAGE_KINDS

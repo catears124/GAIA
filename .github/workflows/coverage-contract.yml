@@ -7,16 +7,23 @@ on:
       - ".github/workflows/reconcile.yml"
       - ".github/workflows/production-coverage-diagnostics.yml"
       - ".github/workflows/runtime-coverage.yml"
+      - "src/gaia/career_surface_collector.py"
       - "src/gaia/cli.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/inventory_runtime.py"
       - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
+      - "src/gaia/provider_discovery.py"
+      - "src/gaia/source_catalog.py"
       - "src/gaia/universe.py"
       - "src/gaia/default_sources.yaml"
       - "tests/test_bulk_employer_reconcile.py"
+      - "tests/test_career_surface_discovery.py"
+      - "tests/test_continuous_inventory.py"
       - "tests/test_critical_reconcile.py"
       - "tests/test_employer_universe.py"
       - "tests/test_maintenance_api.py"
+      - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
   push:
     branches: [main, coverage-repair-20260731]
@@ -25,16 +32,23 @@ on:
       - ".github/workflows/reconcile.yml"
       - ".github/workflows/production-coverage-diagnostics.yml"
       - ".github/workflows/runtime-coverage.yml"
+      - "src/gaia/career_surface_collector.py"
       - "src/gaia/cli.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/inventory_runtime.py"
       - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
+      - "src/gaia/provider_discovery.py"
+      - "src/gaia/source_catalog.py"
       - "src/gaia/universe.py"
       - "src/gaia/default_sources.yaml"
       - "tests/test_bulk_employer_reconcile.py"
+      - "tests/test_career_surface_discovery.py"
+      - "tests/test_continuous_inventory.py"
       - "tests/test_critical_reconcile.py"
       - "tests/test_employer_universe.py"
       - "tests/test_maintenance_api.py"
+      - "tests/test_prior_year_intelligence.py"
       - "tests/test_production_coverage.py"
   workflow_dispatch:
 
@@ -82,15 +96,25 @@ jobs:
       - name: Lint coverage implementation
         run: >-
           ruff check
+          src/gaia/career_surface_collector.py
+          src/gaia/inventory_runtime.py
           src/gaia/maintenance_api.py
           src/gaia/production_coverage.py
+          src/gaia/provider_discovery.py
+          src/gaia/source_catalog.py
+          tests/test_career_surface_discovery.py
+          tests/test_continuous_inventory.py
           tests/test_maintenance_api.py
+          tests/test_prior_year_intelligence.py
           tests/test_production_coverage.py
       - name: Verify employer coverage contracts
         shell: bash
         run: |
           set -euo pipefail
           pytest -q \
+            tests/test_career_surface_discovery.py \
+            tests/test_continuous_inventory.py \
+            tests/test_prior_year_intelligence.py \
             tests/test_maintenance_api.py \
             tests/test_production_coverage.py \
             tests/test_critical_reconcile.py \

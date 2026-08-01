@@ -66,6 +66,42 @@ employer_ecosystems:
     sectors: [robotics, hardware, autonomy, manufacturing]
     internship_signal: 0.30
     technical_signal: 0.96
+  - kind: yc-directory
+    name: yc-aerospace
+    url: https://www.ycombinator.com/companies/industry/aerospace
+    sectors: [aerospace, aviation, space, autonomy, hardware]
+    internship_signal: 0.31
+    technical_signal: 0.97
+  - kind: yc-directory
+    name: yc-semiconductors
+    url: https://www.ycombinator.com/companies/industry/semiconductors
+    sectors: [semiconductors, chips, hardware, embedded, manufacturing]
+    internship_signal: 0.28
+    technical_signal: 0.97
+  - kind: yc-directory
+    name: yc-climate
+    url: https://www.ycombinator.com/companies/industry/climate
+    sectors: [climate, energy, industrial, scientific-computing]
+    internship_signal: 0.25
+    technical_signal: 0.85
+  - kind: yc-directory
+    name: yc-open-source
+    url: https://www.ycombinator.com/companies/industry/open-source
+    sectors: [open-source, developer-tools, infrastructure, databases]
+    internship_signal: 0.27
+    technical_signal: 0.96
+  - kind: yc-directory
+    name: yc-manufacturing
+    url: https://www.ycombinator.com/companies/industry/manufacturing
+    sectors: [manufacturing, industrial, robotics, hardware]
+    internship_signal: 0.26
+    technical_signal: 0.90
+  - kind: yc-directory
+    name: yc-biotech
+    url: https://www.ycombinator.com/companies/industry/biotech
+    sectors: [biotech, computational-biology, bioinformatics, data]
+    internship_signal: 0.24
+    technical_signal: 0.82
 
 # Provider-level sources are allowed here; employers are discovered from data, not named in code.
 native_sources:
@@ -81,8 +117,8 @@ workday:
 market_discovery:
   github:
     enabled: true
-    repos_per_query: 20
-    max_repositories: 180
+    repos_per_query: 30
+    max_repositories: 300
     pushed_within_days: 365
     queries:
       - '"2027 internships" in:name,description,readme'
@@ -92,14 +128,25 @@ market_discovery:
       - '"2027 data" internship in:name,description,readme'
       - '"2027 machine learning" internship in:name,description,readme'
       - '"2027 artificial intelligence" internship in:name,description,readme'
+      - '"2027 computer vision" internship in:name,description,readme'
       - '"2027 research" internship in:name,description,readme'
+      - '"2027 scientific computing" internship in:name,description,readme'
+      - '"2027 bioinformatics" internship in:name,description,readme'
       - '"2027 hardware" internship in:name,description,readme'
+      - '"2027 semiconductor" internship in:name,description,readme'
+      - '"2027 firmware" internship in:name,description,readme'
       - '"2027 embedded" internship in:name,description,readme'
       - '"2027 robotics" internship in:name,description,readme'
+      - '"2027 autonomous" internship in:name,description,readme'
       - '"2027 electrical" internship in:name,description,readme'
       - '"2027 mechanical" internship in:name,description,readme'
       - '"2027 aerospace" internship in:name,description,readme'
       - '"2027 cybersecurity" internship in:name,description,readme'
       - '"2027 cloud" internship in:name,description,readme'
+      - '"2027 distributed systems" internship in:name,description,readme'
+      - '"2027 compiler" internship in:name,description,readme'
       - '"2027 product" internship in:name,description,readme'
       - '"2027 quant" internships in:name,description,readme'
+      - '"2027 quantitative trading" internship in:name,description,readme'
+      - '"2027 quantitative research" internship in:name,description,readme'
+      - '"2027 climate tech" internship in:name,description,readme'
