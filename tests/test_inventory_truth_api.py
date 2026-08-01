@@ -37,7 +37,7 @@ def test_classify_inventory_reports_exact_deficits(monkeypatch) -> None:
     }
 
 
-def test_health_cannot_be_green_for_collapsed_job_inventory(monkeypatch) -> None:
+def test_health_and_stats_reject_collapsed_job_inventory(monkeypatch) -> None:
     app = FastAPI()
     monkeypatch.setattr(
         inventory_truth_api.product_api,
@@ -64,10 +64,13 @@ def test_health_cannot_be_green_for_collapsed_job_inventory(monkeypatch) -> None
     client = TestClient(app)
 
     stats_response = client.get("/api/stats")
-    assert stats_response.status_code == 200
+    assert stats_response.status_code == 503
+    assert stats_response.headers["cache-control"] == "no-store, max-age=0"
+    assert stats_response.headers["retry-after"] == "30"
     stats = stats_response.json()
     assert stats["inventory_complete"] is False
     assert stats["inventory_state"] == "recovering"
+    assert stats["active_listings"] == 19
 
     health_response = client.get("/api/health")
     assert health_response.status_code == 503
@@ -104,10 +107,14 @@ def test_complete_inventory_preserves_real_source_health(monkeypatch) -> None:
     )
 
     inventory_truth_api.install_inventory_truth_api(app)
-    response = TestClient(app).get("/api/health")
-    health = response.json()
+    client = TestClient(app)
+    stats_response = client.get("/api/stats")
+    health_response = client.get("/api/health")
+    health = health_response.json()
 
-    assert response.status_code == 200
+    assert stats_response.status_code == 200
+    assert stats_response.json()["inventory_complete"] is True
+    assert health_response.status_code == 200
     assert health["ok"] is False
     assert health["reason"] == "source_failures"
     assert health["job_inventory"]["complete"] is True
