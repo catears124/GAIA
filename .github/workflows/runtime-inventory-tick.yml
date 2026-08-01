@@ -9,6 +9,9 @@ on:
       - src/gaia/product_api.py
       - src/gaia/request_bootstrap.py
       - src/gaia/runtime_bootstrap.py
+      - src/gaia/inventory_runtime.py
+      - src/gaia/live_inventory.py
+      - src/gaia/default_sources.yaml
       - src/gaia/static_snapshot.py
       - .github/workflows/runtime-inventory-tick.yml
   schedule:
@@ -26,15 +29,11 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     env:
       GAIA_MIN_ACTIVE_LISTINGS: "100"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Allow Vercel deployment to settle
-        if: github.event_name == 'push'
-        run: sleep 45
 
       - name: Run leased production inventory tick
         id: tick
@@ -44,8 +43,9 @@ jobs:
           mkdir -p tick
           if ! curl --silent --show-error --location \
             --request POST \
-            --user-agent 'GAIA-production-maintenance/1' \
-            --connect-timeout 5 --max-time 58 \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+            --connect-timeout 15 --max-time 180 \
+            --retry 3 --retry-all-errors --retry-delay 3 \
             --dump-header tick/headers \
             --output tick/body.json \
             --write-out '%{http_code}' \
@@ -55,8 +55,9 @@ jobs:
           fi
 
           if ! curl --silent --show-error --location \
-            --user-agent 'GAIA-production-maintenance/1' \
-            --connect-timeout 5 --max-time 20 \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+            --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-all-errors --retry-delay 2 \
             --output tick/stats.json \
             --write-out '%{http_code}' \
             https://gaiajob.vercel.app/api/stats > tick/stats-status; then
