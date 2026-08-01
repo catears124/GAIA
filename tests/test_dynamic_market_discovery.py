@@ -2,22 +2,31 @@ from __future__ import annotations
 
 from gaia.collectors import LeverCollector
 from gaia.db import Database
-from gaia.dynamic_market_discovery import candidate_collectors
+from gaia.dynamic_market_discovery import (
+    SNAPSHOT_VERSION,
+    candidate_collectors,
+    deserialize_candidates,
+    serialize_candidates,
+)
 from gaia.models import Posting
 from gaia.source_catalog import save_candidates
 
 
-def test_dynamic_market_leads_enter_candidate_queue_not_validated_catalog(tmp_path) -> None:
-    posting = Posting(
+def example_posting(index: int = 0) -> Posting:
+    return Posting(
         company="Example",
-        title="Software Engineer Intern, Summer 2027",
-        apply_url="https://jobs.lever.co/example/12345678-1234-1234-1234-123456789abc",
+        title=f"Software Engineer Intern {index}, Summer 2027",
+        apply_url=(
+            f"https://jobs.lever.co/example/{index:08d}-1234-1234-1234-123456789abc"
+        ),
         source="market-index:github:community/internships-2027",
-        source_id="example-2027",
+        source_id=str(index),
         source_mode="external-index",
     )
 
-    candidates = candidate_collectors([posting], {})
+
+def test_dynamic_market_leads_enter_candidate_queue_not_validated_catalog(tmp_path) -> None:
+    candidates = candidate_collectors([example_posting()], {})
 
     assert len(candidates) == 1
     assert isinstance(candidates[0], LeverCollector)
@@ -41,19 +50,41 @@ def test_dynamic_market_leads_enter_candidate_queue_not_validated_catalog(tmp_pa
 
 
 def test_dynamic_market_discovery_deduplicates_repeated_provider_evidence() -> None:
-    postings = [
-        Posting(
-            company="Example",
-            title=f"Software Engineer Intern {index}, Summer 2027",
-            apply_url=f"https://jobs.lever.co/example/{index:08d}-1234-1234-1234-123456789abc",
-            source="market-index:github:community/internships-2027",
-            source_id=str(index),
-            source_mode="external-index",
-        )
-        for index in range(3)
-    ]
-
-    candidates = candidate_collectors(postings, {})
+    candidates = candidate_collectors([example_posting(index) for index in range(3)], {})
 
     assert len(candidates) == 1
     assert candidates[0].name == "lever:example"
+
+
+def test_dynamic_market_snapshot_round_trip_preserves_probe_only_source() -> None:
+    candidates = candidate_collectors([example_posting()], {})
+    serialized = serialize_candidates(candidates)
+    restored = deserialize_candidates(serialized)
+
+    assert SNAPSHOT_VERSION == 1
+    assert serialized == [
+        {
+            "source": "lever:example",
+            "kind": "lever",
+            "scope": "current",
+            "spec": {"company": "Example", "site": "example"},
+        }
+    ]
+    assert len(restored) == 1
+    assert isinstance(restored[0], LeverCollector)
+    assert restored[0].name == "lever:example"
+    assert restored[0].scope == "current"
+
+
+def test_dynamic_market_snapshot_rejects_unsupported_or_duplicate_rows() -> None:
+    rows = serialize_candidates(candidate_collectors([example_posting()], {}))
+    restored = deserialize_candidates(
+        rows
+        + rows
+        + [
+            {"source": "verification:unsafe", "kind": "verification", "spec": {}},
+            {"source": "lever:broken", "kind": "lever", "spec": {}},
+        ]
+    )
+
+    assert [collector.name for collector in restored] == ["lever:example"]
