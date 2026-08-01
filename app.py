@@ -49,12 +49,16 @@ from gaia.provider_expansion import install_provider_expansion  # noqa: E402
 from gaia.runtime_coverage_extensions import (  # noqa: E402
     install_runtime_coverage_extensions,
 )
+from gaia.xml_feed_coverage_extension import (  # noqa: E402
+    install_xml_feed_coverage_extension,
+)
 
 install_coverage_extensions()
 install_provider_expansion()
 install_runtime_coverage_extensions()
 install_freshness_coverage_extension()
 install_json_feed_coverage_extension()
+install_xml_feed_coverage_extension()
 
 from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
