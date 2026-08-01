@@ -4,12 +4,18 @@ import os
 
 from fastapi import FastAPI, HTTPException, Request
 
-from .conversion_funnel import build_report, drain_candidates, failure_counts, reason_bucket
+from .conversion_funnel import (
+    build_report,
+    drain_candidates,
+    failure_counts,
+    reason_bucket,
+    repair_publication,
+)
 from .maintenance_api import _request_allowed
 
 
 def install_conversion_diagnostics_api(app: FastAPI) -> None:
-    """Install authenticated conversion reporting and bounded candidate draining."""
+    """Install authenticated conversion reporting and bounded repair actions."""
     if getattr(app.state, "gaia_conversion_diagnostics_installed", False):
         return
     app.state.gaia_conversion_diagnostics_installed = True
@@ -48,6 +54,24 @@ def install_conversion_diagnostics_api(app: FastAPI) -> None:
             hours=max(1, min(int(hours), 720)),
         )
 
+    @app.post(
+        "/api/maintenance/diagnostics/repair-publication",
+        include_in_schema=False,
+    )
+    def conversion_diagnostics_repair_publication(
+        request: Request,
+        limit: int = 50,
+        hours: int = 24,
+    ) -> dict[str, object]:
+        authorize(request)
+        from . import api as legacy
+
+        return repair_publication(
+            legacy.db,
+            hours=max(1, min(int(hours), 720)),
+            limit=max(1, min(int(limit), 200)),
+        )
+
 
 __all__ = [
     "build_report",
@@ -55,4 +79,5 @@ __all__ = [
     "failure_counts",
     "install_conversion_diagnostics_api",
     "reason_bucket",
+    "repair_publication",
 ]
