@@ -55,21 +55,56 @@ def _initialize_schema(database: LiveDatabase) -> None:
         LOGGER.info("schema initialized successfully through the pooled fallback")
 
 
-def _inventory_exists(database: LiveDatabase) -> bool:
+def _inventory_counts(database: LiveDatabase) -> dict[str, int]:
     with database.connect() as connection:
         row = connection.execute(
             """
             SELECT
-                (SELECT COUNT(*) FROM postings) AS postings,
-                (SELECT COUNT(*) FROM families) AS families
+                COUNT(*) FILTER (
+                    WHERE target_match!='not_internship'
+                      AND direct_openings>0
+                ) AS active_families,
+                COALESCE(SUM(direct_openings) FILTER (
+                    WHERE target_match!='not_internship'
+                ), 0) AS active_applications,
+                COUNT(DISTINCT company) FILTER (
+                    WHERE target_match!='not_internship'
+                      AND direct_openings>0
+                ) AS active_companies,
+                (SELECT COUNT(*) FROM source_catalog WHERE validated) AS validated_sources
+            FROM families
             """
         ).fetchone()
-    return int(row["postings"] or 0) > 0 or int(row["families"] or 0) > 0
+    return {
+        "active_families": int(row["active_families"] or 0),
+        "active_applications": int(row["active_applications"] or 0),
+        "active_companies": int(row["active_companies"] or 0),
+        "validated_sources": int(row["validated_sources"] or 0),
+    }
+
+
+def _inventory_ready(database: LiveDatabase) -> bool:
+    """Reject tiny partial recoveries instead of permanently treating them as ready."""
+    counts = _inventory_counts(database)
+    minimum_applications = max(
+        1, int(os.getenv("GAIA_BOOTSTRAP_MIN_ACTIVE_APPLICATIONS", "100"))
+    )
+    minimum_companies = max(
+        1, int(os.getenv("GAIA_BOOTSTRAP_MIN_ACTIVE_COMPANIES", "20"))
+    )
+    minimum_sources = max(
+        1, int(os.getenv("GAIA_BOOTSTRAP_MIN_VALIDATED_SOURCES", "25"))
+    )
+    return (
+        counts["active_applications"] >= minimum_applications
+        and counts["active_companies"] >= minimum_companies
+        and counts["validated_sources"] >= minimum_sources
+    )
 
 
 def _claim_empty_database_bootstrap(database: LiveDatabase, worker_id: str) -> str:
     """Return ready, claimed, or busy while leasing across serverless instances."""
-    if _inventory_exists(database):
+    if _inventory_ready(database):
         return "ready"
     lease_seconds = max(60, int(os.getenv("GAIA_BOOTSTRAP_LEASE_SECONDS", "180")))
     with database.connect() as connection:
@@ -118,7 +153,7 @@ def _finish_empty_database_bootstrap(
 
 
 async def bootstrap_empty_database() -> bool:
-    """Initialize and recover an empty project during a real runtime request."""
+    """Initialize and recover an empty or materially incomplete project."""
     if os.getenv("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1") != "1":
         return True
 
@@ -176,6 +211,19 @@ async def bootstrap_empty_database() -> bool:
             status = "broken"
             error = error or repr(exc)
             LOGGER.exception("could not materialize bootstrap inventory")
+
+        if status == "ok":
+            try:
+                if not _inventory_ready(database):
+                    counts = _inventory_counts(database)
+                    status = "partial"
+                    error = f"inventory recovery remains below readiness floor: {counts}"
+                    LOGGER.warning(error)
+            except Exception as exc:
+                status = "broken"
+                error = error or repr(exc)
+                LOGGER.exception("could not evaluate recovered inventory readiness")
+
         try:
             _finish_empty_database_bootstrap(
                 database,
@@ -187,7 +235,7 @@ async def bootstrap_empty_database() -> bool:
             LOGGER.exception("could not release empty database bootstrap lease")
 
     try:
-        return _inventory_exists(database)
+        return _inventory_ready(database)
     except Exception:
         LOGGER.exception("could not verify recovered inventory")
         return False
