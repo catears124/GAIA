@@ -70,7 +70,7 @@ jobs:
           if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' tick/body.json >/dev/null; then
             state=failure
             description="Runtime inventory tick failed (HTTP ${http_status})"
-          elif [ "$stats_status" != 200 ] || ! jq -e 'type == "object" and (.active_listings | numbers) and (.companies | numbers) and (.new_today | numbers)' tick/stats.json >/dev/null; then
+          elif [ "$stats_status" != 200 ] || ! jq -e 'type == "object" and (.role_families | numbers) and (.active_listings | numbers) and (.companies | numbers) and (.new_today | numbers)' tick/stats.json >/dev/null; then
             state=failure
             description="Production stats failed validation (HTTP ${stats_status})"
           else
@@ -78,13 +78,17 @@ jobs:
             total=$(jq -r '.inventory.total // 0' tick/body.json)
             fresh=$(jq -r '.inventory.fresh // 0' tick/body.json)
             unhealthy=$(jq -r '.inventory.unhealthy // 0' tick/body.json)
+            families=$(jq -r '.role_families // 0' tick/stats.json)
             active=$(jq -r '.active_listings // 0' tick/stats.json)
             companies=$(jq -r '.companies // 0' tick/stats.json)
             new_today=$(jq -r '.new_today // 0' tick/stats.json)
 
-            if [ "$new_today" -gt "$active" ] || [ "$companies" -gt "$active" ]; then
+            if [ "$families" -gt "$active" ] || [ "$companies" -gt "$families" ]; then
               state=failure
-              description="Impossible production counts: ${active} open, ${companies} companies, ${new_today} new"
+              description="Impossible inventory shape: ${active} openings, ${families} roles, ${companies} companies"
+            elif [ "$new_today" -gt "$families" ]; then
+              state=failure
+              description="Impossible role movement: ${new_today} new roles exceeds ${families} active roles"
             elif [ "$active" -lt "$GAIA_MIN_ACTIVE_LISTINGS" ]; then
               state=failure
               description="Collapsed production inventory: ${active} open (<${GAIA_MIN_ACTIVE_LISTINGS})"
@@ -107,7 +111,7 @@ jobs:
             echo "- Maintenance HTTP: ${http_status}"
             echo "- Stats HTTP: ${stats_status}"
             jq -r '"- Operation: \(.status // "unknown")\n- Executed: \(.executed // false)\n- Summary: \(.summary // {})"' tick/body.json
-            jq -r '"- Open applications: \(.active_listings // 0)\n- Hiring companies: \(.companies // 0)\n- New open applications (24h): \(.new_today // 0)"' tick/stats.json
+            jq -r '"- Open applications: \(.active_listings // 0)\n- Active role families: \(.role_families // 0)\n- Hiring companies: \(.companies // 0)\n- New role families (24h): \(.new_today // 0)\n- New canonical URLs (24h): \(.new_urls_24h // "unavailable")"' tick/stats.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish runtime inventory status
