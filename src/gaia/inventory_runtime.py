@@ -20,6 +20,7 @@ from .inventory import (
 from .inventory import (
     InventoryWorker as BaseInventoryWorker,
 )
+from .models import CollectorResult, Posting
 from .provider_discovery import provider_collectors_from_postings
 from .quality import canonical_source_name
 from .source_catalog import (
@@ -48,7 +49,7 @@ SUPPORTED_CATALOG_KINDS = {
     "verification",
     "google-careers",
 }
-FALLBACK_KINDS = {"domain", "verification"}
+FALLBACK_KINDS = {"verification"}
 COVERAGE_KINDS = SUPPORTED_CATALOG_KINDS - FALLBACK_KINDS
 BAD_COMPLETION_STATUSES = {"broken", "blocked", "truncated", "partial", "dormant"}
 VALID_CANDIDATE_STATUSES = {"ok", "empty"}
@@ -299,6 +300,23 @@ class RuntimeInventoryStore(InventoryStore):
             )
 
 
+class _RecursiveDiscoveryCollector(Collector):
+    def __init__(self, worker: InventoryWorker, delegate: Collector) -> None:
+        self.worker = worker
+        self.delegate = delegate
+        self.name = delegate.name
+        self.mode = delegate.mode
+        self.scope = delegate.scope
+
+    async def collect(self, client: httpx.AsyncClient) -> CollectorResult:
+        result = await self.delegate.collect(client)
+        self.worker._save_recursive_candidates(
+            result.discovery_postings,
+            origin=f"recursive-source:{self.name}",
+        )
+        return result
+
+
 class InventoryWorker(BaseInventoryWorker):
     """Production worker: validated inventory first, quarantined discovery second."""
 
@@ -306,11 +324,41 @@ class InventoryWorker(BaseInventoryWorker):
         super().__init__(database, concurrency=concurrency)
         self.store = RuntimeInventoryStore(database, self.store.worker_id)
 
+    def _candidate_collectors(self, postings: list[Posting]) -> list[Collector]:
+        generated = merge_catalog(
+            collectors_from_registry(postings, self.settings, deep=True),
+            provider_collectors_from_postings(postings),
+        )
+        candidates: list[Collector] = []
+        for collector in generated:
+            described = _spec(collector)
+            if described is None or described[0] not in COVERAGE_KINDS:
+                continue
+            collector.name = canonical_source_name(collector.name)
+            candidates.append(collector)
+        return candidates
+
+    def _save_recursive_candidates(self, postings: list[Posting], *, origin: str) -> int:
+        if not postings:
+            return 0
+        candidates = self._candidate_collectors(postings)
+        if not candidates:
+            return 0
+        saved = save_candidates(self.database, candidates, origin=origin)
+        LOGGER.info(
+            "recursive discovery origin=%s evidence=%s candidates=%s",
+            origin,
+            len(postings),
+            saved,
+        )
+        return saved
+
     def _build_collector(self, target: ClaimedTarget) -> Collector | None:
         collector = super()._build_collector(target)
-        if collector is not None:
-            collector.name = target.source
-        return collector
+        if collector is None:
+            return None
+        collector.name = target.source
+        return _RecursiveDiscoveryCollector(self, collector)
 
     async def _run_discovery_if_due(self, client: httpx.AsyncClient) -> bool:
         if self.store.has_due_coverage_targets():
@@ -338,6 +386,10 @@ class InventoryWorker(BaseInventoryWorker):
         except Exception as exc:
             result = self._failure_result(collector, exc)
 
+        self._save_recursive_candidates(
+            result.discovery_postings,
+            origin=f"candidate-probe:{target.source}",
+        )
         valid = (
             result.error is None
             and result.complete
@@ -387,7 +439,7 @@ class InventoryWorker(BaseInventoryWorker):
 
     async def _refresh_market(self, client: httpx.AsyncClient, *, include_universe: bool) -> None:
         """Use curated lists as evidence only; never let search results mutate production."""
-        discovery_postings = []
+        discovery_postings: list[Posting] = []
         collectors = registry_collectors(self.settings)
         registry_results = await asyncio.gather(
             *(collector.collect(client) for collector in collectors),
@@ -412,20 +464,7 @@ class InventoryWorker(BaseInventoryWorker):
             await self._apply_auxiliary_results(universe_health)
             discovery_postings.extend(universe_postings)
 
-        generated = merge_catalog(
-            collectors_from_registry(discovery_postings, self.settings, deep=True),
-            provider_collectors_from_postings(discovery_postings),
-        )
-        candidates = []
-        for collector in generated:
-            described = _spec(collector)
-            if described is None:
-                continue
-            kind, _ = described
-            if kind not in COVERAGE_KINDS:
-                continue
-            collector.name = canonical_source_name(collector.name)
-            candidates.append(collector)
+        candidates = self._candidate_collectors(discovery_postings)
         save_candidates(
             self.database,
             candidates,
