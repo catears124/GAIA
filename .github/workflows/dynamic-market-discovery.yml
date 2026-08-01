@@ -32,7 +32,9 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DB_CANDIDATE_PRISMA: ${{ secrets.POSTGRES_PRISMA_URL }}
+      GAIA_DB_CANDIDATE_POSTGRES: ${{ secrets.POSTGRES_URL }}
+      GAIA_DB_CANDIDATE_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
       GAIA_HTTP_TIMEOUT: "45"
@@ -52,18 +54,50 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-      - name: Validate database configuration
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Select a working production database credential
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$GAIA_DATABASE_URL" || {
-            echo "Missing all supported database secrets: POSTGRES_PRISMA_URL, POSTGRES_URL, POSTGRES_URL_NON_POOLING." >&2
+          selected=""
+          attempted=0
+          for name in \
+            GAIA_DB_CANDIDATE_NON_POOLING \
+            GAIA_DB_CANDIDATE_PRISMA \
+            GAIA_DB_CANDIDATE_POSTGRES
+          do
+            candidate="${!name:-}"
+            if [ -z "$candidate" ]; then
+              continue
+            fi
+            attempted=$((attempted + 1))
+            echo "::add-mask::$candidate"
+            set +e
+            GAIA_DATABASE_URL="$candidate" python -m gaia.wait_for_database --timeout-seconds 30
+            code=$?
+            set -e
+            if [ "$code" -eq 0 ]; then
+              selected="$candidate"
+              echo "Selected working database candidate: $name"
+              break
+            fi
+            echo "Database candidate $name rejected with readiness code $code."
+          done
+          if [ "$attempted" -eq 0 ]; then
+            echo "Missing all supported database secrets: POSTGRES_URL_NON_POOLING, POSTGRES_PRISMA_URL, POSTGRES_URL." >&2
             exit 2
-          }
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Wait for production database
-        run: python -m gaia.wait_for_database --timeout-seconds 120
+          fi
+          if [ -z "$selected" ]; then
+            echo "None of the configured database credentials reaches a live production tenant." >&2
+            exit 2
+          fi
+          delimiter="GAIA_DB_$(openssl rand -hex 12)"
+          {
+            echo "GAIA_DATABASE_URL<<$delimiter"
+            echo "$selected"
+            echo "$delimiter"
+          } >> "$GITHUB_ENV"
       - name: Discover and validate fresh employer sources
         shell: bash
         run: |
