@@ -82,7 +82,7 @@ market_discovery:
   github:
     enabled: true
     repos_per_query: 20
-    max_repositories: 100
+    max_repositories: 180
     pushed_within_days: 365
     queries:
       - '"2027 internships" in:name,description,readme'
@@ -91,7 +91,15 @@ market_discovery:
       - '"2027 software" internship in:name,description,readme'
       - '"2027 data" internship in:name,description,readme'
       - '"2027 machine learning" internship in:name,description,readme'
+      - '"2027 artificial intelligence" internship in:name,description,readme'
+      - '"2027 research" internship in:name,description,readme'
       - '"2027 hardware" internship in:name,description,readme'
+      - '"2027 embedded" internship in:name,description,readme'
+      - '"2027 robotics" internship in:name,description,readme'
+      - '"2027 electrical" internship in:name,description,readme'
+      - '"2027 mechanical" internship in:name,description,readme'
+      - '"2027 aerospace" internship in:name,description,readme'
       - '"2027 cybersecurity" internship in:name,description,readme'
+      - '"2027 cloud" internship in:name,description,readme'
       - '"2027 product" internship in:name,description,readme'
       - '"2027 quant" internships in:name,description,readme'
