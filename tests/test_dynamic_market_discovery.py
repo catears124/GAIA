@@ -93,18 +93,26 @@ def test_dynamic_market_snapshot_rejects_unsupported_or_duplicate_rows() -> None
     assert [collector.name for collector in restored] == ["lever:example"]
 
 
-def test_posting_freshness_uses_employer_dates_not_observation_time() -> None:
+def test_posting_freshness_counts_only_trusted_employer_dates() -> None:
     now = datetime.now(UTC)
-    postings = [example_posting(index) for index in range(5)]
+    postings = [example_posting(index) for index in range(6)]
     postings[0].posted_at = now - timedelta(hours=2)
     postings[1].posted_at = now - timedelta(days=2)
     postings[2].posted_at = now - timedelta(days=6)
     postings[3].posted_at = now - timedelta(days=12)
-    postings[4].posted_at = None
+    for posting in postings[:4]:
+        posting.posted_confidence = "official"
+
+    # Workday-style relative labels are useful evidence, but must not masquerade as
+    # precise employer timestamps in freshness metrics.
+    postings[4].posted_at = now
+    postings[4].posted_confidence = "approximate"
+    postings[5].posted_at = None
 
     summary = posting_freshness(postings)
 
     assert summary["dated_postings"] == 4
+    assert summary["untrusted_dated_postings"] == 1
     assert summary["employer_posted_last_24h"] == 1
     assert summary["employer_posted_last_72h"] == 2
     assert summary["employer_posted_last_7d"] == 3
