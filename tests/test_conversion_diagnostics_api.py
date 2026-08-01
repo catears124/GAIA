@@ -4,12 +4,30 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from gaia import conversion_diagnostics_api
+from gaia.db import Database
 
 
 def app() -> FastAPI:
     instance = FastAPI()
     conversion_diagnostics_api.install_conversion_diagnostics_api(instance)
     return instance
+
+
+def test_conversion_report_runs_against_current_schema(tmp_path) -> None:
+    database = Database(tmp_path / "conversion-funnel.db")
+    try:
+        report = conversion_diagnostics_api.build_report(
+            database,
+            hours=24,
+            limit=25,
+        )
+    finally:
+        database.drop_schema()
+
+    assert report["objective"] == "increase_verified_new_jobs"
+    assert report["diagnostic_errors"] == []
+    assert report["funnel"]["new_verified_jobs_window"] == 0
+    assert report["sources"]["candidate_sources_due"] == 0
 
 
 def test_conversion_diagnostics_rejects_public_requests(monkeypatch) -> None:
