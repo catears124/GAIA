@@ -6,14 +6,17 @@ on:
       - ".github/workflows/coverage-contract.yml"
       - ".github/workflows/reconcile.yml"
       - ".github/workflows/production-coverage-diagnostics.yml"
+      - ".github/workflows/runtime-coverage.yml"
       - "src/gaia/cli.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
       - "src/gaia/universe.py"
       - "src/gaia/default_sources.yaml"
       - "tests/test_bulk_employer_reconcile.py"
       - "tests/test_critical_reconcile.py"
       - "tests/test_employer_universe.py"
+      - "tests/test_maintenance_api.py"
       - "tests/test_production_coverage.py"
   push:
     branches: [main, coverage-repair-20260731]
@@ -21,14 +24,17 @@ on:
       - ".github/workflows/coverage-contract.yml"
       - ".github/workflows/reconcile.yml"
       - ".github/workflows/production-coverage-diagnostics.yml"
+      - ".github/workflows/runtime-coverage.yml"
       - "src/gaia/cli.py"
       - "src/gaia/employer_census.py"
+      - "src/gaia/maintenance_api.py"
       - "src/gaia/production_coverage.py"
       - "src/gaia/universe.py"
       - "src/gaia/default_sources.yaml"
       - "tests/test_bulk_employer_reconcile.py"
       - "tests/test_critical_reconcile.py"
       - "tests/test_employer_universe.py"
+      - "tests/test_maintenance_api.py"
       - "tests/test_production_coverage.py"
   workflow_dispatch:
 
@@ -74,12 +80,18 @@ jobs:
       - name: Migrate isolated PostgreSQL
         run: gaia migrate
       - name: Lint coverage implementation
-        run: ruff check src/gaia/production_coverage.py tests/test_production_coverage.py
+        run: >-
+          ruff check
+          src/gaia/maintenance_api.py
+          src/gaia/production_coverage.py
+          tests/test_maintenance_api.py
+          tests/test_production_coverage.py
       - name: Verify employer coverage contracts
         shell: bash
         run: |
           set -euo pipefail
           pytest -q \
+            tests/test_maintenance_api.py \
             tests/test_production_coverage.py \
             tests/test_critical_reconcile.py \
             tests/test_bulk_employer_reconcile.py \
