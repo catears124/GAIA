@@ -31,9 +31,6 @@ _JOB_CONTAINER_KEYS = {
     "openings",
     "requisitions",
     "vacancies",
-    "results",
-    "items",
-    "data",
 }
 _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "crelate.com": "crelate",
@@ -65,27 +62,26 @@ def _json_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
         return [], False
 
     output: dict[str, str] = {}
-    job_feed = False
+    job_feed = career._careerish(base_url)
     visited = 0
-    stack: list[tuple[object, str, bool]] = [(payload, "", False)]
+    stack: list[tuple[object, bool]] = [(payload, False)]
     while stack and visited < 20_000:
-        value, parent_key, in_job_container = stack.pop()
+        value, in_job_container = stack.pop()
         visited += 1
         if isinstance(value, Mapping):
             normalized_keys = {_normalized_key(key) for key in value}
             record_like = bool(
                 normalized_keys & {"title", "jobtitle", "positiontitle", "name"}
-                and normalized_keys & {"id", "jobid", "requisitionid", "reqid", "url", "applyurl"}
+                and normalized_keys
+                & {"id", "jobid", "requisitionid", "reqid", "url", "applyurl"}
             )
             current_job_context = in_job_container or record_like
             if record_like:
                 job_feed = True
             for key, child in value.items():
                 normalized = _normalized_key(key)
-                child_job_context = current_job_context or normalized in {
-                    _normalized_key(item) for item in _JOB_CONTAINER_KEYS
-                }
-                if normalized in {_normalized_key(item) for item in _JOB_CONTAINER_KEYS}:
+                child_job_context = current_job_context or normalized in _JOB_CONTAINER_KEYS
+                if normalized in _JOB_CONTAINER_KEYS:
                     job_feed = True
                 if isinstance(child, str) and normalized in _URL_KEYS:
                     candidate = career._normalized_http_url(urljoin(base_url, child.strip()))
@@ -98,10 +94,10 @@ def _json_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
                     ):
                         output[candidate] = str(key)
                 elif isinstance(child, (Mapping, list, tuple)):
-                    stack.append((child, normalized, child_job_context))
+                    stack.append((child, child_job_context))
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
             for child in reversed(value):
-                stack.append((child, parent_key, in_job_container))
+                stack.append((child, in_job_container))
 
     return list(output.items()), job_feed
 
