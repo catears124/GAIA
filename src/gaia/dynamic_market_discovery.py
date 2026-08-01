@@ -5,10 +5,13 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from .collectors import Collector
+from .config import load_sources
 from .db import Database
 from .discovery import collectors_from_registry
 from .inventory_runtime import COVERAGE_KINDS, InventoryWorker
@@ -16,21 +19,22 @@ from .market_discovery import discover_github_market
 from .models import Posting
 from .provider_discovery import provider_collectors_from_postings
 from .quality import canonical_source_name
-from .source_catalog import _spec, merge_catalog, save_candidates
+from .source_catalog import _collector, _spec, merge_catalog, save_candidates
 
 LOGGER = logging.getLogger("gaia.dynamic-market-discovery")
+SNAPSHOT_VERSION = 1
 
 
 def candidate_collectors(
     postings: list[Posting],
     settings: dict[str, Any],
-):
+) -> list[Collector]:
     """Turn untrusted market leads into probe-only employer source candidates."""
     generated = merge_catalog(
         collectors_from_registry(postings, settings, deep=True),
         provider_collectors_from_postings(postings),
     )
-    candidates = []
+    candidates: list[Collector] = []
     for collector in generated:
         described = _spec(collector)
         if described is None:
@@ -46,14 +50,54 @@ def candidate_collectors(
     return candidates
 
 
-async def run_dynamic_market_discovery(
-    database: Database,
-    *,
-    probe_limit: int,
-    concurrency: int,
-) -> dict[str, int | bool]:
-    """Search public market indexes, validate recovered boards, and expand coverage safely."""
-    worker = InventoryWorker(database, concurrency=concurrency)
+def serialize_candidates(candidates: list[Collector]) -> list[dict[str, Any]]:
+    """Serialize probe-only candidates without treating external indexes as trusted data."""
+    rows: list[dict[str, Any]] = []
+    for collector in candidates:
+        described = _spec(collector)
+        if described is None:
+            continue
+        kind, spec = described
+        if kind not in COVERAGE_KINDS:
+            continue
+        source = canonical_source_name(collector.name)
+        if not source:
+            continue
+        rows.append(
+            {
+                "source": source,
+                "kind": kind,
+                "scope": collector.scope,
+                "spec": spec,
+            }
+        )
+    return rows
+
+
+def deserialize_candidates(rows: list[dict[str, Any]]) -> list[Collector]:
+    """Restore only supported source candidates from a discovery snapshot."""
+    candidates: list[Collector] = []
+    seen: set[str] = set()
+    for row in rows:
+        kind = str(row.get("kind") or "")
+        spec = row.get("spec")
+        source = canonical_source_name(str(row.get("source") or ""))
+        if kind not in COVERAGE_KINDS or not isinstance(spec, dict) or not source:
+            continue
+        try:
+            collector = _collector(kind, spec)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if collector is None or source in seen:
+            continue
+        collector.name = source
+        collector.scope = str(row.get("scope") or "current")
+        candidates.append(collector)
+        seen.add(source)
+    return candidates
+
+
+def _client(concurrency: int) -> httpx.AsyncClient:
     timeout = httpx.Timeout(float(os.getenv("GAIA_HTTP_TIMEOUT", "45")))
     limits = httpx.Limits(
         max_connections=max(32, concurrency * 3),
@@ -66,31 +110,67 @@ async def run_dynamic_market_discovery(
         ),
         "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
     }
-
-    async with httpx.AsyncClient(
+    return httpx.AsyncClient(
         headers=headers,
         timeout=timeout,
         limits=limits,
         follow_redirects=True,
-    ) as client:
-        postings, health = await discover_github_market(client, worker.settings)
-        await worker._apply_auxiliary_results(health)
+    )
 
-        search_results = [result for result in health if result.mode == "market-discovery"]
-        successful_searches = sum(
-            result.complete and result.error is None and result.status == "loaded"
-            for result in search_results
-        )
-        if search_results and successful_searches == 0:
-            raise RuntimeError("every dynamic GitHub market query failed or was blocked")
 
-        candidates = candidate_collectors(postings, worker.settings)
-        saved = save_candidates(
-            database,
-            candidates,
-            origin="dynamic-github-market",
-        )
+async def build_market_snapshot(
+    *,
+    settings: dict[str, Any] | None = None,
+    concurrency: int,
+) -> dict[str, Any]:
+    """Search public indexes without requiring production database availability."""
+    settings = settings or load_sources()
+    async with _client(concurrency) as client:
+        postings, health = await discover_github_market(client, settings)
 
+    search_results = [result for result in health if result.mode == "market-discovery"]
+    successful_searches = sum(
+        result.complete and result.error is None and result.status == "loaded"
+        for result in search_results
+    )
+    if search_results and successful_searches == 0:
+        raise RuntimeError("every dynamic GitHub market query failed or was blocked")
+
+    candidates = candidate_collectors(postings, settings)
+    serialized = serialize_candidates(candidates)
+    summary: dict[str, int | bool] = {
+        "enabled": bool(search_results),
+        "queries": len(search_results),
+        "successful_queries": successful_searches,
+        "market_postings": len(postings),
+        "candidate_sources": len(serialized),
+    }
+    return {
+        "version": SNAPSHOT_VERSION,
+        "summary": summary,
+        "candidates": serialized,
+    }
+
+
+async def ingest_market_snapshot(
+    database: Database,
+    snapshot: dict[str, Any],
+    *,
+    probe_limit: int,
+    concurrency: int,
+) -> dict[str, int | bool]:
+    """Validate captured source evidence before adding it to production inventory."""
+    if int(snapshot.get("version") or 0) != SNAPSHOT_VERSION:
+        raise ValueError("unsupported dynamic market snapshot version")
+    rows = snapshot.get("candidates")
+    if not isinstance(rows, list):
+        raise ValueError("dynamic market snapshot is missing candidates")
+
+    worker = InventoryWorker(database, concurrency=concurrency)
+    candidates = deserialize_candidates([row for row in rows if isinstance(row, dict)])
+    saved = save_candidates(database, candidates, origin="dynamic-github-market")
+
+    async with _client(concurrency) as client:
         claimed = worker.store.claim_candidates(
             limit=max(1, probe_limit),
             lease_seconds=worker.lease_seconds,
@@ -104,19 +184,34 @@ async def run_dynamic_market_discovery(
             )
 
     catalog_sources = worker.store.sync_catalog()
-    summary: dict[str, int | bool] = {
-        "enabled": bool(search_results),
-        "queries": len(search_results),
-        "successful_queries": successful_searches,
-        "market_postings": len(postings),
-        "candidate_sources": len(candidates),
-        "candidate_rows_written": saved,
-        "candidate_sources_probed": len(claimed),
-        "candidate_sources_promoted": promoted,
-        "catalog_sources_scheduled": catalog_sources,
-    }
+    base_summary = snapshot.get("summary")
+    summary: dict[str, int | bool] = dict(base_summary) if isinstance(base_summary, dict) else {}
+    summary.update(
+        {
+            "candidate_rows_written": saved,
+            "candidate_sources_probed": len(claimed),
+            "candidate_sources_promoted": promoted,
+            "catalog_sources_scheduled": catalog_sources,
+        }
+    )
     LOGGER.info("dynamic market discovery %s", summary)
     return summary
+
+
+async def run_dynamic_market_discovery(
+    database: Database,
+    *,
+    probe_limit: int,
+    concurrency: int,
+) -> dict[str, int | bool]:
+    """Search, capture, validate, and schedule newly discovered employer sources."""
+    snapshot = await build_market_snapshot(concurrency=concurrency)
+    return await ingest_market_snapshot(
+        database,
+        snapshot,
+        probe_limit=probe_limit,
+        concurrency=concurrency,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -131,6 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "16")),
     )
+    parser.add_argument("--search-only", action="store_true")
+    parser.add_argument("--snapshot-output", type=Path, default=None)
+    parser.add_argument("--snapshot-input", type=Path, default=None)
     return parser
 
 
@@ -140,12 +238,30 @@ def main() -> None:
         level=os.getenv("GAIA_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    concurrency = max(1, args.concurrency)
+
+    if args.snapshot_input is not None:
+        snapshot = json.loads(args.snapshot_input.read_text(encoding="utf-8"))
+    else:
+        snapshot = asyncio.run(build_market_snapshot(concurrency=concurrency))
+
+    if args.snapshot_output is not None:
+        args.snapshot_output.write_text(
+            json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    if args.search_only:
+        print(json.dumps(snapshot.get("summary") or {}, sort_keys=True))
+        return
+
     database = Database(migrate=False)
     summary = asyncio.run(
-        run_dynamic_market_discovery(
+        ingest_market_snapshot(
             database,
+            snapshot,
             probe_limit=max(1, args.probe_limit),
-            concurrency=max(1, args.concurrency),
+            concurrency=concurrency,
         )
     )
     print(json.dumps(summary, sort_keys=True))
