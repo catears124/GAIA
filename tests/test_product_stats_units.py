@@ -31,7 +31,8 @@ def test_live_feed_defaults_to_confirmed_target_internships() -> None:
 
 def test_newest_order_uses_employer_date_before_recovery_time() -> None:
     order = _live_order_clause("newest")
+    employer_branch = order.index("CASE WHEN latest_posted_at IS NULL")
+    detection_fallback = order.index("date_trunc('hour', first_detected_at)")
 
     assert "GREATEST" not in order
-    assert "CASE WHEN latest_posted_at IS NULL" in order
-    assert order.index("latest_posted_at IS NULL") < order.index("first_detected_at DESC")
+    assert employer_branch < detection_fallback
