@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from gaia.collectors import LeverCollector
 from gaia.db import Database
 from gaia.dynamic_market_discovery import (
     SNAPSHOT_VERSION,
     candidate_collectors,
     deserialize_candidates,
+    posting_freshness,
     serialize_candidates,
 )
 from gaia.models import Posting
@@ -88,3 +91,21 @@ def test_dynamic_market_snapshot_rejects_unsupported_or_duplicate_rows() -> None
     )
 
     assert [collector.name for collector in restored] == ["lever:example"]
+
+
+def test_posting_freshness_uses_employer_dates_not_observation_time() -> None:
+    now = datetime.now(UTC)
+    postings = [example_posting(index) for index in range(5)]
+    postings[0].posted_at = now - timedelta(hours=2)
+    postings[1].posted_at = now - timedelta(days=2)
+    postings[2].posted_at = now - timedelta(days=6)
+    postings[3].posted_at = now - timedelta(days=12)
+    postings[4].posted_at = None
+
+    summary = posting_freshness(postings)
+
+    assert summary["dated_postings"] == 4
+    assert summary["employer_posted_last_24h"] == 1
+    assert summary["employer_posted_last_72h"] == 2
+    assert summary["employer_posted_last_7d"] == 3
+    assert summary["freshest_employer_posted_at"] == postings[0].posted_at.isoformat()
