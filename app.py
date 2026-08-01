@@ -21,17 +21,21 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_AUTO_MIGRATE", "0")
     os.environ.setdefault("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1")
     os.environ.setdefault("GAIA_BOOTSTRAP_BUDGET_SECONDS", "38")
-    os.environ.setdefault("GAIA_CANDIDATE_PROBE_LIMIT", "6")
+    os.environ.setdefault("GAIA_CANDIDATE_PROBE_LIMIT", "10")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_TICK", "1")
-    os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "600")
+    os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "300")
     os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "42")
-    os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "6")
+    os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "8")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
-    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "300")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "180")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "150")
-    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "8")
-    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "8")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "12")
+    os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "10")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
+
+from gaia.coverage_extensions import install_coverage_extensions  # noqa: E402
+
+install_coverage_extensions()
 
 from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
