@@ -17,12 +17,12 @@ on:
       drain_candidates:
         description: "Probe a bounded batch of due source candidates before reporting"
         required: false
-        default: false
+        default: true
         type: boolean
       probe_limit:
         description: "Maximum due source candidates to probe"
         required: false
-        default: "24"
+        default: "64"
         type: string
       report_hours:
         description: "Funnel reporting window in hours"
@@ -41,14 +41,14 @@ concurrency:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 12
     steps:
       - name: Capture candidate-to-publication evidence
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
-          DRAIN: ${{ github.event_name == 'workflow_dispatch' && inputs.drain_candidates || false }}
-          PROBE_LIMIT: ${{ inputs.probe_limit || '24' }}
+          DRAIN: ${{ github.event_name != 'workflow_dispatch' || inputs.drain_candidates }}
+          PROBE_LIMIT: ${{ inputs.probe_limit || '64' }}
           REPORT_HOURS: ${{ inputs.report_hours || '24' }}
         shell: bash
         run: |
@@ -60,11 +60,11 @@ jobs:
             drain_status=$(curl --silent --show-error --location \
               --request POST \
               --user-agent "$user_agent" \
-              --connect-timeout 15 --max-time 300 \
+              --connect-timeout 15 --max-time 420 \
               --retry 2 --retry-all-errors --retry-delay 5 \
               --output evidence/drain.json \
               --write-out '%{http_code}' \
-              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=${PROBE_LIMIT}&hours=${REPORT_HOURS}" \
+              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=${PROBE_LIMIT}&concurrency=12&hours=${REPORT_HOURS}" \
               || printf '000')
             if [ "$drain_status" != 200 ] || ! jq -e '.status == "ok"' evidence/drain.json >/dev/null; then
               echo "state=failure" >> "$GITHUB_OUTPUT"
