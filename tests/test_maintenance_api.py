@@ -68,6 +68,50 @@ def test_disabled_runtime_tick_is_not_exposed(monkeypatch) -> None:
     assert response.status_code == 404
 
 
+def test_runtime_coverage_rejects_public_requests(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_ENABLE_RUNTIME_COVERAGE", "1")
+
+    response = TestClient(app()).post("/api/maintenance/coverage")
+
+    assert response.status_code == 403
+
+
+def test_runtime_coverage_accepts_the_production_scheduler(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_ENABLE_RUNTIME_COVERAGE", "1")
+
+    async def fake_coverage():
+        return {
+            "status": "ok",
+            "executed": True,
+            "rebuilt_employers": 12,
+            "merged_observations": 337,
+            "universe": {
+                "ready": True,
+                "summary": {"known_employers": 349, "enumerated_employers": 12},
+            },
+        }
+
+    monkeypatch.setattr(maintenance_api, "run_coverage_tick", fake_coverage)
+    response = TestClient(app()).post(
+        "/api/maintenance/coverage",
+        headers={"User-Agent": "GAIA-production-maintenance/1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["universe"]["summary"]["known_employers"] == 349
+
+
+def test_disabled_runtime_coverage_is_not_exposed(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_ENABLE_RUNTIME_COVERAGE", "0")
+
+    response = TestClient(app()).post(
+        "/api/maintenance/coverage",
+        headers={"User-Agent": "GAIA-production-maintenance/1"},
+    )
+
+    assert response.status_code == 404
+
+
 def test_runtime_tick_is_database_leased_and_budget_bounded() -> None:
     source = __import__("pathlib").Path("src/gaia/maintenance_api.py").read_text(encoding="utf-8")
 
@@ -77,3 +121,14 @@ def test_runtime_tick_is_database_leased_and_budget_bounded() -> None:
     assert "min(float" in source
     assert "once=True" in source
     assert "budget_seconds=budget" in source
+
+
+def test_runtime_coverage_is_leased_and_validates_the_census() -> None:
+    source = __import__("pathlib").Path("src/gaia/maintenance_api.py").read_text(encoding="utf-8")
+
+    assert "vercel-runtime-coverage-reconcile" in source
+    assert "rebuild_employer_universe(database)" in source
+    assert "merge_observations_into_universe(database)" in source
+    assert 'summary.get("known_employers")' in source
+    assert 'summary.get("enumerated_employers")' in source
+    assert 'report.get("rebuild_required") is True' in source
