@@ -255,6 +255,7 @@ def live_stats() -> dict[str, object]:
             SELECT
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE first_seen_at >= now() - interval '24 hours'
+                      AND removed_at IS NULL
                 ) AS new_today,
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE removed_at >= now() - interval '24 hours'
