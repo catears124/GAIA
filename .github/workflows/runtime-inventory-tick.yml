@@ -6,8 +6,10 @@ on:
     paths:
       - app.py
       - src/gaia/maintenance_api.py
+      - src/gaia/product_api.py
       - src/gaia/request_bootstrap.py
       - src/gaia/runtime_bootstrap.py
+      - src/gaia/static_snapshot.py
       - .github/workflows/runtime-inventory-tick.yml
   schedule:
     - cron: "*/15 * * * *"
@@ -24,7 +26,9 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
+    env:
+      GAIA_MIN_ACTIVE_LISTINGS: "100"
     steps:
       - uses: actions/checkout@v4
 
@@ -49,21 +53,46 @@ jobs:
             printf '000\n' > tick/status
             printf '{}\n' > tick/body.json
           fi
+
+          if ! curl --silent --show-error --location \
+            --user-agent 'GAIA-production-maintenance/1' \
+            --connect-timeout 5 --max-time 20 \
+            --output tick/stats.json \
+            --write-out '%{http_code}' \
+            https://gaiajob.vercel.app/api/stats > tick/stats-status; then
+            printf '000\n' > tick/stats-status
+            printf '{}\n' > tick/stats.json
+          fi
+
           http_status=$(tr -d '\r\n' < tick/status)
+          stats_status=$(tr -d '\r\n' < tick/stats-status)
           if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' tick/body.json >/dev/null; then
             state=failure
             description="Runtime inventory tick failed (HTTP ${http_status})"
+          elif [ "$stats_status" != 200 ] || ! jq -e 'type == "object" and (.active_listings | numbers) and (.companies | numbers) and (.new_today | numbers)' tick/stats.json >/dev/null; then
+            state=failure
+            description="Production stats failed validation (HTTP ${stats_status})"
           else
             operation=$(jq -r '.status' tick/body.json)
             total=$(jq -r '.inventory.total // 0' tick/body.json)
             fresh=$(jq -r '.inventory.fresh // 0' tick/body.json)
             unhealthy=$(jq -r '.inventory.unhealthy // 0' tick/body.json)
-            if [ "$operation" = partial ] || [ "$unhealthy" -gt 0 ] || [ "$fresh" -lt "$total" ]; then
+            active=$(jq -r '.active_listings // 0' tick/stats.json)
+            companies=$(jq -r '.companies // 0' tick/stats.json)
+            new_today=$(jq -r '.new_today // 0' tick/stats.json)
+
+            if [ "$new_today" -gt "$active" ] || [ "$companies" -gt "$active" ]; then
+              state=failure
+              description="Impossible production counts: ${active} open, ${companies} companies, ${new_today} new"
+            elif [ "$active" -lt "$GAIA_MIN_ACTIVE_LISTINGS" ]; then
+              state=failure
+              description="Collapsed production inventory: ${active} open (<${GAIA_MIN_ACTIVE_LISTINGS})"
+            elif [ "$operation" = partial ] || [ "$unhealthy" -gt 0 ] || [ "$fresh" -lt "$total" ]; then
               state=pending
-              description="Runtime tick ${operation}; inventory ${fresh}/${total} fresh"
+              description="Runtime tick ${operation}; ${active} open; sources ${fresh}/${total} fresh"
             else
               state=success
-              description="Runtime tick ${operation}; all ${total} sources fresh"
+              description="Runtime tick ${operation}; ${active} open; all ${total} sources fresh"
             fi
           fi
           printf '%s\n' "$state" > tick/state
@@ -74,8 +103,10 @@ jobs:
             echo "### Runtime inventory tick"
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
-            echo "- HTTP: ${http_status}"
+            echo "- Maintenance HTTP: ${http_status}"
+            echo "- Stats HTTP: ${stats_status}"
             jq -r '"- Operation: \(.status // "unknown")\n- Executed: \(.executed // false)\n- Summary: \(.summary // {})"' tick/body.json
+            jq -r '"- Open applications: \(.active_listings // 0)\n- Hiring companies: \(.companies // 0)\n- New open applications (24h): \(.new_today // 0)"' tick/stats.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish runtime inventory status
