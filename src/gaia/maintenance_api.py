@@ -9,10 +9,14 @@ from fastapi import FastAPI, HTTPException, Request
 
 _INVENTORY_TASK = "vercel-runtime-inventory-tick"
 _COVERAGE_TASK = "vercel-runtime-coverage-reconcile"
+_DYNAMIC_SOURCE_TASK = "vercel-runtime-dynamic-source-ingest"
 _ALLOWED_USER_AGENTS = ("GAIA-production-maintenance/", "vercel-cron/1.0")
 
 
 def _request_allowed(request: Request) -> bool:
+    expected_token = os.getenv("GAIA_MAINTENANCE_TOKEN", "").strip()
+    if expected_token:
+        return request.headers.get("authorization", "") == f"Bearer {expected_token}"
     user_agent = request.headers.get("user-agent", "")
     return any(user_agent.startswith(prefix) for prefix in _ALLOWED_USER_AGENTS)
 
@@ -156,6 +160,66 @@ async def run_inventory_tick() -> dict[str, object]:
     }
 
 
+async def run_dynamic_source_ingest(snapshot: dict[str, Any]) -> dict[str, object]:
+    """Persist externally discovered candidates where Vercel has current DB credentials."""
+    from .dynamic_market_discovery import ingest_market_snapshot
+    from .live_inventory import LiveDatabase
+
+    database = LiveDatabase(migrate=False)
+    worker_id = _worker_id("dynamic-sources")
+    interval = max(
+        120,
+        int(os.getenv("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "300")),
+    )
+    lease = max(
+        60,
+        int(os.getenv("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "150")),
+    )
+    if not _claim_task(
+        database,
+        worker_id,
+        task_key=_DYNAMIC_SOURCE_TASK,
+        interval_seconds=interval,
+        lease_seconds=lease,
+    ):
+        return {"status": "not_due", "executed": False, "summary": None}
+
+    probe_limit = max(
+        1,
+        min(int(os.getenv("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "16")), 32),
+    )
+    concurrency = max(
+        1,
+        min(int(os.getenv("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "8")), 12),
+    )
+    try:
+        summary = await ingest_market_snapshot(
+            database,
+            snapshot,
+            probe_limit=probe_limit,
+            concurrency=concurrency,
+        )
+    except Exception as error:
+        _finish_task(
+            database,
+            worker_id,
+            task_key=_DYNAMIC_SOURCE_TASK,
+            interval_seconds=interval,
+            status="broken",
+            error=repr(error),
+        )
+        raise
+
+    _finish_task(
+        database,
+        worker_id,
+        task_key=_DYNAMIC_SOURCE_TASK,
+        interval_seconds=interval,
+        status="ok",
+    )
+    return {"status": "ok", "executed": True, "summary": summary}
+
+
 async def run_coverage_tick() -> dict[str, object]:
     """Rebuild the employer census where production database access is available."""
     from .employer_census import merge_observations_into_universe
@@ -230,6 +294,23 @@ def install_maintenance_api(app: FastAPI) -> None:
         if not _request_allowed(request):
             raise HTTPException(status_code=403, detail="maintenance caller not allowed")
         return await run_inventory_tick()
+
+    @app.post("/api/maintenance/dynamic-sources", include_in_schema=False)
+    async def maintenance_dynamic_sources(request: Request) -> dict[str, object]:
+        if os.getenv("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1") != "1":
+            raise HTTPException(status_code=404, detail="dynamic source ingest disabled")
+        if not _request_allowed(request):
+            raise HTTPException(status_code=403, detail="maintenance caller not allowed")
+        content_length = int(request.headers.get("content-length") or 0)
+        if content_length > 2_000_000:
+            raise HTTPException(status_code=413, detail="dynamic source snapshot too large")
+        try:
+            payload = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="invalid JSON snapshot") from error
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="snapshot must be a JSON object")
+        return await run_dynamic_source_ingest(payload)
 
     @app.post("/api/maintenance/coverage", include_in_schema=False)
     async def maintenance_coverage(request: Request) -> dict[str, object]:
