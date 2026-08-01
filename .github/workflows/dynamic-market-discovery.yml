@@ -49,6 +49,7 @@ jobs:
       GAIA_READ_ONLY: "0"
       GAIA_GITHUB_TOKEN: ${{ github.token }}
       GAIA_CANDIDATE_PROBE_LIMIT: "96"
+      GAIA_STATELESS_AUDIT_LIMIT: "96"
       GAIA_WORKER_CONCURRENCY: "16"
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -162,6 +163,18 @@ jobs:
             --probe-limit "$GAIA_CANDIDATE_PROBE_LIMIT" \
             --concurrency "$GAIA_WORKER_CONCURRENCY" \
             | tee dynamic-market-ingest.json
+      - name: Audit official boards while database credentials are stale
+        if: steps.database.outputs.ready != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m gaia.dynamic_market_discovery \
+            --audit-only \
+            --snapshot-input dynamic-market-snapshot.json \
+            --snapshot-output dynamic-market-snapshot.json \
+            --audit-probe-limit "$GAIA_STATELESS_AUDIT_LIMIT" \
+            --concurrency "$GAIA_WORKER_CONCURRENCY" \
+            | tee dynamic-market-audit.json
       - name: Publish discovery summary
         if: always()
         shell: bash
@@ -169,6 +182,7 @@ jobs:
           echo "### Dynamic market discovery" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           if [ -f dynamic-market-search.json ]; then cat dynamic-market-search.json >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f dynamic-market-audit.json ]; then cat dynamic-market-audit.json >> "$GITHUB_STEP_SUMMARY"; fi
           if [ -f dynamic-market-ingest.json ]; then cat dynamic-market-ingest.json >> "$GITHUB_STEP_SUMMARY"; fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "Database state: ${{ steps.database.outputs.reason || 'not-checked' }}" >> "$GITHUB_STEP_SUMMARY"
@@ -181,6 +195,7 @@ jobs:
           path: |
             dynamic-market-snapshot.json
             dynamic-market-search.json
+            dynamic-market-audit.json
             dynamic-market-ingest.json
           if-no-files-found: warn
           retention-days: 14
@@ -194,7 +209,7 @@ jobs:
             description="Dynamic market search or employer source validation failed"
           elif [ "$database_ready" != true ]; then
             state=pending
-            description="Fresh source evidence captured; production database credentials require repair"
+            description="Fresh official-source evidence captured; production database credentials require repair"
           else
             state=success
             description="Fresh market search and employer source validation completed"
