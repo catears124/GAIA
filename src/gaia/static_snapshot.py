@@ -109,6 +109,50 @@ def _family_index() -> tuple[list[dict[str, object]], int, bool]:
     return items, expected_total, complete
 
 
+def _snapshot_stats(payload: dict[str, object]) -> dict[str, object]:
+    responses = payload.get("responses")
+    if not isinstance(responses, dict):
+        return {}
+    stats = responses.get("/api/stats")
+    return stats if isinstance(stats, dict) else {}
+
+
+def _validate_snapshot(payload: dict[str, object], previous: dict[str, object] | None = None) -> None:
+    """Reject snapshots that are internally impossible or represent a catastrophic collapse."""
+
+    stats = _snapshot_stats(payload)
+    active = int(stats.get("active_listings") or 0)
+    companies = int(stats.get("companies") or 0)
+    new_today = int(stats.get("new_today") or stats.get("new_24h") or 0)
+    minimum = max(1, int(os.getenv("GAIA_STATIC_SNAPSHOT_MIN_ACTIVE_LISTINGS", "100")))
+
+    errors: list[str] = []
+    if active < minimum:
+        errors.append(f"active_listings={active} is below minimum={minimum}")
+    if companies > active:
+        errors.append(f"companies={companies} exceeds active_listings={active}")
+    if new_today > active:
+        errors.append(f"new_today={new_today} exceeds active_listings={active}")
+    if not bool(payload.get("family_index_complete")):
+        errors.append(
+            f"family_index incomplete: {len(payload.get('family_index') or [])}/"
+            f"{int(payload.get('family_index_total') or 0)}"
+        )
+
+    previous_active = int(_snapshot_stats(previous or {}).get("active_listings") or 0)
+    if previous_active >= minimum:
+        retained_fraction = float(os.getenv("GAIA_STATIC_SNAPSHOT_MIN_RETAINED_FRACTION", "0.5"))
+        retained_floor = int(previous_active * max(0.0, min(retained_fraction, 1.0)))
+        if active < retained_floor:
+            errors.append(
+                f"active_listings collapsed from {previous_active} to {active}; "
+                f"required at least {retained_floor}"
+            )
+
+    if errors:
+        raise RuntimeError("refusing degraded inventory snapshot: " + "; ".join(errors))
+
+
 def build_snapshot() -> dict[str, object]:
     responses: dict[str, object] = {
         "/api/health": live_health(),
@@ -154,6 +198,15 @@ def build_snapshot() -> dict[str, object]:
 
 def write_snapshot(path: Path = DEFAULT_OUTPUT) -> Path:
     payload = build_snapshot()
+    previous: dict[str, object] | None = None
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                previous = loaded
+        except (OSError, ValueError):
+            previous = None
+    _validate_snapshot(payload, previous)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
