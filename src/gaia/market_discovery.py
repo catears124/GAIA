@@ -13,19 +13,37 @@ import httpx
 from .discovery import _document_postings
 from .models import CollectorResult, Posting
 
+# These exact-role searches complement the broad configurable query inventory. Keep
+# them distinct: repositories often mention a concrete role but never use the generic
+# word "internships" in their name or description.
 DEFAULT_QUERIES = (
-    '"2027 internships" in:name,description,readme',
-    '"Summer 2027" internships in:name,description,readme',
     '"2027 software engineer intern" in:name,description,readme',
-    '"2027 SWE" internships in:name,description,readme',
-    '"2027 machine learning intern" in:name,description,readme',
-    '"2027 data science intern" in:name,description,readme',
-    '"2027 quant" internships in:name,description,readme',
+    '"2027 software developer intern" in:name,description,readme',
+    '"2027 SWE intern" in:name,description,readme',
+    '"2027 machine learning engineer intern" in:name,description,readme',
+    '"2027 data scientist intern" in:name,description,readme',
+    '"2027 data engineer intern" in:name,description,readme',
+    '"2027 applied scientist intern" in:name,description,readme',
+    '"2027 research scientist intern" in:name,description,readme',
+    '"2027 quantitative researcher intern" in:name,description,readme',
+    '"2027 quantitative trader intern" in:name,description,readme',
     '"2027 trading intern" in:name,description,readme',
-    '"2027 research intern" in:name,description,readme',
+    '"2027 security engineer intern" in:name,description,readme',
+    '"2027 systems engineer intern" in:name,description,readme',
+    '"2027 firmware engineer intern" in:name,description,readme',
+    '"2027 hardware engineer intern" in:name,description,readme',
+    '"2027 robotics engineer intern" in:name,description,readme',
+    '"2027 product manager intern" in:name,description,readme',
     '"2027 university recruiting" jobs in:name,description,readme',
 )
 RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
+
+
+def discovery_queries(config: dict[str, Any]) -> tuple[str, ...]:
+    """Compose broad configured searches with exact role searches without duplicates."""
+    configured = tuple(str(query).strip() for query in config.get("queries") or ())
+    combined = (*configured, *DEFAULT_QUERIES)
+    return tuple(dict.fromkeys(query for query in combined if query))
 
 
 def _github_headers() -> dict[str, str]:
@@ -81,8 +99,8 @@ async def discover_github_market(
     config = settings.get("market_discovery", {}).get("github", {})
     if config.get("enabled", True) is False:
         return [], []
-    queries = tuple(config.get("queries") or DEFAULT_QUERIES)
-    per_query = max(1, min(20, int(config.get("repos_per_query", 10))))
+    queries = discovery_queries(config)
+    per_query = max(1, min(30, int(config.get("repos_per_query", 10))))
     max_repos = max(1, int(config.get("max_repositories", 30)))
     cutoff_days = max(7, int(config.get("pushed_within_days", 180)))
     search_delay = max(0.0, float(config.get("search_delay_seconds", 2.25)))
@@ -176,8 +194,6 @@ async def discover_github_market(
                     attempts=3,
                 )
             response.raise_for_status()
-            # Dynamically found repositories are discovery surfaces, not trusted year labels.
-            # Only explicit 2027 evidence in each row can enter the default target feed.
             parsed = _document_postings(response.text, source=source, registry=False)
             for posting in parsed:
                 posting.source_mode = "external-index"
