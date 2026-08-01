@@ -26,6 +26,10 @@ _POSTED_ACTIVITY_SQL = (
     "ELSE date_trunc('day', latest_posted_at) END"
 )
 _FOUND_ACTIVITY_SQL = "date_trunc('hour', first_detected_at)"
+_VISIBLE_ACTIVITY_SQL = (
+    f"CASE WHEN latest_posted_at IS NULL "
+    f"THEN {_FOUND_ACTIVITY_SQL} ELSE {_POSTED_ACTIVITY_SQL} END"
+)
 
 
 def _live_order_clause(sort: str) -> str:
@@ -34,15 +38,14 @@ def _live_order_clause(sort: str) -> str:
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
 
-    # Rank by the same precision the user can actually see. Recovery discoveries are
-    # shown by hour, and day-only employer dates cannot legitimately win on a hidden
-    # time-of-day. Exact timestamps still retain their full employer-provided precision.
+    # "Newest" means the employer date whenever the employer supplied one. Recovery
+    # time is only a fallback for undated jobs; it must not push old recovered rows
+    # above genuinely recent postings.
     return (
-        f"GREATEST({_FOUND_ACTIVITY_SQL}, {_POSTED_ACTIVITY_SQL}) DESC, "
-        f"{_FOUND_ACTIVITY_SQL} DESC, "
-        f"{_POSTED_ACTIVITY_SQL} DESC, "
+        f"{_VISIBLE_ACTIVITY_SQL} DESC, "
         "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
-        "first_detected_at DESC, latest_posted_at DESC NULLS LAST, "
+        f"{_POSTED_ACTIVITY_SQL} DESC, "
+        f"{_FOUND_ACTIVITY_SQL} DESC, "
         "last_verified_at DESC, family_key"
     )
 
@@ -207,7 +210,7 @@ def live_health():
 def live_families(
     q: str = Query("", max_length=200),
     category: str = "",
-    target: str = "",
+    target: str = "default",
     track: str = "tech",
     trust: str = "all",
     location: str = Query("", max_length=100),
@@ -219,6 +222,7 @@ def live_families(
     posted_within: int = Query(0, ge=0, le=365),
 ) -> dict[str, object]:
     trust = trust.strip() or "all"
+    target = target.strip() or "default"
     if trust not in {"verified", "leads", "all"}:
         raise HTTPException(status_code=400, detail="trust must be verified, leads, or all")
     if sort not in {"newest", "verified", "company"}:
@@ -226,7 +230,7 @@ def live_families(
     payload = legacy._list_families(
         query=q.strip(),
         category=category.strip(),
-        target=target.strip(),
+        target=target,
         track=track.strip(),
         trust=trust,
         location=location.strip(),
@@ -244,12 +248,14 @@ def live_families(
 
 
 @app.get("/api/facets")
-def live_facets(trust: str = "all", target: str = "") -> dict[str, object]:
-    return legacy.facets(trust=trust, target=target)
+def live_facets(trust: str = "all", target: str = "default") -> dict[str, object]:
+    return legacy.facets(trust=trust, target=target.strip() or "default")
 
 
 @app.get("/api/stats")
 def live_stats() -> dict[str, object]:
+    target_matches = list(legacy.TARGET_MATCHES)
+    tech_categories = list(legacy.TECH_CATEGORIES)
     with legacy.db.connect() as connection:
         row = connection.execute(
             """
@@ -263,22 +269,22 @@ def live_stats() -> dict[str, object]:
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
             FROM families
-            WHERE target_match!='not_internship'
+            WHERE target_match = ANY(%s)
               AND category = ANY(%s)
               AND direct_openings>0
             """,
-            (list(legacy.TECH_CATEGORIES),),
+            (target_matches, tech_categories),
         ).fetchone()
         lead_row = connection.execute(
             """
             SELECT COUNT(*) AS leads, COALESCE(SUM(backstop_openings),0) AS lead_apps
             FROM families
-            WHERE target_match!='not_internship'
+            WHERE target_match = ANY(%s)
               AND category = ANY(%s)
               AND direct_openings=0
               AND backstop_openings>0
             """,
-            (list(legacy.TECH_CATEGORIES),),
+            (target_matches, tech_categories),
         ).fetchone()
         movement = connection.execute(
             """
@@ -292,10 +298,10 @@ def live_stats() -> dict[str, object]:
                 ) AS removed_urls_today
             FROM postings
             WHERE source_mode='direct'
-              AND target_match!='not_internship'
+              AND target_match = ANY(%s)
               AND category = ANY(%s)
             """,
-            (list(legacy.TECH_CATEGORIES),),
+            (target_matches, tech_categories),
         ).fetchone()
         source_row = connection.execute(
             """
