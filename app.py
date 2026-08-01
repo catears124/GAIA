@@ -34,8 +34,10 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
 from gaia.coverage_extensions import install_coverage_extensions  # noqa: E402
+from gaia.provider_expansion import install_provider_expansion  # noqa: E402
 
 install_coverage_extensions()
+install_provider_expansion()
 
 from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
