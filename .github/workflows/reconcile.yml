@@ -30,7 +30,9 @@ jobs:
     timeout-minutes: 30
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      # Prefer the Prisma/pooler URL because recreated Supabase projects commonly
+      # update it while an old POSTGRES_URL secret remains behind.
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "900"
       GH_TOKEN: ${{ github.token }}
@@ -51,7 +53,7 @@ jobs:
         run: |
           if [ -z "$GAIA_DATABASE_URL" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "Missing GitHub Actions secret POSTGRES_URL." >&2
+            echo "Missing all supported database secrets: POSTGRES_PRISMA_URL, POSTGRES_URL, POSTGRES_URL_NON_POOLING." >&2
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
@@ -67,9 +69,8 @@ jobs:
             echo "exit_code=2" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-
           set +e
-          python -m gaia.wait_for_database --timeout-seconds 600
+          python -m gaia.wait_for_database --timeout-seconds 120
           code=$?
           set -e
           case "$code" in
@@ -87,13 +88,9 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if gaia reconcile; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            python -m gaia.wait_for_database --timeout-seconds 300
+            if gaia reconcile; then exit 0; fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            python -m gaia.wait_for_database --timeout-seconds 180
           done
       - name: Verify employer coverage read model
         if: steps.gate.outputs.state == 'ready'
@@ -104,7 +101,6 @@ jobs:
           import json
           from gaia.db import Database
           from gaia.universe import universe_summary
-
           report = universe_summary(Database(migrate=False), limit=1)
           summary = dict(report.get("summary") or {})
           payload = {
@@ -118,14 +114,10 @@ jobs:
               "coverage_gap_employers": int(summary.get("coverage_gap_employers") or 0),
           }
           print(json.dumps(payload, sort_keys=True))
-          if not payload["ready"]:
-              raise SystemExit("employer universe is not ready")
-          if payload["known_employers"] <= 0:
-              raise SystemExit("employer universe contains no employers")
-          if payload["enumerated_employers"] <= 0:
-              raise SystemExit("employer universe contains no independently enumerated employers")
-          if payload["rebuild_required"] or payload["coverage_gap_employers"]:
-              raise SystemExit("employer universe is missing known evidence-backed employers")
+          if not payload["ready"]: raise SystemExit("employer universe is not ready")
+          if payload["known_employers"] <= 0: raise SystemExit("employer universe contains no employers")
+          if payload["enumerated_employers"] <= 0: raise SystemExit("employer universe contains no independently enumerated employers")
+          if payload["rebuild_required"] or payload["coverage_gap_employers"]: raise SystemExit("employer universe is missing known evidence-backed employers")
           PY
       - name: Upload reconcile coverage evidence
         if: always()
@@ -142,31 +134,18 @@ jobs:
         run: |
           gate="${{ steps.gate.outputs.state }}"
           if [ "$gate" = invalid ]; then
-            state=failure
-            description="Production read-model database configuration or credentials are invalid"
+            state=failure; description="Production read-model database configuration or credentials are invalid"
           elif [ "$gate" = recovering ]; then
-            state=pending
-            description="Database recovery active; reconciliation suppressed"
+            state=pending; description="Database recovery active; reconciliation suppressed"
           elif [ "$gate" = failed ]; then
-            state=failure
-            description="Read-model database readiness probe failed unexpectedly"
+            state=failure; description="Read-model database readiness probe failed unexpectedly"
           elif [ "$gate" != ready ]; then
-            state=failure
-            description="Read-model database readiness gate did not complete"
+            state=failure; description="Read-model database readiness gate did not complete"
           else
             case "${{ job.status }}" in
-              success)
-                state=success
-                description="Public role feed and employer universe are current"
-                ;;
-              cancelled)
-                state=pending
-                description="Reconciliation superseded by a newer pulse"
-                ;;
-              *)
-                state=failure
-                description="Public read-model reconciliation failed after recovery retries"
-                ;;
+              success) state=success; description="Public role feed and employer universe are current" ;;
+              cancelled) state=pending; description="Reconciliation superseded by a newer pulse" ;;
+              *) state=failure; description="Public read-model reconciliation failed after recovery retries" ;;
             esac
           fi
           payload=$(jq -n --arg state "$state" --arg context gaia/production-read-model --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
