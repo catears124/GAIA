@@ -33,6 +33,7 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "8")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
+from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
 from gaia.coverage_api import install_coverage_api  # noqa: E402
 from gaia.maintenance_api import install_maintenance_api  # noqa: E402
@@ -40,6 +41,7 @@ from gaia.product_api import app  # noqa: E402,F401
 from gaia.request_bootstrap import install_request_bootstrap  # noqa: E402
 
 install_request_bootstrap(app)
+install_activity_api(app)
 install_coverage_api(app)
 install_maintenance_api(app)
 install_database_outage_guard(app)
