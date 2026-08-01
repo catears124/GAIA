@@ -104,6 +104,14 @@ _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "dayforcehcm.com": "dayforce",
     "paycomonline.net": "paycom",
     "ultipro.com": "ukg",
+    "myworkday.com": "workday",
+    "taleo.net": "taleo",
+    "brassring.com": "brassring",
+    "csod.com": "cornerstone",
+    "adp.com": "adp-workforce-now",
+    "jobadder.com": "jobadder",
+    "tribepad.com": "tribepad",
+    "fountain.com": "fountain",
 }
 _EMBEDDED_URL_ATTRIBUTES = (
     ("iframe", "src"),
@@ -120,7 +128,13 @@ _DATA_URL_ATTRIBUTES = (
     "data-careers-url",
     "data-apply-url",
 )
-_STRUCTURED_URL_KEYS = {"url", "sameAs", "applicationUrl", "applyUrl"}
+_STRUCTURED_URL_KEYS = {
+    "url",
+    "sameAs",
+    "applicationUrl",
+    "applyUrl",
+    "target",
+}
 
 _ORIGINAL_LINKS = career._links
 _INSTALLED = False
@@ -130,18 +144,31 @@ def _append_unique(existing: tuple[str, ...], additions: tuple[str, ...]) -> tup
     return tuple(dict.fromkeys((*existing, *additions)))
 
 
-def _structured_values(value: object) -> Iterable[str]:
+def _schema_types(value: object) -> set[str]:
+    if isinstance(value, list):
+        return {str(item).casefold() for item in value}
+    if value is None:
+        return set()
+    return {str(value).casefold()}
+
+
+def _structured_values(
+    value: object,
+    *,
+    inherited_job_context: bool = False,
+) -> Iterable[str]:
+    """Yield application surfaces while retaining JobPosting context through nesting."""
+
     if isinstance(value, Mapping):
-        node_type = value.get("@type")
-        types = {str(item).casefold() for item in node_type} if isinstance(node_type, list) else {str(node_type).casefold()}
-        job_context = "jobposting" in types
+        job_context = inherited_job_context or "jobposting" in _schema_types(value.get("@type"))
         for key, item in value.items():
-            if key in _STRUCTURED_URL_KEYS and isinstance(item, str) and (job_context or "job" in item.casefold() or "career" in item.casefold()):
-                yield item
-            yield from _structured_values(item)
+            if key in _STRUCTURED_URL_KEYS and isinstance(item, str):
+                if job_context or "job" in item.casefold() or "career" in item.casefold():
+                    yield item
+            yield from _structured_values(item, inherited_job_context=job_context)
     elif isinstance(value, list):
         for item in value:
-            yield from _structured_values(item)
+            yield from _structured_values(item, inherited_job_context=inherited_job_context)
 
 
 def _structured_surface_links(soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
@@ -156,7 +183,11 @@ def _structured_surface_links(soup: BeautifulSoup, base_url: str) -> list[tuple[
             continue
         for candidate in _structured_values(payload):
             normalized = career._normalized_http_url(urljoin(base_url, candidate))
-            if normalized and (career.provider_kind(normalized) or career._careerish(normalized, "json-ld jobposting")):
+            if normalized and (
+                career.provider_kind(normalized)
+                or career._careerish(normalized, "json-ld jobposting")
+                or career._detailish(normalized)
+            ):
                 output[normalized] = "json-ld:JobPosting"
 
     for node in soup.find_all("meta", attrs={"http-equiv": True, "content": True}):
@@ -168,8 +199,24 @@ def _structured_surface_links(soup: BeautifulSoup, base_url: str) -> list[tuple[
             continue
         candidate = content[marker + 4 :].strip(" \"'")
         normalized = career._normalized_http_url(urljoin(base_url, candidate))
-        if normalized and (career.provider_kind(normalized) or career._careerish(normalized, "meta refresh careers")):
+        if normalized and (
+            career.provider_kind(normalized)
+            or career._careerish(normalized, "meta refresh careers")
+        ):
             output[normalized] = "meta:refresh"
+
+    for node in soup.find_all(attrs={"itemprop": True}):
+        itemprop = str(node.get("itemprop") or "").casefold()
+        if itemprop not in {"url", "applicationurl", "applyurl"}:
+            continue
+        raw = str(node.get("href") or node.get("content") or node.get("value") or "").strip()
+        normalized = career._normalized_http_url(urljoin(base_url, raw)) if raw else None
+        if normalized and (
+            career.provider_kind(normalized)
+            or career._careerish(normalized, "schema jobposting")
+            or career._detailish(normalized)
+        ):
+            output[normalized] = f"microdata:{itemprop}"
     return list(output.items())
 
 
