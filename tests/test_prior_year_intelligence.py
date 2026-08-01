@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gaia.career_surface_collector import CareerSurfaceCollector
 from gaia.db import Database
 from gaia.market_collectors import SitemapDomainCollector
 from gaia.models import CollectorResult, Posting
@@ -18,16 +19,17 @@ def _historical(company: str, url: str, source_id: str = "old") -> Posting:
     )
 
 
-def test_prior_year_custom_domain_becomes_historical_sitemap_watch():
-    collectors = provider_collectors_from_postings(
-        [_historical("Example", "https://careers.example.com/jobs/software-intern-2026")]
-    )
+def test_prior_year_custom_domain_becomes_historical_career_watch():
+    observed = "https://careers.example.com/jobs/software-intern-2026"
+    collectors = provider_collectors_from_postings([_historical("Example", observed)])
 
-    domains = [item for item in collectors if isinstance(item, SitemapDomainCollector)]
+    domains = [item for item in collectors if isinstance(item, CareerSurfaceCollector)]
     assert len(domains) == 1
     assert domains[0].host == "careers.example.com"
     assert domains[0].scope == "historical"
-    assert domains[0].seed_urls == []
+    assert domains[0].mode == "board-search"
+    assert observed in domains[0].seed_urls
+    assert "https://careers.example.com/careers" in domains[0].seed_urls
 
 
 def test_prior_year_domain_watch_deduplicates_host_and_uses_dominant_company():
@@ -39,9 +41,10 @@ def test_prior_year_domain_watch_deduplicates_host_and_uses_dominant_company():
         ]
     )
 
-    domains = [item for item in collectors if isinstance(item, SitemapDomainCollector)]
+    domains = [item for item in collectors if isinstance(item, CareerSurfaceCollector)]
     assert len(domains) == 1
     assert domains[0].company == "Example"
+    assert len([url for url in domains[0].seed_urls if "/jobs/" in url]) == 3
 
 
 def test_prior_year_hosted_ats_is_not_misclassified_as_employer_domain():
@@ -56,7 +59,7 @@ def test_prior_year_hosted_ats_is_not_misclassified_as_employer_domain():
     assert not any(isinstance(item, SitemapDomainCollector) for item in collectors)
 
 
-def test_current_custom_page_is_left_to_current_registry_discovery():
+def test_current_custom_page_becomes_current_recursive_career_watch():
     current = Posting(
         company="Example",
         title="Software Engineer Intern, Summer 2027",
@@ -65,7 +68,12 @@ def test_current_custom_page_is_left_to_current_registry_discovery():
         source_id="current",
         source_mode="registry",
     )
-    assert provider_collectors_from_postings([current]) == []
+
+    collectors = provider_collectors_from_postings([current])
+    domains = [item for item in collectors if isinstance(item, CareerSurfaceCollector)]
+    assert len(domains) == 1
+    assert domains[0].scope == "current"
+    assert current.apply_url in domains[0].seed_urls
 
 
 def test_historical_catalog_watch_promotes_after_finding_current_role(tmp_path):
@@ -102,4 +110,5 @@ def test_historical_catalog_watch_promotes_after_finding_current_role(tmp_path):
 
     loaded = load_catalog(db)
     assert len(loaded) == 1
+    assert isinstance(loaded[0], CareerSurfaceCollector)
     assert loaded[0].scope == "current"
