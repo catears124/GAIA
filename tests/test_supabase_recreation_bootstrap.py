@@ -94,6 +94,12 @@ def test_recreated_database_uses_leases_and_validates_sources_before_cataloging(
     assert "market-discovery" in source
     assert "empty-database-bootstrap" in source
     assert "lease_expires_at" in source
-    assert "postings" in source and "families" in source
+    assert "active_applications" in source
+    assert "active_companies" in source
+    assert "validated_sources" in source
+    assert "GAIA_BOOTSTRAP_MIN_ACTIVE_APPLICATIONS" in source
+    assert "GAIA_BOOTSTRAP_MIN_ACTIVE_COMPANIES" in source
+    assert "GAIA_BOOTSTRAP_MIN_VALIDATED_SOURCES" in source
+    assert "inventory recovery remains below readiness floor" in source
     assert "INSERT INTO source_catalog" not in source
     assert "no source is called validated" in source
