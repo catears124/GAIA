@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Mapping
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -96,6 +98,12 @@ _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "join.com": "join",
     "recruiterbox.com": "recruiterbox",
     "zohorecruit.com": "zoho-recruit",
+    "eightfold.ai": "eightfold",
+    "phenompeople.com": "phenom",
+    "avature.net": "avature",
+    "dayforcehcm.com": "dayforce",
+    "paycomonline.net": "paycom",
+    "ultipro.com": "ukg",
 }
 _EMBEDDED_URL_ATTRIBUTES = (
     ("iframe", "src"),
@@ -112,6 +120,7 @@ _DATA_URL_ATTRIBUTES = (
     "data-careers-url",
     "data-apply-url",
 )
+_STRUCTURED_URL_KEYS = {"url", "sameAs", "applicationUrl", "applyUrl"}
 
 _ORIGINAL_LINKS = career._links
 _INSTALLED = False
@@ -121,11 +130,54 @@ def _append_unique(existing: tuple[str, ...], additions: tuple[str, ...]) -> tup
     return tuple(dict.fromkeys((*existing, *additions)))
 
 
+def _structured_values(value: object) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        node_type = value.get("@type")
+        types = {str(item).casefold() for item in node_type} if isinstance(node_type, list) else {str(node_type).casefold()}
+        job_context = "jobposting" in types
+        for key, item in value.items():
+            if key in _STRUCTURED_URL_KEYS and isinstance(item, str) and (job_context or "job" in item.casefold() or "career" in item.casefold()):
+                yield item
+            yield from _structured_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _structured_values(item)
+
+
+def _structured_surface_links(soup: BeautifulSoup, base_url: str) -> list[tuple[str, str]]:
+    output: dict[str, str] = {}
+    for node in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = node.string or node.get_text("", strip=True)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for candidate in _structured_values(payload):
+            normalized = career._normalized_http_url(urljoin(base_url, candidate))
+            if normalized and (career.provider_kind(normalized) or career._careerish(normalized, "json-ld jobposting")):
+                output[normalized] = "json-ld:JobPosting"
+
+    for node in soup.find_all("meta", attrs={"http-equiv": True, "content": True}):
+        if str(node.get("http-equiv") or "").casefold() != "refresh":
+            continue
+        content = str(node.get("content") or "")
+        marker = content.casefold().find("url=")
+        if marker < 0:
+            continue
+        candidate = content[marker + 4 :].strip(" \"'")
+        normalized = career._normalized_http_url(urljoin(base_url, candidate))
+        if normalized and (career.provider_kind(normalized) or career._careerish(normalized, "meta refresh careers")):
+            output[normalized] = "meta:refresh"
+    return list(output.items())
+
+
 def _embedded_surface_links(body: str, base_url: str) -> list[tuple[str, str]]:
     """Recover ATS and career URLs hidden outside ordinary anchor elements."""
 
     soup = BeautifulSoup(body, "html.parser")
-    output: dict[str, str] = {}
+    output: dict[str, str] = dict(_structured_surface_links(soup, base_url))
     for tag_name, attribute in _EMBEDDED_URL_ATTRIBUTES:
         for node in soup.find_all(tag_name):
             raw = str(node.get(attribute) or "").strip()
@@ -160,12 +212,7 @@ def _expanded_links(body: str, base_url: str) -> list[tuple[str, str]]:
 
 
 def install_coverage_extensions() -> None:
-    """Expand bounded discovery without inventing or duplicating source records.
-
-    Hosted ATS recognition remains tenant-scoped. Embedded URLs are admitted only when
-    they point to a recognized provider or have explicit career semantics, preventing
-    generic scripts, analytics frames, and unrelated forms from entering the graph.
-    """
+    """Expand bounded discovery without inventing or duplicating source records."""
 
     global _INSTALLED
     if _INSTALLED:
