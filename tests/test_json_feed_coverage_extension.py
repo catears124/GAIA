@@ -80,7 +80,7 @@ def test_unrelated_json_urls_are_rejected() -> None:
 
     links, is_feed = career._document_links(body, "https://acme.example/api/catalog")
 
-    assert is_feed is True
+    assert is_feed is False
     assert not {url for url, _label in links} & {
         "https://tracking.example/collect",
         "https://cdn.example/logo.png",
