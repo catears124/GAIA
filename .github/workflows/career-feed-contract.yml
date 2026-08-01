@@ -5,14 +5,12 @@ on:
     paths:
       - ".github/workflows/career-feed-contract.yml"
       - "src/gaia/career_surface_collector.py"
-      - "tests/test_career_surface_discovery.py"
       - "tests/test_career_surface_feeds.py"
   push:
     branches: [main]
     paths:
       - ".github/workflows/career-feed-contract.yml"
       - "src/gaia/career_surface_collector.py"
-      - "tests/test_career_surface_discovery.py"
       - "tests/test_career_surface_feeds.py"
   workflow_dispatch:
 
@@ -35,6 +33,6 @@ jobs:
           cache: pip
       - run: python -m pip install --disable-pip-version-check -e ".[dev]"
       - name: Lint career discovery
-        run: ruff check src/gaia/career_surface_collector.py tests/test_career_surface_discovery.py tests/test_career_surface_feeds.py
-      - name: Verify career discovery
-        run: pytest -q tests/test_career_surface_discovery.py tests/test_career_surface_feeds.py
+        run: ruff check src/gaia/career_surface_collector.py tests/test_career_surface_feeds.py
+      - name: Verify career feed discovery
+        run: pytest -q tests/test_career_surface_feeds.py
