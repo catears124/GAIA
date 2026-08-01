@@ -32,9 +32,17 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
+      GAIA_DB_CANDIDATE_GAIA: ${{ secrets.GAIA_DATABASE_URL }}
+      GAIA_DB_CANDIDATE_DATABASE: ${{ secrets.DATABASE_URL }}
+      GAIA_DB_CANDIDATE_SUPABASE: ${{ secrets.SUPABASE_DB_URL }}
       GAIA_DB_CANDIDATE_PRISMA: ${{ secrets.POSTGRES_PRISMA_URL }}
       GAIA_DB_CANDIDATE_POSTGRES: ${{ secrets.POSTGRES_URL }}
       GAIA_DB_CANDIDATE_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_DB_COMPONENT_HOST: ${{ secrets.POSTGRES_HOST }}
+      GAIA_DB_COMPONENT_PORT: ${{ secrets.POSTGRES_PORT }}
+      GAIA_DB_COMPONENT_USER: ${{ secrets.POSTGRES_USER }}
+      GAIA_DB_COMPONENT_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      GAIA_DB_COMPONENT_DATABASE: ${{ secrets.POSTGRES_DATABASE }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
       GAIA_HTTP_TIMEOUT: "45"
@@ -60,14 +68,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          component_candidate=""
+          if [ -n "${GAIA_DB_COMPONENT_HOST:-}" ] \
+             && [ -n "${GAIA_DB_COMPONENT_USER:-}" ] \
+             && [ -n "${GAIA_DB_COMPONENT_PASSWORD:-}" ] \
+             && [ -n "${GAIA_DB_COMPONENT_DATABASE:-}" ]; then
+            component_candidate=$(python - <<'PY'
+          import os
+          from urllib.parse import quote
+
+          host = os.environ["GAIA_DB_COMPONENT_HOST"].strip()
+          port = os.getenv("GAIA_DB_COMPONENT_PORT", "").strip()
+          user = quote(os.environ["GAIA_DB_COMPONENT_USER"], safe="")
+          password = quote(os.environ["GAIA_DB_COMPONENT_PASSWORD"], safe="")
+          database = quote(os.environ["GAIA_DB_COMPONENT_DATABASE"], safe="")
+          authority = host if not port or host.rsplit(":", 1)[-1] == port else f"{host}:{port}"
+          print(f"postgresql://{user}:{password}@{authority}/{database}?sslmode=require")
+          PY
+            )
+            echo "::add-mask::$component_candidate"
+          fi
+
           selected=""
           attempted=0
           for name in \
+            GAIA_DB_CANDIDATE_GAIA \
+            GAIA_DB_CANDIDATE_DATABASE \
+            GAIA_DB_CANDIDATE_SUPABASE \
             GAIA_DB_CANDIDATE_NON_POOLING \
             GAIA_DB_CANDIDATE_PRISMA \
-            GAIA_DB_CANDIDATE_POSTGRES
+            GAIA_DB_CANDIDATE_POSTGRES \
+            component_candidate
           do
-            candidate="${!name:-}"
+            if [ "$name" = component_candidate ]; then
+              candidate="$component_candidate"
+            else
+              candidate="${!name:-}"
+            fi
             if [ -z "$candidate" ]; then
               continue
             fi
@@ -85,7 +122,7 @@ jobs:
             echo "Database candidate $name rejected with readiness code $code."
           done
           if [ "$attempted" -eq 0 ]; then
-            echo "Missing all supported database secrets: POSTGRES_URL_NON_POOLING, POSTGRES_PRISMA_URL, POSTGRES_URL." >&2
+            echo "No supported database secrets or complete component credentials are configured." >&2
             exit 2
           fi
           if [ -z "$selected" ]; then
