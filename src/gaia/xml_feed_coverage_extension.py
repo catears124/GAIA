@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from . import career_surface_collector as career
 
@@ -23,6 +24,8 @@ _URL_TAGS = {
 }
 _TITLE_TAGS = {"title", "jobtitle", "job-title", "positiontitle", "position-title"}
 _ID_TAGS = {"id", "jobid", "job-id", "requisitionid", "requisition-id", "reference"}
+_URL_ATTRIBUTE_NAMES = {"href", "url", "joburl", "job-url", "applyurl", "apply-url", "applicationurl", "application-url"}
+_HTML_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
 _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "talent.com": "talent",
     "applytojob.com": "apply-to-job",
@@ -32,6 +35,12 @@ _EXTRA_PROVIDER_HOST_FRAGMENTS = {
     "eploy.net": "eploy",
     "vacancy-filler.co.uk": "vacancy-filler",
     "tribepad-gro.com": "tribepad",
+    "hire.trakstar.com": "trakstar-hire",
+    "jobs.personio.com": "personio",
+    "onlyfy.io": "onlyfy",
+    "softgarden.io": "softgarden",
+    "prescreen.io": "prescreen",
+    "recruitis.io": "recruitis",
 }
 _ORIGINAL_DOCUMENT_LINKS: Callable[[str, str], tuple[list[tuple[str, str]], bool]] | None = None
 _INSTALLED = False
@@ -39,6 +48,35 @@ _INSTALLED = False
 
 def _tag(node: ET.Element) -> str:
     return node.tag.rsplit("}", 1)[-1].casefold()
+
+
+def _attribute_value(node: ET.Element) -> str:
+    for key, value in node.attrib.items():
+        if key.rsplit("}", 1)[-1].casefold() in _URL_ATTRIBUTE_NAMES and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _looks_like_url(raw: str) -> bool:
+    value = raw.strip()
+    if not value or any(char.isspace() for char in value):
+        return False
+    parts = urlsplit(value)
+    return bool(parts.scheme in {"http", "https"} and parts.netloc) or value.startswith(("/", "./", "../", "//"))
+
+
+def _candidate_urls(node: ET.Element) -> list[str]:
+    values: list[str] = []
+    attribute = _attribute_value(node)
+    if attribute:
+        values.append(attribute)
+    text = str(node.text or "").strip()
+    if text:
+        if _looks_like_url(text):
+            values.append(text)
+        else:
+            values.extend(match.rstrip("),.;") for match in _HTML_URL_RE.findall(text))
+    return list(dict.fromkeys(values))
 
 
 def _xml_job_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
@@ -66,19 +104,22 @@ def _xml_job_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], boo
             feed_like = True
         for child in record.iter():
             tag = _tag(child)
-            if tag not in _URL_TAGS:
+            rel = str(child.attrib.get("rel") or "").casefold()
+            explicitly_url_shaped = tag in _URL_TAGS or bool(_attribute_value(child)) or rel in {"alternate", "related", "next"}
+            if not explicitly_url_shaped:
                 continue
-            raw = str(child.attrib.get("href") or child.text or "").strip()
-            if not raw:
-                continue
-            candidate = career._normalized_http_url(urljoin(base_url, raw))
-            if candidate and (
-                career.provider_kind(candidate)
-                or career._careerish(candidate, tag)
-                or career._detailish(candidate)
-                or job_context
-            ):
-                output[candidate] = tag
+            for raw in _candidate_urls(child):
+                if tag == "guid" and not _looks_like_url(raw):
+                    continue
+                candidate = career._normalized_http_url(urljoin(base_url, raw))
+                if candidate and (
+                    career.provider_kind(candidate)
+                    or career._careerish(candidate, tag)
+                    or career._detailish(candidate)
+                    or job_context
+                    or rel == "next"
+                ):
+                    output[candidate] = tag if rel != "next" else "next"
 
     return list(output.items()), feed_like
 
