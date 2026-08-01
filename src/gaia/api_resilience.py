@@ -6,6 +6,8 @@ import psycopg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from .snapshot_fallback import snapshot_response
+
 _DATABASE_NOT_CONFIGURED = "PostgreSQL is not configured."
 
 
@@ -46,9 +48,17 @@ def install_database_outage_guard(app: FastAPI) -> None:
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            if response.status_code == 503 and request.url.path in {"/api/families", "/api/stats"}:
+                fallback = snapshot_response(request)
+                if fallback is not None:
+                    return fallback
+            return response
         except Exception as error:
             if request.url.path.startswith("/api/") and is_database_outage(error):
+                fallback = snapshot_response(request)
+                if fallback is not None:
+                    return fallback
                 endpoint = request.url.path.removeprefix("/api/") or "api"
                 return database_unavailable_response(error, endpoint)
             raise
