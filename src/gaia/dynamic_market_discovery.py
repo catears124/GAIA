@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from .classify import is_default_target
 from .collectors import Collector
 from .config import load_sources
 from .db import Database
@@ -29,6 +30,7 @@ from .source_catalog import _collector, _spec, merge_catalog, save_candidates
 
 LOGGER = logging.getLogger("gaia.dynamic-market-discovery")
 SNAPSHOT_VERSION = 1
+TRUSTED_POSTED_CONFIDENCE = frozenset({"official", "structured"})
 
 
 def candidate_collectors(
@@ -104,24 +106,35 @@ def deserialize_candidates(rows: list[dict[str, Any]]) -> list[Collector]:
 
 
 def posting_freshness(postings: list[Posting]) -> dict[str, Any]:
-    """Measure employer-provided dates instead of equating rediscovery with freshness."""
+    """Measure only explicit employer/structured dates; report weaker dates separately."""
     now = datetime.now(UTC)
-    dated: list[datetime] = []
+    trusted: list[datetime] = []
+    untrusted_count = 0
     for posting in postings:
         if posting.posted_at is None:
+            continue
+        if posting.posted_confidence not in TRUSTED_POSTED_CONFIDENCE:
+            untrusted_count += 1
             continue
         value = posting.posted_at
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
-        dated.append(value.astimezone(UTC))
+        trusted.append(value.astimezone(UTC))
 
-    freshest = max(dated) if dated else None
+    freshest = max(trusted) if trusted else None
     return {
-        "dated_postings": len(dated),
+        "dated_postings": len(trusted),
+        "untrusted_dated_postings": untrusted_count,
         "freshest_employer_posted_at": freshest.isoformat() if freshest else None,
-        "employer_posted_last_24h": sum(value >= now - timedelta(days=1) for value in dated),
-        "employer_posted_last_72h": sum(value >= now - timedelta(days=3) for value in dated),
-        "employer_posted_last_7d": sum(value >= now - timedelta(days=7) for value in dated),
+        "employer_posted_last_24h": sum(
+            value >= now - timedelta(days=1) for value in trusted
+        ),
+        "employer_posted_last_72h": sum(
+            value >= now - timedelta(days=3) for value in trusted
+        ),
+        "employer_posted_last_7d": sum(
+            value >= now - timedelta(days=7) for value in trusted
+        ),
     }
 
 
@@ -186,6 +199,7 @@ async def build_market_snapshot(
     if search_results and successful_searches == 0:
         raise RuntimeError("every dynamic GitHub market query failed or was blocked")
 
+    target_postings = [posting for posting in postings if is_default_target(posting)]
     candidates = candidate_collectors(postings, settings)
     serialized = serialize_candidates(candidates)
     kind_counts = Counter(str(row["kind"]) for row in serialized)
@@ -194,12 +208,13 @@ async def build_market_snapshot(
         "queries": len(search_results),
         "successful_queries": successful_searches,
         "market_postings": len(postings),
+        "default_target_postings": len(target_postings),
         "explicit_target_postings": sum(
             posting.target_match == "exact" for posting in postings
         ),
         "candidate_sources": len(serialized),
         "candidate_source_kinds": dict(sorted(kind_counts.items())),
-        **posting_freshness(postings),
+        **posting_freshness(target_postings),
     }
     return {
         "version": SNAPSHOT_VERSION,
@@ -227,11 +242,12 @@ async def audit_market_snapshot(
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
     async with _client(concurrency) as client:
+
         async def probe(collector: Collector):
             async with semaphore:
                 try:
                     return collector, await collector.collect(client), None
-                except Exception as exc:  # noqa: BLE001 - one bad employer must not abort the audit
+                except Exception as exc:  # noqa: BLE001 - isolate one broken employer
                     return collector, None, repr(exc)
 
         outcomes = await asyncio.gather(*(probe(collector) for collector in selected))
@@ -239,6 +255,7 @@ async def audit_market_snapshot(
     official_postings: list[Posting] = []
     valid_sources = 0
     sources_with_postings = 0
+    sources_with_target_postings = 0
     source_evidence: list[dict[str, Any]] = []
     for collector, result, exception in outcomes:
         valid = bool(
@@ -248,11 +265,13 @@ async def audit_market_snapshot(
             and result.status in VALID_CANDIDATE_STATUSES
         )
         postings = list(result.postings) if valid and result is not None else []
+        target_postings = [posting for posting in postings if is_default_target(posting)]
         if valid:
             valid_sources += 1
             official_postings.extend(postings)
             sources_with_postings += bool(postings)
-        source_dates = posting_freshness(postings)
+            sources_with_target_postings += bool(target_postings)
+        source_dates = posting_freshness(target_postings)
         source_evidence.append(
             {
                 "source": collector.name,
@@ -260,26 +279,45 @@ async def audit_market_snapshot(
                 "status": result.status if result is not None else "exception",
                 "complete": bool(result.complete) if result is not None else False,
                 "rows": len(postings),
-                "freshest_employer_posted_at": source_dates[
+                "target_rows": len(target_postings),
+                "trusted_target_dated_rows": source_dates["dated_postings"],
+                "untrusted_target_dated_rows": source_dates[
+                    "untrusted_dated_postings"
+                ],
+                "freshest_target_employer_posted_at": source_dates[
                     "freshest_employer_posted_at"
                 ],
                 "error": exception or (result.error if result is not None else None),
             }
         )
 
-    freshness = posting_freshness(official_postings)
+    target_postings = [
+        posting for posting in official_postings if is_default_target(posting)
+    ]
+    freshness = posting_freshness(target_postings)
     audit_summary = {
         "stateless_sources_probed": len(selected),
         "stateless_sources_valid": valid_sources,
         "stateless_sources_with_postings": sources_with_postings,
+        "stateless_sources_with_target_postings": sources_with_target_postings,
         "stateless_official_postings": len(official_postings),
-        "stateless_dated_postings": freshness["dated_postings"],
-        "stateless_freshest_employer_posted_at": freshness[
+        "stateless_default_target_postings": len(target_postings),
+        "stateless_trusted_target_dated_postings": freshness["dated_postings"],
+        "stateless_untrusted_target_dated_postings": freshness[
+            "untrusted_dated_postings"
+        ],
+        "stateless_freshest_target_employer_posted_at": freshness[
             "freshest_employer_posted_at"
         ],
-        "stateless_employer_posted_last_24h": freshness["employer_posted_last_24h"],
-        "stateless_employer_posted_last_72h": freshness["employer_posted_last_72h"],
-        "stateless_employer_posted_last_7d": freshness["employer_posted_last_7d"],
+        "stateless_target_employer_posted_last_24h": freshness[
+            "employer_posted_last_24h"
+        ],
+        "stateless_target_employer_posted_last_72h": freshness[
+            "employer_posted_last_72h"
+        ],
+        "stateless_target_employer_posted_last_7d": freshness[
+            "employer_posted_last_7d"
+        ],
     }
     snapshot["audit"] = {
         "captured_at": datetime.now(UTC).isoformat(),
