@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 import os
-from collections import Counter
+from collections import Counter, defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,11 @@ from .collectors import Collector
 from .config import load_sources
 from .db import Database
 from .discovery import collectors_from_registry
-from .inventory_runtime import COVERAGE_KINDS, InventoryWorker
+from .inventory_runtime import (
+    COVERAGE_KINDS,
+    VALID_CANDIDATE_STATUSES,
+    InventoryWorker,
+)
 from .market_discovery import discover_github_market
 from .models import Posting
 from .provider_discovery import provider_collectors_from_postings
@@ -121,6 +125,28 @@ def posting_freshness(postings: list[Posting]) -> dict[str, Any]:
     }
 
 
+def balanced_probe_candidates(candidates: list[Collector], limit: int) -> list[Collector]:
+    """Probe across provider types rather than exhausting one large ATS bucket first."""
+    buckets: dict[str, deque[Collector]] = defaultdict(deque)
+    for collector in candidates:
+        described = _spec(collector)
+        if described is None:
+            continue
+        kind, _specification = described
+        buckets[kind].append(collector)
+
+    selected: list[Collector] = []
+    kinds = deque(sorted(buckets))
+    while kinds and len(selected) < max(1, limit):
+        kind = kinds.popleft()
+        bucket = buckets[kind]
+        if bucket:
+            selected.append(bucket.popleft())
+        if bucket:
+            kinds.append(kind)
+    return selected
+
+
 def _client(concurrency: int) -> httpx.AsyncClient:
     timeout = httpx.Timeout(float(os.getenv("GAIA_HTTP_TIMEOUT", "45")))
     limits = httpx.Limits(
@@ -181,6 +207,89 @@ async def build_market_snapshot(
         "summary": summary,
         "candidates": serialized,
     }
+
+
+async def audit_market_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    probe_limit: int,
+    concurrency: int,
+) -> dict[str, Any]:
+    """Probe official boards directly when the production database cannot accept writes."""
+    if int(snapshot.get("version") or 0) != SNAPSHOT_VERSION:
+        raise ValueError("unsupported dynamic market snapshot version")
+    rows = snapshot.get("candidates")
+    if not isinstance(rows, list):
+        raise ValueError("dynamic market snapshot is missing candidates")
+
+    candidates = deserialize_candidates([row for row in rows if isinstance(row, dict)])
+    selected = balanced_probe_candidates(candidates, probe_limit)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async with _client(concurrency) as client:
+        async def probe(collector: Collector):
+            async with semaphore:
+                try:
+                    return collector, await collector.collect(client), None
+                except Exception as exc:  # noqa: BLE001 - one bad employer must not abort the audit
+                    return collector, None, repr(exc)
+
+        outcomes = await asyncio.gather(*(probe(collector) for collector in selected))
+
+    official_postings: list[Posting] = []
+    valid_sources = 0
+    sources_with_postings = 0
+    source_evidence: list[dict[str, Any]] = []
+    for collector, result, exception in outcomes:
+        valid = bool(
+            result is not None
+            and result.complete
+            and result.error is None
+            and result.status in VALID_CANDIDATE_STATUSES
+        )
+        postings = list(result.postings) if valid and result is not None else []
+        if valid:
+            valid_sources += 1
+            official_postings.extend(postings)
+            sources_with_postings += bool(postings)
+        source_dates = posting_freshness(postings)
+        source_evidence.append(
+            {
+                "source": collector.name,
+                "valid": valid,
+                "status": result.status if result is not None else "exception",
+                "complete": bool(result.complete) if result is not None else False,
+                "rows": len(postings),
+                "freshest_employer_posted_at": source_dates[
+                    "freshest_employer_posted_at"
+                ],
+                "error": exception or (result.error if result is not None else None),
+            }
+        )
+
+    freshness = posting_freshness(official_postings)
+    audit_summary = {
+        "stateless_sources_probed": len(selected),
+        "stateless_sources_valid": valid_sources,
+        "stateless_sources_with_postings": sources_with_postings,
+        "stateless_official_postings": len(official_postings),
+        "stateless_dated_postings": freshness["dated_postings"],
+        "stateless_freshest_employer_posted_at": freshness[
+            "freshest_employer_posted_at"
+        ],
+        "stateless_employer_posted_last_24h": freshness["employer_posted_last_24h"],
+        "stateless_employer_posted_last_72h": freshness["employer_posted_last_72h"],
+        "stateless_employer_posted_last_7d": freshness["employer_posted_last_7d"],
+    }
+    snapshot["audit"] = {
+        "captured_at": datetime.now(UTC).isoformat(),
+        "summary": audit_summary,
+        "sources": source_evidence,
+    }
+    base_summary = snapshot.get("summary")
+    if isinstance(base_summary, dict):
+        base_summary.update(audit_summary)
+    return audit_summary
 
 
 async def ingest_market_snapshot(
@@ -253,11 +362,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.getenv("GAIA_CANDIDATE_PROBE_LIMIT", "96")),
     )
     parser.add_argument(
+        "--audit-probe-limit",
+        type=int,
+        default=int(os.getenv("GAIA_STATELESS_AUDIT_LIMIT", "96")),
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=int(os.getenv("GAIA_WORKER_CONCURRENCY", "16")),
     )
     parser.add_argument("--search-only", action="store_true")
+    parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--snapshot-output", type=Path, default=None)
     parser.add_argument("--snapshot-input", type=Path, default=None)
     return parser
@@ -276,12 +391,25 @@ def main() -> None:
     else:
         snapshot = asyncio.run(build_market_snapshot(concurrency=concurrency))
 
+    audit_summary: dict[str, Any] | None = None
+    if args.audit_only:
+        audit_summary = asyncio.run(
+            audit_market_snapshot(
+                snapshot,
+                probe_limit=max(1, args.audit_probe_limit),
+                concurrency=concurrency,
+            )
+        )
+
     if args.snapshot_output is not None:
         args.snapshot_output.write_text(
             json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
 
+    if args.audit_only:
+        print(json.dumps(audit_summary or {}, sort_keys=True))
+        return
     if args.search_only:
         print(json.dumps(snapshot.get("summary") or {}, sort_keys=True))
         return
