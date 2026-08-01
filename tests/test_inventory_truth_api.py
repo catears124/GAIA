@@ -18,6 +18,7 @@ def test_classify_inventory_reports_exact_deficits(monkeypatch) -> None:
     assert recovery == {
         "complete": False,
         "state": "recovering",
+        "completion_percent": 19.0,
         "observed": {
             "active_listings": 19,
             "companies": 5,
@@ -62,15 +63,25 @@ def test_health_cannot_be_green_for_collapsed_job_inventory(monkeypatch) -> None
     inventory_truth_api.install_inventory_truth_api(app)
     client = TestClient(app)
 
-    stats = client.get("/api/stats").json()
+    stats_response = client.get("/api/stats")
+    assert stats_response.status_code == 200
+    stats = stats_response.json()
     assert stats["inventory_complete"] is False
     assert stats["inventory_state"] == "recovering"
 
-    health = client.get("/api/health").json()
+    health_response = client.get("/api/health")
+    assert health_response.status_code == 503
+    assert health_response.headers["cache-control"] == "no-store, max-age=0"
+    assert health_response.headers["retry-after"] == "30"
+    health = health_response.json()
     assert health["ok"] is False
     assert health["stale"] is True
     assert health["reason"] == "inventory_recovery"
-    assert health["progress"]["stage"] == "inventory-recovery"
+    assert health["progress"] == {
+        "stage": "inventory-recovery",
+        "completed": 19,
+        "total": 100,
+    }
     assert health["data"]["last_run"]["status"] == "partial"
     assert health["job_inventory"]["deficits"]["active_listings"] == 81
 
@@ -93,8 +104,11 @@ def test_complete_inventory_preserves_real_source_health(monkeypatch) -> None:
     )
 
     inventory_truth_api.install_inventory_truth_api(app)
-    health = TestClient(app).get("/api/health").json()
+    response = TestClient(app).get("/api/health")
+    health = response.json()
 
+    assert response.status_code == 200
     assert health["ok"] is False
     assert health["reason"] == "source_failures"
     assert health["job_inventory"]["complete"] is True
+    assert health["job_inventory"]["completion_percent"] == 100.0
