@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from gaia.db import Database
+from gaia.grouping import family_key
 from gaia.models import CollectorResult, Posting
 
 SOURCE = "ashby:skydio"
@@ -40,6 +41,7 @@ def test_one_complete_omission_keeps_recent_listing_visible(
     monkeypatch.setenv("GAIA_REMOVAL_GRACE_SECONDS", "1800")
     database = Database(tmp_path / "one-omission.db")
     item = _posting()
+    key = family_key(item)
     database.apply_result(_result([item]))
 
     database.apply_result(_result([]))
@@ -51,7 +53,7 @@ def test_one_complete_omission_keeps_recent_listing_visible(
         ).fetchone()
         family = connection.execute(
             "SELECT family_key FROM families WHERE family_key=%s",
-            (item.family_key,),
+            (key,),
         ).fetchone()
     assert row["active"] is True
     assert row["removed_at"] is not None
@@ -62,6 +64,7 @@ def test_second_aged_omission_confirms_removal(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GAIA_REMOVAL_GRACE_SECONDS", "60")
     database = Database(tmp_path / "confirmed-removal.db")
     item = _posting()
+    key = family_key(item)
     database.apply_result(_result([item]))
     database.apply_result(_result([]))
     with database.connect() as connection:
@@ -83,7 +86,7 @@ def test_second_aged_omission_confirms_removal(tmp_path, monkeypatch) -> None:
         ).fetchone()
         family = connection.execute(
             "SELECT family_key FROM families WHERE family_key=%s",
-            (item.family_key,),
+            (key,),
         ).fetchone()
     assert row["active"] is False
     assert row["removed_at"] is not None
@@ -112,6 +115,7 @@ def test_recent_legacy_hard_removal_is_restored_to_pending(tmp_path, monkeypatch
     monkeypatch.setenv("GAIA_LEGACY_REMOVAL_RESTORE_SECONDS", "21600")
     database = Database(tmp_path / "legacy-removal.db")
     item = _posting()
+    key = family_key(item)
     database.apply_result(_result([item]))
     with database.connect() as connection:
         connection.execute(
@@ -140,7 +144,7 @@ def test_recent_legacy_hard_removal_is_restored_to_pending(tmp_path, monkeypatch
         ).fetchone()
         family = connection.execute(
             "SELECT family_key FROM families WHERE family_key=%s",
-            (item.family_key,),
+            (key,),
         ).fetchone()
     assert row["active"] is True
     assert row["removed_at"] is not None
