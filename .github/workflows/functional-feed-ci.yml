@@ -1,0 +1,49 @@
+name: Functional feed CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/functional-feed-ci.yml"
+      - "src/gaia/product_api.py"
+      - "src/gaia/maintenance_api.py"
+      - "src/gaia/dynamic_market_discovery.py"
+      - "tests/test_product_stats_units.py"
+      - "pyproject.toml"
+  pull_request:
+    paths:
+      - ".github/workflows/functional-feed-ci.yml"
+      - "src/gaia/product_api.py"
+      - "src/gaia/maintenance_api.py"
+      - "src/gaia/dynamic_market_discovery.py"
+      - "tests/test_product_stats_units.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: functional-feed-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+      - name: Lint functional feed path
+        run: |
+          ruff check \
+            src/gaia/product_api.py \
+            src/gaia/maintenance_api.py \
+            src/gaia/dynamic_market_discovery.py \
+            tests/test_product_stats_units.py
+      - name: Test feed units, strict targeting, and ordering
+        run: pytest -q tests/test_product_stats_units.py
