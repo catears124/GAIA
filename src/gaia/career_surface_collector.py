@@ -322,7 +322,7 @@ class CareerSurfaceCollector(SitemapDomainCollector):
             if not batch:
                 continue
             outcomes = await asyncio.gather(*(fetch(url, depth) for url, depth in batch))
-            for url, depth, outcome in outcomes:
+            for _url, depth, outcome in outcomes:
                 result.landing_pages += 1
                 if isinstance(outcome, Exception):
                     continue
