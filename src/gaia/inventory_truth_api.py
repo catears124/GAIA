@@ -54,19 +54,37 @@ def _remove_get_routes(app: Any, *paths: str) -> None:
     ]
 
 
+def _stats_payload() -> dict[str, Any]:
+    stats = dict(product_api.live_stats())
+    recovery = classify_inventory(stats)
+    stats["inventory_complete"] = recovery["complete"]
+    stats["inventory_state"] = recovery["state"]
+    stats["recovery"] = recovery
+    return stats
+
+
+def _recovery_response(payload: dict[str, Any]) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "Retry-After": "30",
+        },
+        content=payload,
+    )
+
+
 def install_inventory_truth_api(app: Any) -> None:
     """Make job-count completeness part of health and stats contracts."""
 
     _remove_get_routes(app, "/api/health", "/api/stats")
 
-    @app.get("/api/stats")
-    def truthful_stats() -> dict[str, Any]:
-        stats = dict(product_api.live_stats())
-        recovery = classify_inventory(stats)
-        stats["inventory_complete"] = recovery["complete"]
-        stats["inventory_state"] = recovery["state"]
-        stats["recovery"] = recovery
-        return stats
+    @app.get("/api/stats", response_model=None)
+    def truthful_stats() -> Any:
+        stats = _stats_payload()
+        if stats["inventory_complete"]:
+            return stats
+        return _recovery_response(stats)
 
     @app.get("/api/health", response_model=None)
     def truthful_health() -> Any:
@@ -74,7 +92,7 @@ def install_inventory_truth_api(app: Any) -> None:
         if not isinstance(health, dict):
             return health
 
-        stats = truthful_stats()
+        stats = _stats_payload()
         recovery = dict(stats["recovery"])
         health["job_inventory"] = recovery
         if recovery["complete"]:
@@ -93,11 +111,4 @@ def install_inventory_truth_api(app: Any) -> None:
         last_run["status"] = "partial"
         data["last_run"] = last_run
         health["data"] = data
-        return JSONResponse(
-            status_code=503,
-            headers={
-                "Cache-Control": "no-store, max-age=0",
-                "Retry-After": "30",
-            },
-            content=health,
-        )
+        return _recovery_response(health)
