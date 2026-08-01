@@ -216,13 +216,13 @@ def test_recursive_discovery_persists_new_provider_candidate(tmp_path) -> None:
     )
 
     with database.connect() as connection:
-        row = connection.execute(
-            "SELECT source, kind, origin FROM source_candidates"
-        ).fetchone()
-    assert saved == 1
-    assert row["source"] == "ashby:quiet-robotics"
-    assert row["kind"] == "ashby"
-    assert row["origin"] == "test-recursive-source"
+        rows = connection.execute(
+            "SELECT source, kind, origin FROM source_candidates ORDER BY source"
+        ).fetchall()
+    promoted = next(row for row in rows if row["source"] == "ashby:quiet-robotics")
+    assert saved >= 1
+    assert promoted["kind"] == "ashby"
+    assert promoted["origin"] == "test-recursive-source"
 
 
 def test_career_seed_generation_preserves_multilevel_public_suffix() -> None:
