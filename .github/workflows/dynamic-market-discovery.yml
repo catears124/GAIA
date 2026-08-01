@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
   group: gaia-dynamic-market-discovery
@@ -39,8 +40,14 @@ jobs:
       GAIA_GITHUB_TOKEN: ${{ github.token }}
       GAIA_CANDIDATE_PROBE_LIMIT: "96"
       GAIA_WORKER_CONCURRENCY: "16"
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - name: Publish pending discovery status
+        shell: bash
+        run: |
+          payload=$(jq -n --arg state pending --arg context gaia/dynamic-market-discovery --arg description "Searching fresh internship indexes and validating employer sources" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -74,3 +81,14 @@ jobs:
           path: dynamic-market-discovery.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Publish final discovery status
+        if: always()
+        shell: bash
+        run: |
+          case "${{ job.status }}" in
+            success) state=success; description="Fresh market search and employer source validation completed" ;;
+            cancelled) state=pending; description="Dynamic discovery was superseded by a newer run" ;;
+            *) state=failure; description="Dynamic market search or employer source validation failed" ;;
+          esac
+          payload=$(jq -n --arg state "$state" --arg context gaia/dynamic-market-discovery --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
