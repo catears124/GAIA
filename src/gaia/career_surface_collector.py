@@ -98,6 +98,8 @@ class _Enumeration:
     provider_urls: set[str] = field(default_factory=set)
     cached_html: dict[str, str] = field(default_factory=dict)
     sitemap_documents: int = 0
+    career_sitemap_urls: int = 0
+    feed_documents: int = 0
     landing_pages: int = 0
     reachable_landings: int = 0
     reachable_career_landings: int = 0
@@ -110,7 +112,10 @@ class _Enumeration:
 def provider_kind(url: str) -> str | None:
     host = urlsplit(url).netloc.casefold().split(":", 1)[0]
     for fragment, kind in PROVIDER_HOST_FRAGMENTS.items():
-        if fragment in host:
+        if fragment.endswith("."):
+            if fragment in host:
+                return kind
+        elif host == fragment or host.endswith(f".{fragment}"):
             return kind
     return None
 
@@ -195,6 +200,29 @@ def _xml_locations(body: str) -> tuple[list[str], bool]:
     return locations, tag == "sitemapindex"
 
 
+def _xml_document_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return [], False
+    root_tag = root.tag.rsplit("}", 1)[-1].casefold()
+    is_feed = root_tag in {"rss", "feed", "rdf"}
+    output: list[tuple[str, str]] = []
+    for node in root.iter():
+        tag = node.tag.rsplit("}", 1)[-1].casefold()
+        raw = ""
+        if tag == "link":
+            raw = str(node.attrib.get("href") or node.text or "").strip()
+        elif tag in {"guid", "loc"}:
+            raw = str(node.text or "").strip()
+        if not raw:
+            continue
+        normalized = _normalized_http_url(urljoin(base_url, raw))
+        if normalized:
+            output.append((normalized, tag))
+    return list(dict.fromkeys(output)), is_feed
+
+
 def _embedded_urls(body: str) -> list[str]:
     output: list[str] = []
     for match in URL_RE.findall(body):
@@ -211,6 +239,22 @@ def _links(body: str, base_url: str) -> list[tuple[str, str]]:
         normalized = _normalized_http_url(urljoin(base_url, str(anchor.get("href"))))
         if normalized:
             output.append((normalized, anchor.get_text(" ", strip=True)))
+    for link in soup.find_all("link", href=True):
+        label = " ".join(
+            [
+                " ".join(str(value) for value in (link.get("rel") or [])),
+                str(link.get("type") or ""),
+                str(link.get("title") or ""),
+            ]
+        ).strip()
+        normalized = _normalized_http_url(urljoin(base_url, str(link.get("href"))))
+        if normalized and (
+            "alternate" in label.casefold()
+            or "rss" in label.casefold()
+            or "atom" in label.casefold()
+            or _careerish(normalized, label)
+        ):
+            output.append((normalized, label))
     output.extend((url, "") for url in _embedded_urls(body))
     unique: dict[str, str] = {}
     for url, label in output:
@@ -218,13 +262,22 @@ def _links(body: str, base_url: str) -> list[tuple[str, str]]:
     return list(unique.items())
 
 
+def _document_links(body: str, base_url: str) -> tuple[list[tuple[str, str]], bool]:
+    links = _links(body, base_url)
+    xml_links, is_feed = _xml_document_links(body, base_url)
+    unique = {url: label for url, label in links}
+    for url, label in xml_links:
+        unique[url] = unique.get(url) or label
+    return list(unique.items()), is_feed
+
+
 class CareerSurfaceCollector(SitemapDomainCollector):
     """Recursively enumerate an employer's own career graph.
 
     The collector combines robots/sitemaps, common career paths, bounded link
-    recursion, embedded ATS URLs, Schema.org JobPosting extraction, and guarded
-    unstructured detail parsing. It deliberately reports a complete empty board
-    only after a reachable career surface was exhaustively traversed.
+    recursion, embedded ATS URLs, RSS/Atom feeds, Schema.org JobPosting extraction,
+    and guarded unstructured detail parsing. A complete empty board is reported only
+    after a reachable career-specific surface was exhaustively traversed.
     """
 
     mode = "board-search"
@@ -286,7 +339,10 @@ class CareerSurfaceCollector(SitemapDomainCollector):
                     continue
                 if provider_kind(normalized_location):
                     result.provider_urls.add(normalized_location)
+                    result.career_sitemap_urls += 1
                 elif _same_host(normalized_location, self.host) and _careerish(normalized_location):
+                    if normalized_location not in result.pages:
+                        result.career_sitemap_urls += 1
                     result.pages.add(normalized_location)
                 if len(result.pages) >= self.max_pages:
                     result.truncated = True
@@ -339,15 +395,19 @@ class CareerSurfaceCollector(SitemapDomainCollector):
                 if response.status_code >= 400:
                     continue
                 content_type = response.headers.get("content-type", "").casefold()
-                if content_type and "html" not in content_type and "text" not in content_type:
+                allowed_types = ("html", "text", "xml", "rss", "atom", "json")
+                if content_type and not any(value in content_type for value in allowed_types):
                     continue
                 final_url = str(response.url)
-                links = _links(response.text, final_url)
+                links, is_feed = _document_links(response.text, final_url)
                 schemas = json_ld_jobs(response.text)
                 result.reachable_landings += 1
+                if is_feed:
+                    result.feed_documents += 1
                 if (
                     _careerish(final_url)
                     or schemas
+                    or is_feed
                     or any(provider_kind(link) or _careerish(link, label) for link, label in links)
                 ):
                     result.reachable_career_landings += 1
@@ -447,7 +507,7 @@ class CareerSurfaceCollector(SitemapDomainCollector):
 
         discovered = {item.canonical_apply_url: item for item in postings}
         career_surface_found = bool(
-            enumeration.sitemap_documents or enumeration.reachable_career_landings
+            enumeration.career_sitemap_urls or enumeration.reachable_career_landings
         )
         complete = career_surface_found and not enumeration.truncated
         if hard_errors and not discovered and not enumeration.reachable_career_landings:
@@ -479,6 +539,8 @@ class CareerSurfaceCollector(SitemapDomainCollector):
         ]
         note = (
             f"career graph: {enumeration.sitemap_documents} sitemaps, "
+            f"{enumeration.career_sitemap_urls} career sitemap URLs, "
+            f"{enumeration.feed_documents} feeds, "
             f"{enumeration.landing_pages} landing pages, "
             f"{enumeration.reachable_career_landings} career landings, "
             f"{len(page_urls)} candidate pages, "
