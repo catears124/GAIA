@@ -75,7 +75,7 @@ from .db_base import (  # noqa: E402
     iso,
 )
 from .db_read import ReadMixin  # noqa: E402
-from .db_write import WriteMixin  # noqa: E402
+from .removal_guard import GuardedWriteMixin  # noqa: E402
 
 
 class _PsycopgConnectionAdapter(ConnectionAdapter):
@@ -102,7 +102,7 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
             cursor.executemany(self._query(query), params_seq)
 
 
-class Database(WriteMixin, ReadMixin, BaseDatabase):
+class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
     """GAIA's PostgreSQL repository and query service.
 
     Constructing the repository is intentionally safe without database credentials.
