@@ -52,7 +52,7 @@ def _remove_legacy_coverage_route(app: FastAPI) -> None:
 
 
 def install_coverage_api(app: FastAPI) -> None:
-    """Install complete source diagnostics, including targets with no health row yet."""
+    """Install source diagnostics plus product-advancement health metrics."""
     if getattr(app.state, "gaia_coverage_api_installed", False):
         return
     app.state.gaia_coverage_api_installed = True
@@ -61,6 +61,11 @@ def install_coverage_api(app: FastAPI) -> None:
     @app.get("/api/coverage")
     def live_coverage() -> dict[str, object]:
         from . import api as legacy
+        from .activity_metrics import (
+            listing_freshness_state,
+            source_growth_state,
+            stall_assessment,
+        )
         from .health import inventory_state
 
         data = legacy.db.coverage()
@@ -68,6 +73,9 @@ def install_coverage_api(app: FastAPI) -> None:
             rows = connection.execute(SOURCE_DIAGNOSTICS_SQL).fetchall()
         sources = [legacy.db._json_row(row) for row in rows]  # noqa: SLF001
         inventory = inventory_state(legacy.db)
+        listing_freshness = listing_freshness_state(legacy.db)
+        source_growth = source_growth_state(legacy.db)
+        advancement = stall_assessment(listing_freshness, source_growth)
         contract = dict(data.get("contract") or {})
         contract.update(
             {
@@ -80,8 +88,19 @@ def install_coverage_api(app: FastAPI) -> None:
                 "degraded_sources": int(inventory["degraded"]),
                 "historical_sources": int(inventory["historical"]),
                 "coverage_watermark": inventory.get("coverage_watermark"),
+                "source_candidates": int(source_growth["candidate_total"]),
+                "due_source_candidates": int(source_growth["due"]),
+                "new_unique_sources_24h": int(source_growth["new_unique_24h"]),
+                "latest_unique_source_at": source_growth.get("latest_unique_source_at"),
+                "newest_employer_posted_at": listing_freshness.get("newest_employer_posted_at"),
+                "newest_found_at": listing_freshness.get("newest_found_at"),
+                "newest_visible_activity_at": listing_freshness.get("newest_visible_activity_at"),
+                "product_advancement_healthy": bool(advancement["healthy"]),
             }
         )
         data["contract"] = contract
         data["sources"] = sources
+        data["listing_freshness"] = listing_freshness
+        data["source_growth"] = source_growth
+        data["product_advancement"] = advancement
         return data
