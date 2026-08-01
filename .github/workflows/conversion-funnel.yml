@@ -1,0 +1,163 @@
+name: Verified job conversion funnel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/conversion-funnel.yml"
+      - "src/gaia/conversion_funnel.py"
+      - "src/gaia/conversion_diagnostics_api.py"
+      - "src/gaia/inventory_runtime.py"
+      - "src/gaia/schema.sql"
+      - "app.py"
+  schedule:
+    - cron: "13 * * * *"
+  workflow_dispatch:
+    inputs:
+      drain_candidates:
+        description: "Probe a bounded batch of due source candidates before reporting"
+        required: false
+        default: false
+        type: boolean
+      probe_limit:
+        description: "Maximum due source candidates to probe"
+        required: false
+        default: "24"
+        type: string
+      report_hours:
+        description: "Funnel reporting window in hours"
+        required: false
+        default: "24"
+        type: string
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: verified-job-conversion-funnel
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Capture candidate-to-publication evidence
+        id: funnel
+        env:
+          BASE_URL: https://gaiajob.vercel.app
+          DRAIN: ${{ github.event_name == 'workflow_dispatch' && inputs.drain_candidates || false }}
+          PROBE_LIMIT: ${{ inputs.probe_limit || '24' }}
+          REPORT_HOURS: ${{ inputs.report_hours || '24' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          user_agent="GAIA-production-maintenance/${GITHUB_RUN_ID}"
+
+          if [ "$DRAIN" = "true" ]; then
+            drain_status=$(curl --silent --show-error --location \
+              --request POST \
+              --user-agent "$user_agent" \
+              --connect-timeout 15 --max-time 300 \
+              --retry 2 --retry-all-errors --retry-delay 5 \
+              --output evidence/drain.json \
+              --write-out '%{http_code}' \
+              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=${PROBE_LIMIT}&hours=${REPORT_HOURS}" \
+              || printf '000')
+            if [ "$drain_status" != 200 ] || ! jq -e '.status == "ok"' evidence/drain.json >/dev/null; then
+              echo "state=failure" >> "$GITHUB_OUTPUT"
+              echo "description=Candidate drain failed HTTP ${drain_status}" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
+
+          report_status=$(curl --silent --show-error --location \
+            --request GET \
+            --user-agent "$user_agent" \
+            --connect-timeout 15 --max-time 240 \
+            --retry 2 --retry-all-errors --retry-delay 5 \
+            --output evidence/conversion.json \
+            --write-out '%{http_code}' \
+            "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=${REPORT_HOURS}&limit=100" \
+            || printf '000')
+          if [ "$report_status" != 200 ] || ! jq -e '
+            .objective == "increase_verified_new_jobs"
+            and (.funnel | type == "object")
+            and (.sources | type == "object")
+            and (.diagnostic_errors | type == "array")
+          ' evidence/conversion.json >/dev/null; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Conversion report failed HTTP ${report_status}" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          verified=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/conversion.json)
+          discovered=$(jq -r '.funnel.discovered_postings_window // 0' evidence/conversion.json)
+          due=$(jq -r '.sources.candidate_sources_due // 0' evidence/conversion.json)
+          promoted=$(jq -r '.sources.promoted_sources_window // 0' evidence/conversion.json)
+          gaps=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/conversion.json)
+          errors=$(jq -r '.diagnostic_errors | length' evidence/conversion.json)
+          conversion=$(jq -r '.funnel.discovered_posting_to_verified_posting_rate // "n/a"' evidence/conversion.json)
+
+          if [ "$errors" != 0 ]; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Funnel diagnostics returned ${errors} schema/query errors" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "state=success" >> "$GITHUB_OUTPUT"
+          echo "description=${verified} verified; ${discovered} discovered; ${due} due; ${gaps} publish gaps" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Verified job conversion funnel"
+            echo "- Reporting window: ${REPORT_HOURS}h"
+            echo "- New verified jobs: ${verified}"
+            echo "- Discovered postings: ${discovered}"
+            echo "- Discovery → verified posting rate: ${conversion}"
+            echo "- Promoted sources: ${promoted}"
+            echo "- Due source candidates: ${due}"
+            echo "- Verified postings missing a public family: ${gaps}"
+            if [ -f evidence/drain.json ]; then
+              echo "- Candidate drain claimed: $(jq -r '.claimed_candidates // 0' evidence/drain.json)"
+              echo "- Candidate drain promoted: $(jq -r '.promoted_sources // 0' evidence/drain.json)"
+              echo "- Verified jobs delta during drain: $(jq -r '.verified_jobs_delta // 0' evidence/drain.json)"
+            fi
+            echo ""
+            echo "#### Top candidate blockers"
+            jq -r '.blockers.candidate_failures[:10][]? | "- \(.reason): \(.count)"' evidence/conversion.json
+            echo ""
+            echo "#### Top crawl blockers"
+            jq -r '.blockers.crawl_failures[:10][]? | "- \(.reason): \(.count)"' evidence/conversion.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish funnel status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.funnel.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.funnel.outputs.description || 'Conversion funnel did not complete' }}
+        shell: bash
+        run: |
+          payload=$(jq -n \
+            --arg state "$STATE" \
+            --arg context "gaia/verified-job-conversion" \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
+
+      - name: Upload conversion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-job-conversion-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
