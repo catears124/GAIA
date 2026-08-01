@@ -31,6 +31,11 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "150")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "12")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "10")
+    os.environ.setdefault("GAIA_ENABLE_RUNTIME_MARKET_DISCOVERY", "1")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_INTERVAL_SECONDS", "900")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_LEASE_SECONDS", "240")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "10")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "6")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
 from gaia.coverage_extensions import install_coverage_extensions  # noqa: E402
@@ -45,9 +50,11 @@ from gaia.coverage_api import install_coverage_api  # noqa: E402
 from gaia.maintenance_api import install_maintenance_api  # noqa: E402
 from gaia.product_api import app  # noqa: E402,F401
 from gaia.request_bootstrap import install_request_bootstrap  # noqa: E402
+from gaia.runtime_discovery_api import install_runtime_discovery_api  # noqa: E402
 
 install_request_bootstrap(app)
 install_activity_api(app)
 install_coverage_api(app)
 install_maintenance_api(app)
+install_runtime_discovery_api(app)
 install_database_outage_guard(app)

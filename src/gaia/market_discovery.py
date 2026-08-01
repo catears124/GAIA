@@ -16,8 +16,14 @@ from .models import CollectorResult, Posting
 DEFAULT_QUERIES = (
     '"2027 internships" in:name,description,readme',
     '"Summer 2027" internships in:name,description,readme',
+    '"2027 software engineer intern" in:name,description,readme',
     '"2027 SWE" internships in:name,description,readme',
+    '"2027 machine learning intern" in:name,description,readme',
+    '"2027 data science intern" in:name,description,readme',
     '"2027 quant" internships in:name,description,readme',
+    '"2027 trading intern" in:name,description,readme',
+    '"2027 research intern" in:name,description,readme',
+    '"2027 university recruiting" jobs in:name,description,readme',
 )
 RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 
