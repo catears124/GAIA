@@ -64,7 +64,17 @@ jobs:
           cache: pip
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+      - name: Search fresh public internship indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m gaia.dynamic_market_discovery \
+            --search-only \
+            --snapshot-output dynamic-market-snapshot.json \
+            --concurrency "$GAIA_WORKER_CONCURRENCY" \
+            | tee dynamic-market-search.json
       - name: Select a working production database credential
+        id: database
         shell: bash
         run: |
           set -euo pipefail
@@ -121,45 +131,73 @@ jobs:
             fi
             echo "Database candidate $name rejected with readiness code $code."
           done
-          if [ "$attempted" -eq 0 ]; then
-            echo "No supported database secrets or complete component credentials are configured." >&2
-            exit 2
-          fi
+
           if [ -z "$selected" ]; then
-            echo "None of the configured database credentials reaches a live production tenant." >&2
-            exit 2
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            if [ "$attempted" -eq 0 ]; then
+              echo "reason=no-database-secrets" >> "$GITHUB_OUTPUT"
+              echo "Discovery evidence captured, but no production database secrets are configured." >&2
+            else
+              echo "reason=stale-database-secrets" >> "$GITHUB_OUTPUT"
+              echo "Discovery evidence captured, but every configured production database credential is stale or invalid." >&2
+            fi
+            exit 0
           fi
+
           delimiter="GAIA_DB_$(openssl rand -hex 12)"
           {
             echo "GAIA_DATABASE_URL<<$delimiter"
             echo "$selected"
             echo "$delimiter"
           } >> "$GITHUB_ENV"
-      - name: Discover and validate fresh employer sources
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "reason=ready" >> "$GITHUB_OUTPUT"
+      - name: Validate and schedule discovered employer sources
+        if: steps.database.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
           python -m gaia.dynamic_market_discovery \
+            --snapshot-input dynamic-market-snapshot.json \
             --probe-limit "$GAIA_CANDIDATE_PROBE_LIMIT" \
             --concurrency "$GAIA_WORKER_CONCURRENCY" \
-            | tee dynamic-market-discovery.json
+            | tee dynamic-market-ingest.json
+      - name: Publish discovery summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Dynamic market discovery" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f dynamic-market-search.json ]; then cat dynamic-market-search.json >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f dynamic-market-ingest.json ]; then cat dynamic-market-ingest.json >> "$GITHUB_STEP_SUMMARY"; fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Database state: ${{ steps.database.outputs.reason || 'not-checked' }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload discovery evidence
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: dynamic-market-discovery-${{ github.run_id }}
-          path: dynamic-market-discovery.json
+          path: |
+            dynamic-market-snapshot.json
+            dynamic-market-search.json
+            dynamic-market-ingest.json
           if-no-files-found: warn
           retention-days: 14
       - name: Publish final discovery status
         if: always()
         shell: bash
         run: |
-          case "${{ job.status }}" in
-            success) state=success; description="Fresh market search and employer source validation completed" ;;
-            cancelled) state=pending; description="Dynamic discovery was superseded by a newer run" ;;
-            *) state=failure; description="Dynamic market search or employer source validation failed" ;;
-          esac
+          database_ready="${{ steps.database.outputs.ready }}"
+          if [ "${{ job.status }}" != success ]; then
+            state=failure
+            description="Dynamic market search or employer source validation failed"
+          elif [ "$database_ready" != true ]; then
+            state=pending
+            description="Fresh source evidence captured; production database credentials require repair"
+          else
+            state=success
+            description="Fresh market search and employer source validation completed"
+          fi
           payload=$(jq -n --arg state "$state" --arg context gaia/dynamic-market-discovery --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
           curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
