@@ -65,14 +65,35 @@ jobs:
             printf '{}\n' > tick/stats.json
           fi
 
+          if ! curl --silent --show-error --location \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+            --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-all-errors --retry-delay 2 \
+            --get \
+            --data-urlencode 'sort=newest' \
+            --data-urlencode 'page=1' \
+            --data-urlencode 'page_size=12' \
+            --data-urlencode 'track=tech' \
+            --data-urlencode 'trust=verified' \
+            --output tick/families.json \
+            --write-out '%{http_code}' \
+            https://gaiajob.vercel.app/api/families > tick/families-status; then
+            printf '000\n' > tick/families-status
+            printf '{}\n' > tick/families.json
+          fi
+
           http_status=$(tr -d '\r\n' < tick/status)
           stats_status=$(tr -d '\r\n' < tick/stats-status)
+          families_status=$(tr -d '\r\n' < tick/families-status)
           if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' tick/body.json >/dev/null; then
             state=failure
             description="Runtime inventory tick failed (HTTP ${http_status})"
           elif [ "$stats_status" != 200 ] || ! jq -e 'type == "object" and (.role_families | numbers) and (.active_listings | numbers) and (.companies | numbers) and (.new_today | numbers)' tick/stats.json >/dev/null; then
             state=failure
             description="Production stats failed validation (HTTP ${stats_status})"
+          elif [ "$families_status" != 200 ] || ! jq -e 'type == "object" and (.items | type == "array") and (.total | numbers)' tick/families.json >/dev/null; then
+            state=failure
+            description="Production newest-role feed failed validation (HTTP ${families_status})"
           else
             operation=$(jq -r '.status' tick/body.json)
             total=$(jq -r '.inventory.total // 0' tick/body.json)
@@ -82,16 +103,24 @@ jobs:
             active=$(jq -r '.active_listings // 0' tick/stats.json)
             companies=$(jq -r '.companies // 0' tick/stats.json)
             new_today=$(jq -r '.new_today // 0' tick/stats.json)
+            activity_unit=$(jq -r '.activity_units.new_today // "legacy_canonical_apply_url"' tick/stats.json)
+            visible=$(jq -r '.total // 0' tick/families.json)
 
             if [ "$families" -gt "$active" ] || [ "$companies" -gt "$families" ]; then
               state=failure
               description="Impossible inventory shape: ${active} openings, ${families} roles, ${companies} companies"
-            elif [ "$new_today" -gt "$families" ]; then
+            elif [ "$visible" -ne "$families" ]; then
+              state=failure
+              description="Stats/feed mismatch: ${families} role families but ${visible} visible"
+            elif [ "$activity_unit" = role_family ] && [ "$new_today" -gt "$families" ]; then
               state=failure
               description="Impossible role movement: ${new_today} new roles exceeds ${families} active roles"
             elif [ "$active" -lt "$GAIA_MIN_ACTIVE_LISTINGS" ]; then
               state=failure
               description="Collapsed production inventory: ${active} open (<${GAIA_MIN_ACTIVE_LISTINGS})"
+            elif [ "$activity_unit" != role_family ]; then
+              state=pending
+              description="Runtime healthy; corrected role-family stats await Vercel deployment"
             elif [ "$operation" = partial ] || [ "$unhealthy" -gt 0 ] || [ "$fresh" -lt "$total" ]; then
               state=pending
               description="Runtime tick ${operation}; ${active} open; sources ${fresh}/${total} fresh"
@@ -110,8 +139,10 @@ jobs:
             echo "- Detail: ${description}"
             echo "- Maintenance HTTP: ${http_status}"
             echo "- Stats HTTP: ${stats_status}"
+            echo "- Families HTTP: ${families_status}"
             jq -r '"- Operation: \(.status // "unknown")\n- Executed: \(.executed // false)\n- Summary: \(.summary // {})"' tick/body.json
-            jq -r '"- Open applications: \(.active_listings // 0)\n- Active role families: \(.role_families // 0)\n- Hiring companies: \(.companies // 0)\n- New role families (24h): \(.new_today // 0)\n- New canonical URLs (24h): \(.new_urls_24h // "unavailable")"' tick/stats.json
+            jq -r '"- Open applications: \(.active_listings // 0)\n- Active role families: \(.role_families // 0)\n- Hiring companies: \(.companies // 0)\n- New role families (24h): \(.new_today // 0)\n- New canonical URLs (24h): \(.new_urls_24h // "awaiting corrected deployment")"' tick/stats.json
+            jq -r '(.items[0] // {}) | "- Newest visible role: \(.company // "unknown") — \(.title // "unknown")\n- Employer posted: \(.latest_posted_at // "unknown")\n- First detected: \(.first_detected_at // "unknown")\n- Last verified: \(.last_verified_at // "unknown")"' tick/families.json
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish runtime inventory status
