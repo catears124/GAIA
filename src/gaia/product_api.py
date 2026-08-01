@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import datetime
 
 import psycopg
@@ -125,6 +126,35 @@ def _database_unavailable(error: Exception) -> JSONResponse:
             },
         },
     )
+
+
+def _activity_stats(
+    family_row: Mapping[str, object],
+    movement_row: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep user-facing discovery counts and low-level URL churn in coherent units."""
+    new_families = int(family_row["new_families_today"] or 0)
+    new_urls = int(movement_row["new_urls_today"] or 0)
+    removed_urls = int(movement_row["removed_urls_today"] or 0)
+    return {
+        # These power the visible "found today" metric. A card represents a role
+        # family, so its movement must be counted in role families too.
+        "new_24h": new_families,
+        "new_today": new_families,
+        "new_families_24h": new_families,
+        # Canonical URL churn remains available for operators, but it is explicitly
+        # named and never compared with deduplicated role-family inventory.
+        "new_urls_24h": new_urls,
+        "removed_urls_24h": removed_urls,
+        "net_urls_24h": new_urls - removed_urls,
+        # Backward-compatible aliases for clients that already consume movement data.
+        "removed_today": removed_urls,
+        "net_today": new_urls - removed_urls,
+        "activity_units": {
+            "new_today": "role_family",
+            "url_movement": "canonical_apply_url",
+        },
+    }
 
 
 legacy._order_clause = _live_order_clause
@@ -256,10 +286,10 @@ def live_stats() -> dict[str, object]:
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE first_seen_at >= now() - interval '24 hours'
                       AND removed_at IS NULL
-                ) AS new_today,
+                ) AS new_urls_today,
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE removed_at >= now() - interval '24 hours'
-                ) AS removed_today
+                ) AS removed_urls_today
             FROM postings
             WHERE source_mode='direct'
               AND target_match!='not_internship'
@@ -281,17 +311,11 @@ def live_stats() -> dict[str, object]:
 
     census = universe_summary(legacy.db, limit=1)
     census_summary = dict(census.get("summary") or {})
-    new_today = int(movement["new_today"] or 0)
-    removed_today = int(movement["removed_today"] or 0)
     return {
         "role_families": int(row["role_families"]),
         "active_listings": int(row["active_listings"]),
         "companies": int(row["companies"]),
-        "new_24h": new_today,
-        "new_today": new_today,
-        "removed_today": removed_today,
-        "net_today": new_today - removed_today,
-        "new_families_24h": int(row["new_families_today"]),
+        **_activity_stats(row, movement),
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
         "validated_sources": int(source_row["count"] or 0),
