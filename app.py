@@ -37,6 +37,7 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "24")
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "10")
     os.environ.setdefault("GAIA_ENABLE_CONVERSION_DIAGNOSTICS", "1")
+    os.environ.setdefault("GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS", "120")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
 
 from gaia.coverage_extensions import install_coverage_extensions  # noqa: E402
