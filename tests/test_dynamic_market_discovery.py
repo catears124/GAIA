@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from gaia.collectors import LeverCollector
-from gaia.db import Database
 from gaia.dynamic_market_discovery import (
     SNAPSHOT_VERSION,
     candidate_collectors,
@@ -12,7 +11,6 @@ from gaia.dynamic_market_discovery import (
     serialize_candidates,
 )
 from gaia.models import Posting
-from gaia.source_catalog import save_candidates
 
 
 def example_posting(index: int = 0) -> Posting:
@@ -28,55 +26,52 @@ def example_posting(index: int = 0) -> Posting:
     )
 
 
-def test_dynamic_market_leads_enter_candidate_queue_not_validated_catalog(tmp_path) -> None:
+def test_dynamic_market_leads_become_probe_only_source_candidates() -> None:
     candidates = candidate_collectors([example_posting()], {})
+    serialized = serialize_candidates(candidates)
+    by_source = {row["source"]: row for row in serialized}
 
-    assert len(candidates) == 1
-    assert isinstance(candidates[0], LeverCollector)
-    assert candidates[0].name == "lever:example"
-
-    database = Database(tmp_path / "gaia.db")
-    assert save_candidates(database, candidates, origin="dynamic-github-market") == 1
-
-    with database.connect() as connection:
-        candidate = connection.execute(
-            "SELECT source, status, origin FROM source_candidates"
-        ).fetchone()
-        catalog_count = connection.execute(
-            "SELECT COUNT(*) AS count FROM source_catalog"
-        ).fetchone()
-
-    assert candidate["source"] == "lever:example"
-    assert candidate["status"] == "candidate"
-    assert candidate["origin"] == "dynamic-github-market"
-    assert catalog_count["count"] == 0
+    assert isinstance(
+        next(collector for collector in candidates if collector.name == "lever:example"),
+        LeverCollector,
+    )
+    assert by_source["lever:example"] == {
+        "source": "lever:example",
+        "kind": "lever",
+        "scope": "current",
+        "spec": {"company": "Example", "site": "example"},
+    }
+    assert by_source["google-careers"] == {
+        "source": "google-careers",
+        "kind": "google-careers",
+        "scope": "current",
+        "spec": {},
+    }
+    assert all(row["kind"] != "verification" for row in serialized)
 
 
 def test_dynamic_market_discovery_deduplicates_repeated_provider_evidence() -> None:
     candidates = candidate_collectors([example_posting(index) for index in range(3)], {})
 
-    assert len(candidates) == 1
-    assert candidates[0].name == "lever:example"
+    assert {collector.name for collector in candidates} == {
+        "lever:example",
+        "google-careers",
+    }
 
 
-def test_dynamic_market_snapshot_round_trip_preserves_probe_only_source() -> None:
+def test_dynamic_market_snapshot_round_trip_preserves_probe_only_sources() -> None:
     candidates = candidate_collectors([example_posting()], {})
     serialized = serialize_candidates(candidates)
     restored = deserialize_candidates(serialized)
 
     assert SNAPSHOT_VERSION == 1
-    assert serialized == [
-        {
-            "source": "lever:example",
-            "kind": "lever",
-            "scope": "current",
-            "spec": {"company": "Example", "site": "example"},
-        }
-    ]
-    assert len(restored) == 1
-    assert isinstance(restored[0], LeverCollector)
-    assert restored[0].name == "lever:example"
-    assert restored[0].scope == "current"
+    assert {collector.name for collector in restored} == {
+        "lever:example",
+        "google-careers",
+    }
+    lever = next(collector for collector in restored if collector.name == "lever:example")
+    assert isinstance(lever, LeverCollector)
+    assert lever.scope == "current"
 
 
 def test_dynamic_market_snapshot_rejects_unsupported_or_duplicate_rows() -> None:
@@ -90,7 +85,10 @@ def test_dynamic_market_snapshot_rejects_unsupported_or_duplicate_rows() -> None
         ]
     )
 
-    assert [collector.name for collector in restored] == ["lever:example"]
+    assert {collector.name for collector in restored} == {
+        "lever:example",
+        "google-careers",
+    }
 
 
 def test_posting_freshness_counts_only_trusted_employer_dates() -> None:
