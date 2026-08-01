@@ -25,11 +25,13 @@ _PERMANENT_CONFIGURATION_ERRORS = (
     "database does not exist",
     "no pg_hba.conf entry",
     "invalid port number",
+    "tenant/user",
+    "tenant or user not found",
 )
 _PERMANENT_SQLSTATES = {
-    "28000",  # invalid_authorization_specification
-    "28P01",  # invalid_password
-    "3D000",  # invalid_catalog_name
+    "28000",
+    "28P01",
+    "3D000",
 }
 _STATE_BY_EXIT_CODE = {0: "ready", 1: "recovering", 2: "invalid", 3: "failed"}
 
@@ -46,7 +48,6 @@ class ReadinessResult:
 
 def is_retryable_database_error(error: BaseException) -> bool:
     """Separate transient database recovery from broken connection configuration."""
-
     sqlstate = getattr(error, "sqlstate", None)
     if sqlstate in _PERMANENT_SQLSTATES:
         return False
@@ -83,7 +84,6 @@ def _write_json(result: ReadinessResult, path_value: str | None) -> None:
 
 def probe_database(*, timeout_seconds: int, max_delay_seconds: float) -> ReadinessResult:
     """Return a machine-readable result for one bounded PostgreSQL readiness window."""
-
     started = time.monotonic()
     timeout_seconds = max(1, int(timeout_seconds))
     max_delay_seconds = max(1.0, float(max_delay_seconds))
@@ -95,129 +95,54 @@ def probe_database(*, timeout_seconds: int, max_delay_seconds: float) -> Readine
     try:
         url = _database_url(None)
     except (KeyError, RuntimeError, TypeError, ValueError) as exc:
-        return ReadinessResult(
-            exit_code=2,
-            state="invalid",
-            attempts=0,
-            elapsed_seconds=time.monotonic() - started,
-            reason=_single_line(exc),
-        )
+        return ReadinessResult(2, "invalid", 0, time.monotonic() - started, _single_line(exc))
 
     while time.monotonic() < deadline:
         attempt += 1
         remaining_before_connect = max(0.0, deadline - time.monotonic())
         connect_timeout = max(1, min(15, int(max_delay_seconds), max(1, int(remaining_before_connect))))
         try:
-            with psycopg.connect(
-                url,
-                connect_timeout=connect_timeout,
-                application_name="gaia-readiness",
-                prepare_threshold=None,
-            ) as connection:
+            with psycopg.connect(url, connect_timeout=connect_timeout, application_name="gaia-readiness", prepare_threshold=None) as connection:
                 connection.execute("SELECT 1").fetchone()
-            return ReadinessResult(
-                exit_code=0,
-                state="ready",
-                attempts=attempt,
-                elapsed_seconds=time.monotonic() - started,
-                reason="database accepted a read probe",
-            )
+            return ReadinessResult(0, "ready", attempt, time.monotonic() - started, "database accepted a read probe")
         except psycopg.Error as exc:
             last_error = _single_line(exc)
             last_sqlstate = getattr(exc, "sqlstate", None)
             if not is_retryable_database_error(exc):
-                return ReadinessResult(
-                    exit_code=2,
-                    state="invalid",
-                    attempts=attempt,
-                    elapsed_seconds=time.monotonic() - started,
-                    reason=last_error,
-                    sqlstate=last_sqlstate,
-                )
+                return ReadinessResult(2, "invalid", attempt, time.monotonic() - started, last_error, last_sqlstate)
             remaining = max(0.0, deadline - time.monotonic())
             if remaining <= 0:
                 break
             base = min(max_delay_seconds, 2 ** min(attempt, 5))
             delay = min(remaining, base + random.uniform(0.0, min(1.5, base / 3)))
-            print(
-                f"database not ready (attempt {attempt}): {last_error}; retrying in {delay:.1f}s",
-                file=sys.stderr,
-                flush=True,
-            )
+            print(f"database not ready (attempt {attempt}): {last_error}; retrying in {delay:.1f}s", file=sys.stderr, flush=True)
             if delay > 0:
                 time.sleep(delay)
-        except Exception as exc:  # A probe implementation failure is not a provider recovery signal.
-            return ReadinessResult(
-                exit_code=3,
-                state="failed",
-                attempts=attempt,
-                elapsed_seconds=time.monotonic() - started,
-                reason=_single_line(exc),
-            )
+        except Exception as exc:
+            return ReadinessResult(3, "failed", attempt, time.monotonic() - started, _single_line(exc))
 
-    return ReadinessResult(
-        exit_code=1,
-        state="recovering",
-        attempts=attempt,
-        elapsed_seconds=time.monotonic() - started,
-        reason=last_error,
-        sqlstate=last_sqlstate,
-    )
+    return ReadinessResult(1, "recovering", attempt, time.monotonic() - started, last_error, last_sqlstate)
 
 
 def wait_for_database(*, timeout_seconds: int, max_delay_seconds: float) -> int:
-    """Compatibility wrapper returning the stable readiness exit code."""
-
-    result = probe_database(
-        timeout_seconds=timeout_seconds,
-        max_delay_seconds=max_delay_seconds,
-    )
+    result = probe_database(timeout_seconds=timeout_seconds, max_delay_seconds=max_delay_seconds)
     stream = sys.stdout if result.exit_code == 0 else sys.stderr
-    print(
-        f"database state={result.state} attempts={result.attempts} "
-        f"elapsed={result.elapsed_seconds:.1f}s reason={result.reason}",
-        file=stream,
-        flush=True,
-    )
+    print(f"database state={result.state} attempts={result.attempts} elapsed={result.elapsed_seconds:.1f}s reason={result.reason}", file=stream, flush=True)
     return result.exit_code
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Wait for PostgreSQL readiness")
-    parser.add_argument(
-        "--timeout-seconds",
-        type=int,
-        default=int(os.getenv("GAIA_DB_RECOVERY_TIMEOUT", "600")),
-    )
-    parser.add_argument(
-        "--max-delay-seconds",
-        type=float,
-        default=float(os.getenv("GAIA_DB_RECOVERY_MAX_DELAY", "30")),
-    )
-    parser.add_argument(
-        "--github-output",
-        default=os.getenv("GITHUB_OUTPUT"),
-        help="Append readiness outputs for GitHub Actions callers",
-    )
-    parser.add_argument(
-        "--json-output",
-        default=os.getenv("GAIA_DB_READINESS_JSON"),
-        help="Atomically write the complete readiness result as JSON",
-    )
+    parser.add_argument("--timeout-seconds", type=int, default=int(os.getenv("GAIA_DB_RECOVERY_TIMEOUT", "600")))
+    parser.add_argument("--max-delay-seconds", type=float, default=float(os.getenv("GAIA_DB_RECOVERY_MAX_DELAY", "30")))
+    parser.add_argument("--github-output", default=os.getenv("GITHUB_OUTPUT"))
+    parser.add_argument("--json-output", default=os.getenv("GAIA_DB_READINESS_JSON"))
     args = parser.parse_args()
-    result = probe_database(
-        timeout_seconds=args.timeout_seconds,
-        max_delay_seconds=args.max_delay_seconds,
-    )
+    result = probe_database(timeout_seconds=args.timeout_seconds, max_delay_seconds=args.max_delay_seconds)
     _write_outputs(result, args.github_output)
     _write_json(result, args.json_output)
     stream = sys.stdout if result.exit_code == 0 else sys.stderr
-    print(
-        f"database state={result.state} attempts={result.attempts} "
-        f"elapsed={result.elapsed_seconds:.1f}s reason={result.reason}",
-        file=stream,
-        flush=True,
-    )
+    print(f"database state={result.state} attempts={result.attempts} elapsed={result.elapsed_seconds:.1f}s reason={result.reason}", file=stream, flush=True)
     raise SystemExit(result.exit_code)
 
 
