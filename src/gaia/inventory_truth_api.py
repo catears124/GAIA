@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from . import product_api
@@ -26,14 +27,14 @@ def readiness_thresholds() -> dict[str, int]:
 def classify_inventory(stats: dict[str, Any]) -> dict[str, Any]:
     thresholds = readiness_thresholds()
     observed = {key: int(stats.get(key) or 0) for key in thresholds}
-    deficits = {
-        key: max(0, thresholds[key] - observed[key])
-        for key in thresholds
-    }
+    deficits = {key: max(0, thresholds[key] - observed[key]) for key in thresholds}
     complete = not any(deficits.values())
+    ratios = [min(1.0, observed[key] / thresholds[key]) for key in thresholds]
+    completion_percent = round(100.0 * min(ratios), 1)
     return {
         "complete": complete,
         "state": "ready" if complete else "recovering",
+        "completion_percent": completion_percent,
         "observed": observed,
         "thresholds": thresholds,
         "deficits": deficits,
@@ -76,16 +77,27 @@ def install_inventory_truth_api(app: Any) -> None:
         stats = truthful_stats()
         recovery = dict(stats["recovery"])
         health["job_inventory"] = recovery
-        if not recovery["complete"]:
-            health["ok"] = False
-            health["stale"] = True
-            health["reason"] = "inventory_recovery"
-            progress = dict(health.get("progress") or {})
-            progress["stage"] = "inventory-recovery"
-            health["progress"] = progress
-            data = dict(health.get("data") or {})
-            last_run = dict(data.get("last_run") or {})
-            last_run["status"] = "partial"
-            data["last_run"] = last_run
-            health["data"] = data
-        return health
+        if recovery["complete"]:
+            return health
+
+        health["ok"] = False
+        health["stale"] = True
+        health["reason"] = "inventory_recovery"
+        progress = dict(health.get("progress") or {})
+        progress["stage"] = "inventory-recovery"
+        progress["completed"] = int(recovery["observed"]["active_listings"])
+        progress["total"] = int(recovery["thresholds"]["active_listings"])
+        health["progress"] = progress
+        data = dict(health.get("data") or {})
+        last_run = dict(data.get("last_run") or {})
+        last_run["status"] = "partial"
+        data["last_run"] = last_run
+        health["data"] = data
+        return JSONResponse(
+            status_code=503,
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Retry-After": "30",
+            },
+            content=health,
+        )
