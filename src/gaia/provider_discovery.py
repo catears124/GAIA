@@ -18,6 +18,7 @@ from .provider_collectors import (
 )
 from .quality import canonical_company
 from .rippling_collector import RipplingCollector
+from .teamtailor_collector import TeamtailorCollector
 
 PRIOR_YEAR_BLOCKED_HOSTS = {
     "github.com",
@@ -41,6 +42,7 @@ PRIOR_YEAR_HOSTED_PROVIDER_FRAGMENTS = (
     "workable.com",
     "recruitee.com",
     "rippling.com",
+    "teamtailor.com",
 )
 PRIOR_YEAR_JOB_PATH_MARKERS = (
     "/job/",
@@ -90,6 +92,7 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
     jobvite: dict[str, tuple[str, str]] = {}
     icims: dict[str, tuple[str, str]] = {}
     rippling: dict[str, tuple[str, str]] = {}
+    teamtailor: dict[str, tuple[str, str]] = {}
     oracle: dict[tuple[str, str], tuple[str, str]] = {}
     successfactors: dict[tuple[str, str], tuple[str, str]] = {}
     prior_year_domains: dict[str, Counter[str]] = {}
@@ -119,6 +122,15 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
             } else 0
             if slug_index < len(segments):
                 _prefer(rippling, segments[slug_index], posting.company, scope)
+            continue
+
+        if host.endswith(".teamtailor.com") and host not in {
+            "www.teamtailor.com",
+            "support.teamtailor.com",
+        }:
+            subdomain = host[: -len(".teamtailor.com")].split(".")[-1]
+            if subdomain:
+                _prefer(teamtailor, subdomain, posting.company, scope)
             continue
 
         if host.endswith(".icims.com") and "jobs" in segments:
@@ -191,6 +203,10 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
         collectors.append(collector)
     for slug, (company, scope) in rippling.items():
         collector = RipplingCollector(company, slug)
+        collector.scope = scope
+        collectors.append(collector)
+    for subdomain, (company, scope) in teamtailor.items():
+        collector = TeamtailorCollector(company, subdomain)
         collector.scope = scope
         collectors.append(collector)
     for (origin, site), (company, scope) in oracle.items():
