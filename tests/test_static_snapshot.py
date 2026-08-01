@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gaia import static_snapshot
 
 
@@ -20,12 +22,17 @@ def test_snapshot_key_is_stable_and_omits_default_values() -> None:
 
 
 def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MIN_ACTIVE_LISTINGS", "1")
     monkeypatch.setattr(
         static_snapshot,
         "live_health",
         lambda: {"inventory": {"latest_activity_at": "2026-07-31T00:00:00+00:00"}},
     )
-    monkeypatch.setattr(static_snapshot, "live_stats", lambda: {"active_listings": 2})
+    monkeypatch.setattr(
+        static_snapshot,
+        "live_stats",
+        lambda: {"active_listings": 2, "companies": 1, "new_today": 1},
+    )
     monkeypatch.setattr(
         static_snapshot,
         "live_facets",
@@ -143,3 +150,48 @@ def test_family_index_marks_snapshot_incomplete_when_safety_cap_is_reached(monke
     assert len(items) == 200
     assert total == 500
     assert complete is False
+
+
+def _snapshot(active: int, companies: int, new_today: int, *, complete: bool = True) -> dict[str, object]:
+    return {
+        "family_index": [{}] * active,
+        "family_index_total": active,
+        "family_index_complete": complete,
+        "responses": {
+            "/api/stats": {
+                "active_listings": active,
+                "companies": companies,
+                "new_today": new_today,
+            }
+        },
+    }
+
+
+def test_snapshot_rejects_impossible_homepage_metrics(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MIN_ACTIVE_LISTINGS", "1")
+    with pytest.raises(RuntimeError, match="new_today=29 exceeds active_listings=19"):
+        static_snapshot._validate_snapshot(_snapshot(19, 5, 29))
+
+
+def test_snapshot_rejects_catastrophic_inventory_collapse(monkeypatch) -> None:
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MIN_ACTIVE_LISTINGS", "100")
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MIN_RETAINED_FRACTION", "0.5")
+    with pytest.raises(RuntimeError, match="collapsed from 2101 to 400"):
+        static_snapshot._validate_snapshot(
+            _snapshot(400, 100, 20),
+            _snapshot(2101, 457, 2),
+        )
+
+
+def test_rejected_snapshot_does_not_overwrite_last_known_good(monkeypatch, tmp_path: Path) -> None:
+    output = tmp_path / "snapshot.json"
+    previous = _snapshot(2101, 457, 2)
+    output.write_text(json.dumps(previous), encoding="utf-8")
+    monkeypatch.setenv("GAIA_STATIC_SNAPSHOT_MIN_ACTIVE_LISTINGS", "100")
+    monkeypatch.setattr(static_snapshot, "build_snapshot", lambda: _snapshot(19, 5, 29))
+
+    with pytest.raises(RuntimeError, match="refusing degraded inventory snapshot"):
+        static_snapshot.write_snapshot(output)
+
+    assert json.loads(output.read_text(encoding="utf-8")) == previous
+    assert not output.with_suffix(".json.tmp").exists()
