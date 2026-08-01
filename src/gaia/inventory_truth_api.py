@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from . import product_api
@@ -63,28 +62,19 @@ def _stats_payload() -> dict[str, Any]:
     return stats
 
 
-def _recovery_response(payload: dict[str, Any]) -> JSONResponse:
-    return JSONResponse(
-        status_code=503,
-        headers={
-            "Cache-Control": "no-store, max-age=0",
-            "Retry-After": "30",
-        },
-        content=payload,
-    )
-
-
 def install_inventory_truth_api(app: Any) -> None:
-    """Make job-count completeness part of health and stats contracts."""
+    """Expose truthful live counts while distinguishing recovery from infrastructure outage.
+
+    A reachable database with incomplete inventory is a degraded product state, not a 503.
+    Returning live partial counts prevents the outage middleware from replacing fresher data
+    with the older static snapshot while health still reports `ok=false`.
+    """
 
     _remove_get_routes(app, "/api/health", "/api/stats")
 
     @app.get("/api/stats", response_model=None)
     def truthful_stats() -> Any:
-        stats = _stats_payload()
-        if stats["inventory_complete"]:
-            return stats
-        return _recovery_response(stats)
+        return _stats_payload()
 
     @app.get("/api/health", response_model=None)
     def truthful_health() -> Any:
@@ -99,7 +89,7 @@ def install_inventory_truth_api(app: Any) -> None:
             return health
 
         health["ok"] = False
-        health["stale"] = True
+        health["stale"] = False
         health["reason"] = "inventory_recovery"
         progress = dict(health.get("progress") or {})
         progress["stage"] = "inventory-recovery"
@@ -111,4 +101,4 @@ def install_inventory_truth_api(app: Any) -> None:
         last_run["status"] = "partial"
         data["last_run"] = last_run
         health["data"] = data
-        return _recovery_response(health)
+        return health
