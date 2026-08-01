@@ -32,10 +32,8 @@ def test_recovery_suppresses_expensive_work_without_claiming_success() -> None:
 
     assert "if: needs.database_gate.outputs.state == 'ready'" in inventory
     assert "Database recovery active; inventory fanout suppressed" in inventory
-
     assert "if: needs.readiness.outputs.state == 'ready'" in maintenance
     assert "Database recovery active; production maintenance suppressed" in maintenance
-
     assert "if: steps.gate.outputs.state == 'ready'" in reconcile
     assert "Database recovery active; reconciliation suppressed" in reconcile
 
@@ -55,21 +53,18 @@ def test_invalid_credentials_are_hard_failures_in_status_reporting() -> None:
 
 def test_unexpected_probe_errors_are_distinct_from_recovery() -> None:
     for name in WORKFLOWS:
-        text = workflow(name)
-        assert "probe failed unexpectedly" in text.lower(), name
+        assert "probe failed unexpectedly" in workflow(name).lower(), name
 
 
 def test_database_workflows_do_not_depend_on_one_stale_supabase_secret() -> None:
     fallback = "secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING"
-    for name in ("maintenance", "reconcile"):
+    for name in WORKFLOWS:
         text = workflow(name)
         assert fallback in text, name
         assert "Missing all supported database secrets" in text, name
 
 
-def test_maintenance_uses_session_url_fallback_for_migrations() -> None:
-    text = workflow("maintenance")
-    assert (
-        "secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL"
-        in text
-    )
+def test_write_jobs_prefer_session_url_but_retain_fallbacks() -> None:
+    fallback = "secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL"
+    assert fallback in workflow("maintenance")
+    assert fallback in workflow("inventory")
