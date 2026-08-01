@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from urllib.parse import SplitResult, parse_qs, urlsplit
 
 from .career_surface_collector import CareerSurfaceCollector, provider_kind
@@ -41,6 +42,21 @@ BLOCKED_DISCOVERY_HOSTS = {
     "www.workopia.io",
     "ycombinator.com",
     "www.ycombinator.com",
+}
+NATIVE_PROVIDER_KINDS = {
+    "greenhouse",
+    "lever",
+    "ashby",
+    "workday",
+    "smartrecruiters",
+    "recruitee",
+    "workable",
+    "jobvite",
+    "icims",
+    "oracle-cloud",
+    "successfactors",
+    "rippling",
+    "teamtailor",
 }
 JOB_PATH_MARKERS = (
     "/job/",
@@ -87,28 +103,68 @@ def _is_employer_hiring_surface(parts: SplitResult, *, source_mode: str) -> bool
     )
 
 
+def _domain_key(parts: SplitResult, company: str) -> tuple[str, str]:
+    host = parts.netloc.casefold().split(":", 1)[0]
+    kind = provider_kind(parts.geturl())
+    if kind:
+        # Unsupported hosted ATS products can put many employers behind one host.
+        # Keep those tenant-scoped until a first-class parser can extract the ATS key.
+        canonical = canonical_company(company) or company.strip()
+        return host, canonical.casefold()
+    return host, ""
+
+
 def _register_domain(
     mapping: dict[tuple[str, str], dict[str, object]],
     *,
     company: str,
-    host: str,
+    parts: SplitResult,
     scope: str,
     seed_url: str,
 ) -> None:
     canonical = canonical_company(company) or company.strip()
-    if not canonical:
+    host = parts.netloc.casefold().split(":", 1)[0]
+    if not canonical or not host:
         return
-    key = (canonical.casefold(), host)
+    key = _domain_key(parts, canonical)
     item = mapping.setdefault(
         key,
-        {"company": canonical, "scope": scope, "seeds": set()},
+        {
+            "host": host,
+            "scope": scope,
+            "seeds": set(),
+            "company_votes": Counter(),
+            "current_votes": Counter(),
+        },
     )
     if item["scope"] == "historical" and scope == "current":
         item["scope"] = "current"
-        item["company"] = canonical
     seeds = item["seeds"]
+    company_votes = item["company_votes"]
+    current_votes = item["current_votes"]
     assert isinstance(seeds, set)
+    assert isinstance(company_votes, Counter)
+    assert isinstance(current_votes, Counter)
     seeds.add(seed_url)
+    company_votes[canonical] += 1
+    if scope == "current":
+        current_votes[canonical] += 1
+
+
+def _domain_company(item: dict[str, object]) -> str:
+    company_votes = item["company_votes"]
+    current_votes = item["current_votes"]
+    assert isinstance(company_votes, Counter)
+    assert isinstance(current_votes, Counter)
+    return max(
+        company_votes,
+        key=lambda company: (
+            current_votes[company],
+            company_votes[company],
+            -len(company),
+            company.casefold(),
+        ),
+    )
 
 
 def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector]:
@@ -198,6 +254,12 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
                 _prefer(workable, subdomain, posting.company, scope)
             continue
 
+        kind = provider_kind(parts.geturl())
+        if kind in NATIVE_PROVIDER_KINDS:
+            # Native registry discovery owns these. A second generic source would
+            # duplicate work and can cross tenant boundaries on shared ATS hosts.
+            continue
+
         if (
             discover_domains
             and _is_employer_hiring_surface(parts, source_mode=posting.source_mode)
@@ -205,7 +267,7 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
             _register_domain(
                 domain_surfaces,
                 company=posting.company,
-                host=host,
+                parts=parts,
                 scope=scope,
                 seed_url=posting.apply_url,
             )
@@ -251,8 +313,8 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
         seeds = item["seeds"]
         assert isinstance(seeds, set)
         collector = CareerSurfaceCollector(
-            str(item["company"]),
-            urlsplit(next(iter(seeds))).netloc.casefold().split(":", 1)[0],
+            _domain_company(item),
+            str(item["host"]),
             sorted(str(seed) for seed in seeds),
         )
         collector.scope = str(item["scope"])
