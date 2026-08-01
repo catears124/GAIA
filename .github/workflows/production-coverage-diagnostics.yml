@@ -1,4 +1,4 @@
-name: Production source diagnostics
+name: Production coverage diagnostics
 
 on:
   push:
@@ -7,6 +7,8 @@ on:
       - src/gaia/production_coverage.py
       - src/gaia/product_api.py
       - src/gaia/api.py
+      - src/gaia/universe.py
+      - src/gaia/employer_census.py
       - .github/workflows/production-coverage-diagnostics.yml
   schedule:
     - cron: "17 * * * *"
@@ -35,11 +37,11 @@ jobs:
       - name: Install diagnostics
         run: python -m pip install --disable-pip-version-check --no-deps -e .
 
-      - name: Allow deployment to settle
+      - name: Allow deployment and reconcile to settle
         if: github.event_name == 'push'
-        run: sleep 45
+        run: sleep 75
 
-      - name: Fetch live health and source coverage
+      - name: Fetch live health, source coverage, and employer universe
         shell: bash
         run: |
           set -uo pipefail
@@ -58,20 +60,22 @@ jobs:
           }
           fetch health /api/health &
           fetch coverage /api/coverage &
+          fetch universe '/api/universe?limit=1' &
           wait
 
-      - name: Evaluate source diagnostics
+      - name: Evaluate production coverage
         id: evaluate
         shell: bash
         run: |
           set -euo pipefail
           health_status=$(tr -d '\r\n' < diagnostics/health.status)
           coverage_status=$(tr -d '\r\n' < diagnostics/coverage.status)
-          if [ "$health_status" != 200 ] || [ "$coverage_status" != 200 ]; then
-            printf '%s\n' '{"state":"failure","description":"Production health or coverage endpoint unavailable","total":0,"fresh":0,"unhealthy":0,"attention":[]}' > diagnostics/result.json
+          universe_status=$(tr -d '\r\n' < diagnostics/universe.status)
+          if [ "$health_status" != 200 ] || [ "$coverage_status" != 200 ] || [ "$universe_status" != 200 ]; then
+            printf '%s\n' '{"state":"failure","description":"Production health, source coverage, or employer universe endpoint unavailable","total":0,"fresh":0,"unhealthy":0,"attention":[]}' > diagnostics/result.json
           else
             python -m gaia.production_coverage \
-              diagnostics/health.json diagnostics/coverage.json \
+              diagnostics/health.json diagnostics/coverage.json diagnostics/universe.json \
               --output diagnostics/result.json
           fi
           state=$(jq -r '.state' diagnostics/result.json)
@@ -79,17 +83,21 @@ jobs:
           echo "state=$state" >> "$GITHUB_OUTPUT"
           echo "description=$description" >> "$GITHUB_OUTPUT"
           {
-            echo "### Production source diagnostics"
+            echo "### Production coverage diagnostics"
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
             echo "- Health HTTP: ${health_status}"
-            echo "- Coverage HTTP: ${coverage_status}"
+            echo "- Source coverage HTTP: ${coverage_status}"
+            echo "- Employer universe HTTP: ${universe_status}"
             count=$(jq '.attention | length' diagnostics/result.json)
             echo "- Sources requiring attention: ${count}"
             jq -r '.attention[]? | "  - \(.source): \(.reason) (status=\(.status // "unknown"), last_complete=\(.last_complete_at // "never"))"' diagnostics/result.json
+            if [ "$universe_status" = 200 ]; then
+              jq -r '(.summary // {}) as $s | "- Employer census: \($s.known_employers // 0) known, \($s.enumerated_employers // 0) enumerated, \($s.unresolved_employers // 0) unresolved, \($s.blind_spots // 0) blind spots"' diagnostics/universe.json
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish source diagnostic status
+      - name: Publish coverage diagnostic status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,10 +106,10 @@ jobs:
         shell: bash
         run: |
           state="${STATE:-failure}"
-          description="${DESCRIPTION:-Production source diagnostics did not complete}"
+          description="${DESCRIPTION:-Production coverage diagnostics did not complete}"
           payload=$(jq -n \
             --arg state "$state" \
-            --arg context gaia/source-diagnostics \
+            --arg context gaia/coverage-diagnostics \
             --arg description "${description:0:140}" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             '{state:$state,context:$context,description:$description,target_url:$target_url}')
@@ -113,15 +121,15 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -d "$payload"
 
-      - name: Upload source diagnostic evidence
+      - name: Upload coverage diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: production-source-diagnostics-${{ github.run_id }}
+          name: production-coverage-diagnostics-${{ github.run_id }}
           path: diagnostics/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Fail invalid diagnostic contracts
+      - name: Fail invalid coverage contracts
         if: always()
         run: test "$(jq -r '.state' diagnostics/result.json 2>/dev/null || echo failure)" != failure

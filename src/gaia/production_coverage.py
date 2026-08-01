@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-
 BAD_STATUSES = {"broken", "blocked", "truncated", "partial"}
 
 
@@ -66,9 +65,50 @@ def _attention_reason(row: dict[str, Any], *, now: datetime) -> str | None:
     return None
 
 
+def _employer_counts(universe: object) -> tuple[tuple[int, int, int, int] | None, str | None]:
+    if not isinstance(universe, dict):
+        return None, "Employer universe evidence is missing"
+    if universe.get("ready") is not True:
+        reason = str(universe.get("reason") or "read model is not ready")
+        return None, f"Employer universe is not ready: {reason}"
+    summary = universe.get("summary")
+    frontier = universe.get("frontier")
+    if not isinstance(summary, dict) or not isinstance(frontier, list):
+        return None, "Employer universe contract omitted summary or frontier"
+
+    known = _integer(summary.get("known_employers"))
+    enumerated = _integer(summary.get("enumerated_employers"))
+    unresolved = _integer(summary.get("unresolved_employers"))
+    blind_spots = _integer(summary.get("blind_spots"))
+    if (
+        known is None
+        or enumerated is None
+        or unresolved is None
+        or blind_spots is None
+        or known < 0
+        or enumerated < 0
+        or unresolved < 0
+        or blind_spots < 0
+        or enumerated > known
+        or unresolved > known
+        or enumerated + unresolved != known
+        or blind_spots > unresolved
+    ):
+        return None, "Employer universe counts are invalid or contradictory"
+    if known == 0:
+        return None, "Employer universe contains no employers"
+    if enumerated == 0:
+        return None, "Employer universe contains no independently enumerated employers"
+    if universe.get("rebuild_required") is True:
+        gap = _integer(summary.get("coverage_gap_employers")) or 0
+        return None, f"Employer universe requires rebuild; {gap} evidence-backed employers are missing"
+    return (known, enumerated, unresolved, blind_spots), None
+
+
 def evaluate_coverage(
     health: object,
     coverage: object,
+    universe: object,
     *,
     now: datetime | None = None,
 ) -> CoverageReport:
@@ -96,6 +136,12 @@ def evaluate_coverage(
         return CoverageReport(
             "failure", "Coverage evidence omitted source diagnostics", total, fresh, unhealthy, []
         )
+
+    employer_counts, employer_error = _employer_counts(universe)
+    if employer_error:
+        return CoverageReport("failure", employer_error, total, fresh, unhealthy, [])
+    assert employer_counts is not None
+    known, enumerated, unresolved, blind_spots = employer_counts
 
     attention: list[SourceAttention] = []
     seen: set[str] = set()
@@ -148,13 +194,17 @@ def evaluate_coverage(
             unhealthy,
             attention,
         )
+    employer_detail = (
+        f"{known} employers covered; {enumerated} enumerated, "
+        f"{unresolved} unresolved, {blind_spots} blind spots"
+    )
     if unhealthy or attention:
         count = max(unhealthy, len(attention))
         noun = "source" if count == 1 else "sources"
         verb = "needs" if count == 1 else "need"
         return CoverageReport(
             "pending",
-            f"Inventory catch-up {fresh}/{total}; {count} {noun} {verb} attention",
+            f"Inventory catch-up {fresh}/{total}; {count} {noun} {verb} attention; {employer_detail}",
             total,
             fresh,
             unhealthy,
@@ -171,7 +221,7 @@ def evaluate_coverage(
         )
     return CoverageReport(
         "success",
-        f"All {total} configured sources are fresh",
+        f"All {total} configured sources are fresh; {employer_detail}",
         total,
         fresh,
         unhealthy,
@@ -183,17 +233,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("health", type=Path)
     parser.add_argument("coverage", type=Path)
+    parser.add_argument("universe", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         health = json.loads(args.health.read_text(encoding="utf-8"))
         coverage = json.loads(args.coverage.read_text(encoding="utf-8"))
+        universe = json.loads(args.universe.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         report = CoverageReport(
             "failure", f"Could not parse production evidence: {error}", 0, 0, 0, []
         )
     else:
-        report = evaluate_coverage(health, coverage)
+        report = evaluate_coverage(health, coverage, universe)
     payload = json.dumps(asdict(report), separators=(",", ":"), sort_keys=True)
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     temporary.write_text(payload, encoding="utf-8")
