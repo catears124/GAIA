@@ -17,6 +17,7 @@ from .provider_collectors import (
     WorkableCollector,
 )
 from .quality import canonical_company
+from .rippling_collector import RipplingCollector
 
 PRIOR_YEAR_BLOCKED_HOSTS = {
     "github.com",
@@ -88,6 +89,7 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
     workable: dict[str, tuple[str, str]] = {}
     jobvite: dict[str, tuple[str, str]] = {}
     icims: dict[str, tuple[str, str]] = {}
+    rippling: dict[str, tuple[str, str]] = {}
     oracle: dict[tuple[str, str], tuple[str, str]] = {}
     successfactors: dict[tuple[str, str], tuple[str, str]] = {}
     prior_year_domains: dict[str, Counter[str]] = {}
@@ -105,6 +107,18 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
 
         if host == "jobs.jobvite.com" and segments:
             _prefer(jobvite, segments[0], posting.company, scope)
+            continue
+
+        if host == "ats.rippling.com" and segments:
+            slug_index = 1 if segments[0].casefold() in {
+                "en-us",
+                "en-gb",
+                "es-419",
+                "fr-fr",
+                "de-de",
+            } else 0
+            if slug_index < len(segments):
+                _prefer(rippling, segments[slug_index], posting.company, scope)
             continue
 
         if host.endswith(".icims.com") and "jobs" in segments:
@@ -173,6 +187,10 @@ def provider_collectors_from_postings(postings: list[Posting]) -> list[Collector
         collectors.append(collector)
     for host, (company, scope) in icims.items():
         collector = ICIMSCollector(company, host)
+        collector.scope = scope
+        collectors.append(collector)
+    for slug, (company, scope) in rippling.items():
+        collector = RipplingCollector(company, slug)
         collector.scope = scope
         collectors.append(collector)
     for (origin, site), (company, scope) in oracle.items():
