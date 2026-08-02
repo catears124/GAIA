@@ -104,15 +104,36 @@ def _filter_recovered(result: CollectorResult, leads: list[Posting]) -> Collecto
     by_url = {item.canonical_apply_url: item for item in leads}
     accepted: list[Posting] = []
     for posting in result.postings:
-        lead = by_url.get(posting.canonical_apply_url)
-        if lead is None:
-            continue
         if posting.target_match not in TARGET_MATCHES:
             continue
-        if title_similarity(lead.title, posting.title) < 0.55:
+        if not is_actionable_application_url(posting.canonical_apply_url):
+            continue
+
+        lead = by_url.get(posting.canonical_apply_url)
+        threshold = 0.55
+        if lead is None:
+            # Employer job pages frequently redirect from a public-index URL to a
+            # canonical ATS URL. Allow that only when the role title is a very strong
+            # match to one of the selected leads from the same company/host batch.
+            ranked = sorted(
+                (
+                    (title_similarity(item.title, posting.title), item)
+                    for item in leads
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            if not ranked:
+                continue
+            similarity, lead = ranked[0]
+            threshold = 0.8
+        else:
+            similarity = title_similarity(lead.title, posting.title)
+        if similarity < threshold:
             continue
         posting.source_mode = "verification"
         accepted.append(posting)
+
     result.postings = accepted
     if not accepted and result.status == "verified":
         result.status = "unstructured"
