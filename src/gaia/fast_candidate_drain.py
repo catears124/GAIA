@@ -24,7 +24,7 @@ _FAST_KINDS = (
 
 
 def _claim_fast_candidates(worker, *, limit: int, lease_seconds: int) -> list[ClaimedTarget]:
-    """Lease bounded ATS candidates before expensive recursive domain probes."""
+    """Lease the highest-signal due ATS candidates before speculative probes."""
     with worker.database.connect() as connection:
         rows = connection.execute(
             """
@@ -37,6 +37,11 @@ def _claim_fast_candidates(worker, *, limit: int, lease_seconds: int) -> list[Cl
                   AND kind = ANY(%s)
                 ORDER BY
                   (scope='current') DESC,
+                  (origin='curated-registry') DESC,
+                  (status='candidate') DESC,
+                  consecutive_failures ASC,
+                  evidence_count DESC,
+                  last_seen_at DESC,
                   CASE kind
                     WHEN 'greenhouse' THEN 0
                     WHEN 'lever' THEN 1
@@ -51,7 +56,6 @@ def _claim_fast_candidates(worker, *, limit: int, lease_seconds: int) -> list[Cl
                     WHEN 'workday-search' THEN 10
                     ELSE 11
                   END,
-                  evidence_count DESC,
                   next_probe_at,
                   source
                 FOR UPDATE SKIP LOCKED
@@ -122,7 +126,7 @@ async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[
     gaps_after = int(after_funnel.get("verified_postings_missing_family") or 0)
     return {
         "status": "ok",
-        "candidate_strategy": "fast_ats_first",
+        "candidate_strategy": "curated_high_evidence_ats_first",
         "candidate_lease_seconds": candidate_lease,
         "claimed_candidates": len(claimed_targets),
         "promoted_sources": promoted,
