@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -133,83 +132,71 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
         BaseDatabase.migrate(self)
 
     def rebuild_families(self) -> int:
-        """Publish families once at a time without blocking a serverless request.
+        """Publish families once at a time with an automatically released lock.
 
-        A full rebuild is destructive inside its transaction: it replaces the family
-        read model. Concurrent rebuilds caused unique-key violations, deadlocks, and
-        verified roles disappearing. Workers now use a PostgreSQL advisory lock. A
-        caller waits at most five seconds; if another publisher remains active it skips
-        safely and lets the next bounded repair retry.
+        A full rebuild replaces the family read model inside one transaction. Concurrent
+        rebuilds caused unique-key violations, deadlocks, and verified roles disappearing.
+        The transaction-scoped PostgreSQL advisory lock is safe with Supabase's transaction
+        pooler: it is released automatically on commit, rollback, timeout, or disconnect.
+        A busy caller returns immediately and the bounded maintenance loop retries.
         """
-        lock_name = f"gaia:family-rebuild:{self.schema}"
+        lock_name = f"gaia:family-rebuild-v2:{self.schema}"
         with self.connect() as lock_connection:
-            acquired = False
-            for _ in range(20):
-                row = lock_connection.execute(
-                    "SELECT pg_try_advisory_lock(hashtext(%s)) AS acquired",
-                    (lock_name,),
-                ).fetchone()
-                acquired = bool(dict(row or {}).get("acquired"))
-                if acquired:
-                    break
-                time.sleep(0.25)
-            if not acquired:
+            row = lock_connection.execute(
+                "SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS acquired",
+                (lock_name,),
+            ).fetchone()
+            if not bool(dict(row or {}).get("acquired")):
                 return 0
 
-            try:
-                super().rebuild_families()
-                with self.connect() as connection:
-                    connection.execute(
-                        """
-                        WITH normalized AS (
-                            SELECT
-                                family_key,
-                                COALESCE(
-                                    (
-                                        SELECT jsonb_agg(
-                                            CASE
-                                                WHEN opening->>'source_mode'='verification' THEN
-                                                    jsonb_set(
-                                                        jsonb_set(
-                                                            opening,
-                                                            '{source_mode}',
-                                                            '"direct"'::jsonb,
-                                                            TRUE
-                                                        ),
-                                                        '{verification_mode}',
-                                                        '"employer-page"'::jsonb,
-                                                        TRUE
-                                                    )
-                                                ELSE opening
-                                            END
-                                            ORDER BY ordinality
-                                        )
-                                        FROM jsonb_array_elements(openings)
-                                            WITH ORDINALITY AS item(opening, ordinality)
-                                    ),
-                                    '[]'::jsonb
-                                ) AS normalized_openings,
+            super().rebuild_families()
+            with self.connect() as connection:
+                connection.execute(
+                    """
+                    WITH normalized AS (
+                        SELECT
+                            family_key,
+                            COALESCE(
                                 (
-                                    SELECT COUNT(*)
-                                    FROM jsonb_array_elements(openings) AS opening
-                                    WHERE opening->>'source_mode' IN ('direct','verification')
-                                )::integer AS verified_openings
-                            FROM families
-                        )
-                        UPDATE families AS family
-                        SET openings=normalized.normalized_openings,
-                            direct_openings=normalized.verified_openings,
-                            backstop_openings=family.opening_count-normalized.verified_openings
-                        FROM normalized
-                        WHERE family.family_key=normalized.family_key
-                        """
+                                    SELECT jsonb_agg(
+                                        CASE
+                                            WHEN opening->>'source_mode'='verification' THEN
+                                                jsonb_set(
+                                                    jsonb_set(
+                                                        opening,
+                                                        '{source_mode}',
+                                                        '"direct"'::jsonb,
+                                                        TRUE
+                                                    ),
+                                                    '{verification_mode}',
+                                                    '"employer-page"'::jsonb,
+                                                    TRUE
+                                                )
+                                            ELSE opening
+                                        END
+                                        ORDER BY ordinality
+                                    )
+                                    FROM jsonb_array_elements(openings)
+                                        WITH ORDINALITY AS item(opening, ordinality)
+                                ),
+                                '[]'::jsonb
+                            ) AS normalized_openings,
+                            (
+                                SELECT COUNT(*)
+                                FROM jsonb_array_elements(openings) AS opening
+                                WHERE opening->>'source_mode' IN ('direct','verification')
+                            )::integer AS verified_openings
+                        FROM families
                     )
-                return 1
-            finally:
-                lock_connection.execute(
-                    "SELECT pg_advisory_unlock(hashtext(%s))",
-                    (lock_name,),
+                    UPDATE families AS family
+                    SET openings=normalized.normalized_openings,
+                        direct_openings=normalized.verified_openings,
+                        backstop_openings=family.opening_count-normalized.verified_openings
+                    FROM normalized
+                    WHERE family.family_key=normalized.family_key
+                    """
                 )
+            return 1
 
 
 __all__ = [
