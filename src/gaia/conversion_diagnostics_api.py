@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 
+from . import conversion_funnel as _conversion_funnel
 from .conversion_funnel import (
     build_report,
     failure_counts,
@@ -15,6 +17,46 @@ from .fast_candidate_drain import drain_candidates
 from .fresh_lead_retry import retry_fresh_leads
 from .lead_promotion import promote_leads
 from .maintenance_api import _request_allowed
+
+
+def _rollback(connection: Any) -> None:
+    """Clear PostgreSQL's aborted transaction state after a diagnostic timeout."""
+    try:
+        connection.rollback()
+    except Exception:
+        pass
+
+
+def _isolated_safe_rows(
+    connection: Any,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> list[dict[str, Any]]:
+    try:
+        return _conversion_funnel._rows(connection, sql, params)
+    except Exception as error:
+        _rollback(connection)
+        return [{"diagnostic_error": repr(error)}]
+
+
+def _isolated_safe_row(
+    connection: Any,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> dict[str, Any]:
+    try:
+        return _conversion_funnel._row(connection, sql, params)
+    except Exception as error:
+        _rollback(connection)
+        return {"diagnostic_error": repr(error)}
+
+
+# build_report deliberately treats individual sections as best-effort. PostgreSQL,
+# unlike SQLite, leaves the whole transaction aborted after one statement timeout.
+# Install rollback-aware section readers so one expensive sample cannot suppress the
+# counters, candidate drain, publication repair, and every later section.
+_conversion_funnel._safe_rows = _isolated_safe_rows
+_conversion_funnel._safe_row = _isolated_safe_row
 
 
 def install_conversion_diagnostics_api(app: FastAPI) -> None:
