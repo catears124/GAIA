@@ -12,17 +12,19 @@ async def retry_fresh_leads(
     hours: int,
     retry_after_minutes: int = 10,
 ) -> dict[str, object]:
-    """Retry only recent leads that previously failed for transient reasons.
+    """Retry recent leads that previously failed for transient reasons.
 
-    Old or never-actionable inventory is deliberately excluded. This lane targets jobs
-    discovered during the last 24 hours whose employer page was blocked, timed out, or
-    returned unstructured content on an earlier attempt. A row-locking reset lets the
-    normal lead promoter claim them safely without duplicating concurrent workers.
+    The reset set is intentionally small enough for a serverless request, while the
+    verification claim is wider. This matters because the normal lead queue can contain
+    newer unchecked rows; claiming only ``limit`` rows could repeatedly skip the exact
+    failed rows this function just reset. A 4x claim window keeps the existing atomic
+    queue semantics while making the reset rows very likely to execute in the same run.
     """
     from .live_inventory import LiveDatabase
 
     bounded_limit = max(1, min(int(limit), 64))
     bounded_retry = max(5, min(int(retry_after_minutes), 180))
+    verification_limit = min(64, max(bounded_limit, bounded_limit * 4))
     database = LiveDatabase(migrate=False)
     started_at = datetime.now(UTC)
 
@@ -53,7 +55,7 @@ async def retry_fresh_leads(
         ).fetchall()
 
     result = await promote_leads(
-        limit=bounded_limit,
+        limit=verification_limit,
         concurrency=concurrency,
         hours=hours,
         max_age_days=1,
@@ -77,6 +79,7 @@ async def retry_fresh_leads(
 
     result["fresh_retry_reset"] = len(reset_rows)
     result["fresh_retry_after_minutes"] = bounded_retry
+    result["verification_claim_limit"] = verification_limit
     result["fresh_retry_candidates"] = [
         {
             "company": str(row["company"]),
