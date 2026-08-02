@@ -20,15 +20,15 @@ permissions:
   statuses: write
 
 concurrency:
-  group: verified-job-conversion-funnel-v3
+  group: verified-job-conversion-funnel-v4
   cancel-in-progress: false
 
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
-      - name: Capture baseline, bulk drains, repair, and verify
+      - name: Capture baseline, sequential bulk drains, repair, and verify
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -45,9 +45,9 @@ jobs:
             local i="$1"
             local code
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 52 \
+              --connect-timeout 10 --max-time 70 \
               --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
-              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=64&concurrency=12&hours=24&timeout_seconds=45" || printf '000')
+              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=64&concurrency=12&hours=24&timeout_seconds=60" || printf '000')
             jq -c --arg batch "$i" --arg code "$code" '{batch:$batch,http:$code} + (if type=="object" then . else {body:.} end)' \
               "evidence/drain-${i}.json" > "evidence/drain-${i}.ndjson" 2>/dev/null || true
           }
@@ -55,27 +55,26 @@ jobs:
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
           before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
 
-          # Avoid the previous 128-request connection stampede. Four bounded bulk
-          # drains let each worker claim up to 64 candidates and use its internal
-          # concurrency pool, while still allowing independent progress.
-          for wave in $(seq 0 3); do
-            start=$((wave * 4 + 1))
-            end=$((start + 3))
-            for i in $(seq "$start" "$end"); do
-              drain_bulk "$i" &
-            done
-            wait
-            curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 90 \
-              "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-              > "evidence/repair-${wave}.json" || true
+          # Previous parallel waves collided on candidate leases and database connections.
+          # Sequential bounded drains let each request consume a full ATS batch before the
+          # next request claims work. Repair publication every three drains so converted
+          # postings become visible during the same run.
+          for i in $(seq 1 12); do
+            drain_bulk "$i"
+            if [ $((i % 3)) -eq 0 ]; then
+              curl --silent --show-error --location --request POST --user-agent "$ua" \
+                --connect-timeout 10 --max-time 120 \
+                "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" \
+                > "evidence/repair-$((i / 3)).json" || true
+              sleep 5
+            fi
           done
           cat evidence/drain-*.ndjson | sort -t: -k2,2n > evidence/drains.ndjson
 
           sleep 20
           curl --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 90 \
-            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
+            --connect-timeout 10 --max-time 120 \
+            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" \
             > evidence/repair-final.json || true
 
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/after.json
@@ -101,7 +100,7 @@ jobs:
             echo "- Due candidates: ${due}"
             echo "- Publication gaps: ${gaps}"
             echo "- Candidates claimed: ${claimed}"
-            echo "- Sources promoted by bounded drains: ${promoted}"
+            echo "- Sources promoted by sequential drains: ${promoted}"
             echo ""
             echo "### Drain responses"
             cat evidence/drains.ndjson
