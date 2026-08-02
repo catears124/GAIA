@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import FastAPI, HTTPException, Request
@@ -46,13 +47,31 @@ def install_conversion_diagnostics_api(app: FastAPI) -> None:
         limit: int = 24,
         concurrency: int = 8,
         hours: int = 24,
+        timeout_seconds: int = 42,
     ) -> dict[str, object]:
         authorize(request)
-        return await drain_candidates(
-            limit=max(1, min(int(limit), 64)),
-            concurrency=max(1, min(int(concurrency), 12)),
-            hours=max(1, min(int(hours), 720)),
-        )
+        bounded_limit = max(1, min(int(limit), 64))
+        bounded_concurrency = max(1, min(int(concurrency), 12))
+        bounded_timeout = max(5, min(int(timeout_seconds), 45))
+        try:
+            return await asyncio.wait_for(
+                drain_candidates(
+                    limit=bounded_limit,
+                    concurrency=bounded_concurrency,
+                    hours=max(1, min(int(hours), 720)),
+                ),
+                timeout=bounded_timeout,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=408,
+                detail={
+                    "status": "candidate_drain_timeout",
+                    "limit": bounded_limit,
+                    "concurrency": bounded_concurrency,
+                    "timeout_seconds": bounded_timeout,
+                },
+            ) from exc
 
     @app.post(
         "/api/maintenance/diagnostics/repair-publication",
