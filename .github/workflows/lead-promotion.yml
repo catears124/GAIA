@@ -1,5 +1,6 @@
 name: Lead promotion to verified jobs
 
+# The push trigger intentionally runs after the production endpoint deploys.
 on:
   push:
     branches: [main]
