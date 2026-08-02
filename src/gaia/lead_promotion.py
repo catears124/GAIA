@@ -22,7 +22,31 @@ def _identity(row: dict[str, object]) -> str:
     )
 
 
-def _load_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]:
+def _posting_from_row(row: dict[str, object]) -> Posting:
+    return Posting(
+        company=str(row["company"]),
+        title=str(row["title"]),
+        apply_url=str(row["apply_url"]),
+        source=str(row["source"]),
+        source_id=str(row["source_id"]),
+        locations=list(row.get("locations") or []),
+        source_mode=str(row["source_mode"]),
+        description=str(row.get("description") or ""),
+        employment_type=str(row.get("employment_type") or ""),
+        posted_at=row.get("posted_at"),
+        updated_at=row.get("updated_at"),
+        posted_raw=row.get("posted_raw"),
+        posted_precision=str(row.get("posted_precision") or "unknown"),
+        posted_confidence=str(row.get("posted_confidence") or "unknown"),
+        category=str(row.get("category") or "other"),
+        season=row.get("season"),
+        year=row.get("year"),
+        target_match=str(row.get("target_match") or "unknown"),
+    )
+
+
+def _claim_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]:
+    """Atomically reserve fresh lead pages so overlapping workers do not duplicate work."""
     scan_limit = max(limit * 8, 128)
     with database.connect() as connection:
         verified_rows = connection.execute(
@@ -35,6 +59,8 @@ def _load_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]
             """,
             (list(TARGET_MATCHES),),
         ).fetchall()
+        verified_identities = {_identity(dict(row)) for row in verified_rows}
+
         lead_rows = connection.execute(
             """
             SELECT posting_key,company,title,locations,apply_url,canonical_apply_url,
@@ -49,58 +75,55 @@ def _load_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]
               AND COALESCE(link_status,'unchecked') NOT IN ('closed','invalid','verified')
               AND (
                 link_checked_at IS NULL
-                OR link_checked_at < now() - interval '6 hours'
+                OR (
+                  COALESCE(link_status,'unchecked')='checking'
+                  AND link_checked_at < now() - interval '15 minutes'
+                )
+                OR (
+                  COALESCE(link_status,'unchecked')!='checking'
+                  AND link_checked_at < now() - interval '6 hours'
+                )
               )
             ORDER BY
-              (first_seen_at >= now() - interval '48 hours') DESC,
+              (first_seen_at >= now() - interval '24 hours') DESC,
               (COALESCE(link_status,'unchecked')='unchecked') DESC,
               first_seen_at DESC,
               last_seen_at DESC,
               posting_key
+            FOR UPDATE SKIP LOCKED
             LIMIT %s
             """,
             (list(_BACKSTOP_MODES), list(TARGET_MATCHES), max_age_days, scan_limit),
         ).fetchall()
 
-    verified_identities = {_identity(dict(row)) for row in verified_rows}
-    selected: list[Posting] = []
-    seen: set[str] = set()
-    for raw in lead_rows:
-        row = dict(raw)
-        identity = _identity(row)
-        if identity in verified_identities or identity in seen:
-            continue
-        url = str(row["canonical_apply_url"])
-        if not is_actionable_application_url(url):
-            continue
-        host = urlsplit(url).netloc.casefold()
-        if not host:
-            continue
-        seen.add(identity)
-        selected.append(
-            Posting(
-                company=str(row["company"]),
-                title=str(row["title"]),
-                apply_url=str(row["apply_url"]),
-                source=str(row["source"]),
-                source_id=str(row["source_id"]),
-                locations=list(row.get("locations") or []),
-                source_mode=str(row["source_mode"]),
-                description=str(row.get("description") or ""),
-                employment_type=str(row.get("employment_type") or ""),
-                posted_at=row.get("posted_at"),
-                updated_at=row.get("updated_at"),
-                posted_raw=row.get("posted_raw"),
-                posted_precision=str(row.get("posted_precision") or "unknown"),
-                posted_confidence=str(row.get("posted_confidence") or "unknown"),
-                category=str(row.get("category") or "other"),
-                season=row.get("season"),
-                year=row.get("year"),
-                target_match=str(row.get("target_match") or "unknown"),
+        selected: list[Posting] = []
+        selected_keys: list[str] = []
+        seen: set[str] = set()
+        for raw in lead_rows:
+            row = dict(raw)
+            identity = _identity(row)
+            if identity in verified_identities or identity in seen:
+                continue
+            url = str(row["canonical_apply_url"])
+            if not is_actionable_application_url(url):
+                continue
+            if not urlsplit(url).netloc:
+                continue
+            seen.add(identity)
+            selected.append(_posting_from_row(row))
+            selected_keys.append(str(row["posting_key"]))
+            if len(selected) >= limit:
+                break
+
+        if selected_keys:
+            connection.execute(
+                """
+                UPDATE postings
+                SET link_checked_at=now(), link_status='checking'
+                WHERE posting_key = ANY(%s)
+                """,
+                (selected_keys,),
             )
-        )
-        if len(selected) >= limit:
-            break
     return selected
 
 
@@ -171,7 +194,7 @@ async def promote_leads(
     before_funnel = dict(before.get("funnel") or {})
     before_jobs = int(before_funnel.get("new_verified_jobs_window") or 0)
 
-    leads = _load_due_leads(
+    leads = _claim_due_leads(
         database,
         limit=bounded_limit,
         max_age_days=bounded_age,
@@ -268,7 +291,8 @@ async def promote_leads(
                 )
             for status in ("blocked", "error", "unverified"):
                 urls = sorted(
-                    url for url, observed_status in attempted_status.items()
+                    url
+                    for url, observed_status in attempted_status.items()
                     if observed_status == status
                 )
                 if urls:
