@@ -19,7 +19,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: verified-job-conversion-funnel
+  group: verified-job-conversion-funnel-v2
   cancel-in-progress: false
 
 jobs:
@@ -54,8 +54,6 @@ jobs:
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
           before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
 
-          # Four bounded waves avoid Vercel request limits while claiming and validating
-          # 64 independent ATS candidates. Database leases prevent duplicate claims.
           for wave in $(seq 0 3); do
             start=$((wave * 16 + 1))
             end=$((start + 15))
@@ -70,7 +68,6 @@ jobs:
           done
           cat evidence/drain-*.ndjson | sort -t: -k2,2n > evidence/drains.ndjson
 
-          # Give newly scheduled sources a bounded opportunity to crawl and publish.
           sleep 20
           curl --silent --show-error --location --request POST --user-agent "$ua" \
             --connect-timeout 10 --max-time 90 \
