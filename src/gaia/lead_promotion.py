@@ -46,7 +46,11 @@ def _load_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]
               AND source_mode = ANY(%s)
               AND target_match = ANY(%s)
               AND first_seen_at >= now() - (%s * interval '1 day')
-              AND COALESCE(link_status,'unchecked') NOT IN ('closed','invalid')
+              AND COALESCE(link_status,'unchecked') NOT IN ('closed','invalid','verified')
+              AND (
+                link_checked_at IS NULL
+                OR link_checked_at < now() - interval '6 hours'
+              )
             ORDER BY
               (first_seen_at >= now() - interval '48 hours') DESC,
               (COALESCE(link_status,'unchecked')='unchecked') DESC,
@@ -100,36 +104,33 @@ def _load_due_leads(database, *, limit: int, max_age_days: int) -> list[Posting]
     return selected
 
 
+def _best_lead(posting: Posting, leads: list[Posting]) -> tuple[Posting | None, float]:
+    exact = next(
+        (item for item in leads if item.canonical_apply_url == posting.canonical_apply_url),
+        None,
+    )
+    if exact is not None:
+        return exact, title_similarity(exact.title, posting.title)
+    ranked = sorted(
+        ((title_similarity(item.title, posting.title), item) for item in leads),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    return (ranked[0][1], ranked[0][0]) if ranked else (None, 0.0)
+
+
 def _filter_recovered(result: CollectorResult, leads: list[Posting]) -> CollectorResult:
-    by_url = {item.canonical_apply_url: item for item in leads}
     accepted: list[Posting] = []
     for posting in result.postings:
         if posting.target_match not in TARGET_MATCHES:
             continue
         if not is_actionable_application_url(posting.canonical_apply_url):
             continue
-
-        lead = by_url.get(posting.canonical_apply_url)
-        threshold = 0.55
+        lead, similarity = _best_lead(posting, leads)
         if lead is None:
-            # Employer job pages frequently redirect from a public-index URL to a
-            # canonical ATS URL. Allow that only when the role title is a very strong
-            # match to one of the selected leads from the same company/host batch.
-            ranked = sorted(
-                (
-                    (title_similarity(item.title, posting.title), item)
-                    for item in leads
-                ),
-                key=lambda item: item[0],
-                reverse=True,
-            )
-            if not ranked:
-                continue
-            similarity, lead = ranked[0]
-            threshold = 0.8
-        else:
-            similarity = title_similarity(lead.title, posting.title)
-        if similarity < threshold:
+            continue
+        exact_url = lead.canonical_apply_url == posting.canonical_apply_url
+        if similarity < (0.55 if exact_url else 0.8):
             continue
         posting.source_mode = "verification"
         accepted.append(posting)
@@ -138,6 +139,18 @@ def _filter_recovered(result: CollectorResult, leads: list[Posting]) -> Collecto
     if not accepted and result.status == "verified":
         result.status = "unstructured"
     return result
+
+
+def _result_lead_urls(result: CollectorResult, leads: list[Posting]) -> set[str]:
+    matched: set[str] = set()
+    for posting in result.postings:
+        lead, similarity = _best_lead(posting, leads)
+        if lead is None:
+            continue
+        exact_url = lead.canonical_apply_url == posting.canonical_apply_url
+        if similarity >= (0.55 if exact_url else 0.8):
+            matched.add(lead.canonical_apply_url)
+    return matched
 
 
 async def promote_leads(
@@ -190,13 +203,31 @@ async def promote_leads(
             )
 
     recovered_urls: set[str] = set()
+    verified_lead_urls: set[str] = set()
     closed_urls: set[str] = set()
+    attempted_status: dict[str, str] = {}
     blocked_groups = 0
     unstructured_groups = 0
     failed_groups = 0
-    for _items, result in results:
+    for items, result in results:
+        item_urls = {item.canonical_apply_url for item in items}
         recovered_urls.update(item.canonical_apply_url for item in result.postings)
-        closed_urls.update(canonical_url(url) for url in result.closed_urls)
+        matched_leads = _result_lead_urls(result, items)
+        verified_lead_urls.update(matched_leads)
+        group_closed = {canonical_url(url) for url in result.closed_urls}
+        closed_urls.update(group_closed)
+
+        unresolved = item_urls - matched_leads - group_closed
+        status = (
+            "blocked"
+            if result.status == "blocked"
+            else "error"
+            if result.error
+            else "unverified"
+        )
+        for url in unresolved:
+            attempted_status[url] = status
+
         if result.postings or result.closed_urls:
             database.apply_result(result, rebuild=False)
         elif result.error:
@@ -208,9 +239,10 @@ async def promote_leads(
         elif result.error:
             failed_groups += 1
 
-    if recovered_urls or closed_urls:
+    attempted_urls = set(attempted_status)
+    if recovered_urls or verified_lead_urls or closed_urls or attempted_urls:
         with database.connect() as connection:
-            if recovered_urls:
+            if verified_lead_urls:
                 connection.execute(
                     """
                     UPDATE postings
@@ -220,7 +252,7 @@ async def promote_leads(
                       AND source_mode = ANY(%s)
                       AND canonical_apply_url = ANY(%s)
                     """,
-                    (list(_BACKSTOP_MODES), sorted(recovered_urls)),
+                    (list(_BACKSTOP_MODES), sorted(verified_lead_urls)),
                 )
             if closed_urls:
                 connection.execute(
@@ -234,6 +266,22 @@ async def promote_leads(
                     """,
                     (list(_BACKSTOP_MODES), sorted(closed_urls)),
                 )
+            for status in ("blocked", "error", "unverified"):
+                urls = sorted(
+                    url for url, observed_status in attempted_status.items()
+                    if observed_status == status
+                )
+                if urls:
+                    connection.execute(
+                        """
+                        UPDATE postings
+                        SET link_checked_at=now(), link_status=%s
+                        WHERE active
+                          AND source_mode = ANY(%s)
+                          AND canonical_apply_url = ANY(%s)
+                        """,
+                        (status, list(_BACKSTOP_MODES), urls),
+                    )
 
     database.rebuild_families()
     after = build_report(database, hours=hours, limit=min(bounded_limit, 50))
@@ -246,7 +294,9 @@ async def promote_leads(
         "companies": len({item.company for item in leads}),
         "groups": len(grouped),
         "recovered_verified_openings": len(recovered_urls),
+        "verified_leads": len(verified_lead_urls),
         "closed_leads": len(closed_urls),
+        "deferred_unresolved_leads": len(attempted_urls),
         "blocked_groups": blocked_groups,
         "unstructured_groups": unstructured_groups,
         "failed_groups": failed_groups,
