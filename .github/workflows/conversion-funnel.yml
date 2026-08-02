@@ -25,9 +25,9 @@ concurrency:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 28
     steps:
-      - name: Capture baseline, microdrain, repair, and verify
+      - name: Capture baseline, bounded drains, repair, and verify
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -45,11 +45,11 @@ jobs:
           before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
 
           : > evidence/drains.ndjson
-          for i in $(seq 1 10); do
+          for i in $(seq 1 24); do
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 55 \
+              --connect-timeout 10 --max-time 50 \
               --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
-              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=8&concurrency=4&hours=24" || printf '000')
+              "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf '000')
             jq -c --arg batch "$i" --arg code "$code" '{batch:$batch,http:$code} + (if type=="object" then . else {body:.} end)' \
               "evidence/drain-${i}.json" >> evidence/drains.ndjson 2>/dev/null || true
           done
@@ -80,7 +80,10 @@ jobs:
             echo "- Discovered postings: ${discovered}"
             echo "- Due candidates: ${due}"
             echo "- Publication gaps: ${gaps}"
-            echo "- Sources promoted by microdrains: ${promoted}"
+            echo "- Sources promoted by bounded drains: ${promoted}"
+            echo ""
+            echo "### Drain responses"
+            cat evidence/drains.ndjson
           } >> "$GITHUB_STEP_SUMMARY"
           test "$delta" -gt 0
 
