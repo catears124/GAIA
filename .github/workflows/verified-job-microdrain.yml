@@ -20,7 +20,7 @@ concurrency:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - name: Drain bounded candidates and measure verified delta
         id: run
@@ -38,7 +38,7 @@ jobs:
           printf '%s\n' "$baseline" > evidence/baseline.json
           start=$(jq -r '.new_today // 0' evidence/baseline.json)
           start_open=$(jq -r '.active_listings // 0' evidence/baseline.json)
-          for i in $(seq 1 24); do
+          for i in $(seq 1 48); do
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
               --connect-timeout 10 --max-time 50 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
               "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf 000)
@@ -47,6 +47,11 @@ jobs:
               curl --silent --show-error --location --request POST --user-agent "$ua" \
                 --connect-timeout 10 --max-time 45 --output "evidence/tick-${i}.json" \
                 "$BASE_URL/api/maintenance/tick" || true
+            fi
+            if [ $((i % 4)) -eq 0 ]; then
+              curl --silent --show-error --location --request POST --user-agent "$ua" \
+                --connect-timeout 10 --max-time 45 --output "evidence/repair-${i}.json" \
+                "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" || true
             fi
             sleep 2
           done
