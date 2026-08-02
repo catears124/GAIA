@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - name: Drain small candidate batches and measure verified delta
+      - name: Drain bounded candidates and measure verified delta
         id: run
         shell: bash
         env:
@@ -38,15 +38,17 @@ jobs:
           printf '%s\n' "$baseline" > evidence/baseline.json
           start=$(jq -r '.new_today // 0' evidence/baseline.json)
           start_open=$(jq -r '.active_listings // 0' evidence/baseline.json)
-          for i in $(seq 1 8); do
+          for i in $(seq 1 24); do
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 150 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
-              "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=8&concurrency=4&hours=24" || printf 000)
+              --connect-timeout 10 --max-time 50 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
+              "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf 000)
             printf '%s\n' "$code" > "evidence/drain-${i}.status"
-            curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 150 --output "evidence/tick-${i}.json" \
-              "$BASE_URL/api/maintenance/tick" || true
-            sleep 20
+            if [ "$code" = 200 ]; then
+              curl --silent --show-error --location --request POST --user-agent "$ua" \
+                --connect-timeout 10 --max-time 45 --output "evidence/tick-${i}.json" \
+                "$BASE_URL/api/maintenance/tick" || true
+            fi
+            sleep 2
           done
           final=$(get_stats)
           printf '%s\n' "$final" > evidence/final.json
