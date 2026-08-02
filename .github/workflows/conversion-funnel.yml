@@ -25,7 +25,7 @@ concurrency:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    timeout-minutes: 45
     steps:
       - name: Capture baseline, parallel drains, repair, and verify
         id: funnel
@@ -54,7 +54,7 @@ jobs:
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
           before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
 
-          for wave in $(seq 0 3); do
+          for wave in $(seq 0 7); do
             start=$((wave * 16 + 1))
             end=$((start + 15))
             for i in $(seq "$start" "$end"); do
