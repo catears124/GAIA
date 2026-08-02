@@ -153,6 +153,63 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
         self._require_configuration()
         BaseDatabase.migrate(self)
 
+    def rebuild_families(self) -> None:
+        """Rebuild the feed and count independently verified employer pages as verified.
+
+        `verification` postings are produced only after GAIA fetches the employer-owned
+        application page and finds matching job evidence. They are therefore verified
+        inventory, not public-index backstops. The underlying posting keeps its precise
+        provenance; only the family read model normalizes it into the verified lane used
+        by the product API.
+        """
+        super().rebuild_families()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                WITH normalized AS (
+                    SELECT
+                        family_key,
+                        COALESCE(
+                            (
+                                SELECT jsonb_agg(
+                                    CASE
+                                        WHEN opening->>'source_mode'='verification' THEN
+                                            jsonb_set(
+                                                jsonb_set(
+                                                    opening,
+                                                    '{source_mode}',
+                                                    '"direct"'::jsonb,
+                                                    TRUE
+                                                ),
+                                                '{verification_mode}',
+                                                '"employer-page"'::jsonb,
+                                                TRUE
+                                            )
+                                        ELSE opening
+                                    END
+                                    ORDER BY ordinality
+                                )
+                                FROM jsonb_array_elements(openings)
+                                    WITH ORDINALITY AS item(opening, ordinality)
+                            ),
+                            '[]'::jsonb
+                        ) AS normalized_openings,
+                        (
+                            SELECT COUNT(*)
+                            FROM jsonb_array_elements(openings) AS opening
+                            WHERE opening->>'source_mode' IN ('direct','verification')
+                        )::integer AS verified_openings
+                    FROM families
+                )
+                UPDATE families AS family
+                SET openings=normalized.normalized_openings,
+                    direct_openings=normalized.verified_openings,
+                    backstop_openings=family.opening_count-normalized.verified_openings
+                FROM normalized
+                WHERE family.family_key=normalized.family_key
+                """
+            )
+
 
 __all__ = [
     "Database",
