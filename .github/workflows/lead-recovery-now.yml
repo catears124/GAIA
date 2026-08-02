@@ -12,7 +12,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gaia-lead-recovery-now-v1
+  group: gaia-lead-recovery-now-v2
   cancel-in-progress: true
 
 jobs:
@@ -52,6 +52,25 @@ jobs:
               --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 2 \
               "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=12"
           }
+          repair() {
+            local label="$1"
+            local attempt code rebuilt gaps
+            for attempt in $(seq 1 10); do
+              code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+                --connect-timeout 10 --max-time 55 \
+                --output "evidence/repair-${label}-${attempt}.json" --write-out '%{http_code}' \
+                "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || printf 000)
+              if [ "$code" = 200 ]; then
+                rebuilt=$(jq -r '.families_rebuilt // 0' "evidence/repair-${label}-${attempt}.json" 2>/dev/null || echo 0)
+                gaps=$(jq -r '.publication_gaps_after // 999999' "evidence/repair-${label}-${attempt}.json" 2>/dev/null || echo 999999)
+                if [ "$rebuilt" -gt 0 ] || [ "$gaps" -eq 0 ]; then
+                  return 0
+                fi
+              fi
+              sleep 3
+            done
+            return 1
+          }
           promote() {
             local i="$1"
             local code
@@ -69,25 +88,14 @@ jobs:
           active_before=$(jq -r '.funnel.active_verified_jobs // 0' evidence/before.json)
           openings_before=$(jq -r '.funnel.active_verified_openings // 0' evidence/before.json)
 
-          curl --fail --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 180 \
-            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-            > evidence/repair-initial.json
-
-          for i in $(seq 1 12); do
+          repair initial || true
+          for i in $(seq 1 8); do
             promote "$i"
-            if [ $((i % 3)) -eq 0 ]; then
-              curl --silent --show-error --location --request POST --user-agent "$ua" \
-                --connect-timeout 10 --max-time 180 \
-                "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-                > "evidence/repair-$((i / 3)).json" || true
+            if [ $((i % 2)) -eq 0 ]; then
+              repair "wave-$((i / 2))" || true
             fi
           done
-
-          curl --fail --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 180 \
-            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-            > evidence/repair-final.json
+          repair final
           sleep 8
 
           report > evidence/after.json
