@@ -12,6 +12,7 @@ from .conversion_funnel import (
     repair_publication,
 )
 from .fast_candidate_drain import drain_candidates
+from .fresh_lead_retry import retry_fresh_leads
 from .lead_promotion import promote_leads
 from .maintenance_api import _request_allowed
 
@@ -112,6 +113,43 @@ def install_conversion_diagnostics_api(app: FastAPI) -> None:
             ) from exc
 
     @app.post(
+        "/api/maintenance/diagnostics/retry-fresh-leads",
+        include_in_schema=False,
+    )
+    async def conversion_diagnostics_retry_fresh_leads(
+        request: Request,
+        limit: int = 12,
+        concurrency: int = 6,
+        hours: int = 24,
+        retry_after_minutes: int = 10,
+        timeout_seconds: int = 42,
+    ) -> dict[str, object]:
+        authorize(request)
+        bounded_limit = max(1, min(int(limit), 64))
+        bounded_concurrency = max(1, min(int(concurrency), 12))
+        bounded_timeout = max(5, min(int(timeout_seconds), 45))
+        try:
+            return await asyncio.wait_for(
+                retry_fresh_leads(
+                    limit=bounded_limit,
+                    concurrency=bounded_concurrency,
+                    hours=max(1, min(int(hours), 720)),
+                    retry_after_minutes=max(5, min(int(retry_after_minutes), 180)),
+                ),
+                timeout=bounded_timeout,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=408,
+                detail={
+                    "status": "fresh_lead_retry_timeout",
+                    "limit": bounded_limit,
+                    "concurrency": bounded_concurrency,
+                    "timeout_seconds": bounded_timeout,
+                },
+            ) from exc
+
+    @app.post(
         "/api/maintenance/diagnostics/repair-publication",
         include_in_schema=False,
     )
@@ -138,4 +176,5 @@ __all__ = [
     "promote_leads",
     "reason_bucket",
     "repair_publication",
+    "retry_fresh_leads",
 ]
