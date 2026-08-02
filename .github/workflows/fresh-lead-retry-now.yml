@@ -1,5 +1,6 @@
 name: Fresh lead verification retry now
 
+# Triggered after the production retry endpoint has deployed.
 on:
   push:
     branches: [main]
