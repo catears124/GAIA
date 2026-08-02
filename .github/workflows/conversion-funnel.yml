@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 28
     steps:
-      - name: Capture baseline, bounded drains, repair, and verify
+      - name: Capture baseline, parallel drains, repair, and verify
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -40,24 +40,42 @@ jobs:
             curl --fail --silent --show-error --location --user-agent "$ua" \
               --connect-timeout 15 --max-time 180 --retry 2 --retry-all-errors --retry-delay 3 "$1"
           }
-
-          get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
-          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
-
-          : > evidence/drains.ndjson
-          for i in $(seq 1 24); do
+          drain_one() {
+            local i="$1"
+            local code
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
               --connect-timeout 10 --max-time 50 \
               --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
               "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf '000')
             jq -c --arg batch "$i" --arg code "$code" '{batch:$batch,http:$code} + (if type=="object" then . else {body:.} end)' \
-              "evidence/drain-${i}.json" >> evidence/drains.ndjson 2>/dev/null || true
-          done
+              "evidence/drain-${i}.json" > "evidence/drain-${i}.ndjson" 2>/dev/null || true
+          }
 
+          get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
+          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
+
+          # Four bounded waves avoid Vercel request limits while claiming and validating
+          # 64 independent ATS candidates. Database leases prevent duplicate claims.
+          for wave in $(seq 0 3); do
+            start=$((wave * 16 + 1))
+            end=$((start + 15))
+            for i in $(seq "$start" "$end"); do
+              drain_one "$i" &
+            done
+            wait
+            curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time 90 \
+              "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
+              > "evidence/repair-${wave}.json" || true
+          done
+          cat evidence/drain-*.ndjson | sort -t: -k2,2n > evidence/drains.ndjson
+
+          # Give newly scheduled sources a bounded opportunity to crawl and publish.
+          sleep 20
           curl --silent --show-error --location --request POST --user-agent "$ua" \
             --connect-timeout 10 --max-time 90 \
             "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-            > evidence/repair.json || true
+            > evidence/repair-final.json || true
 
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/after.json
           after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/after.json)
@@ -67,6 +85,7 @@ jobs:
           openings=$(jq -r '.funnel.active_verified_openings // 0' evidence/after.json)
           gaps=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/after.json)
           promoted=$(jq -r '[inputs | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          claimed=$(jq -r '[inputs | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
 
           if [ "$delta" -gt 0 ]; then state=success; else state=failure; fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
@@ -80,6 +99,7 @@ jobs:
             echo "- Discovered postings: ${discovered}"
             echo "- Due candidates: ${due}"
             echo "- Publication gaps: ${gaps}"
+            echo "- Candidates claimed: ${claimed}"
             echo "- Sources promoted by bounded drains: ${promoted}"
             echo ""
             echo "### Drain responses"
