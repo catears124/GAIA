@@ -8,6 +8,10 @@ on:
       - "src/gaia/conversion_funnel.py"
       - "src/gaia/conversion_diagnostics_api.py"
       - "src/gaia/fast_candidate_drain.py"
+      - "src/gaia/lead_promotion.py"
+      - "src/gaia/db.py"
+      - "src/gaia/db_write.py"
+      - "src/gaia/page_verification.py"
       - "src/gaia/inventory_runtime.py"
       - "src/gaia/schema.sql"
       - "app.py"
@@ -20,7 +24,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: verified-job-conversion-funnel-v5
+  group: verified-job-conversion-funnel-v6-lead-first
   cancel-in-progress: false
 
 jobs:
@@ -28,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
-      - name: Capture baseline, sequential conversion microbatches, repair, and verify
+      - name: Capture baseline, promote leads, repair, drain sources, and verify
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -41,6 +45,20 @@ jobs:
             curl --fail --silent --show-error --location --user-agent "$ua" \
               --connect-timeout 15 --max-time 180 --retry 2 --retry-all-errors --retry-delay 3 "$1"
           }
+          recent_verified() {
+            curl --fail --silent --show-error --location --user-agent "$ua" \
+              --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 2 \
+              "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=12"
+          }
+          promote_batch() {
+            local i="$1"
+            local code
+            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time 50 \
+              --output "evidence/promote-${i}.json" --write-out '%{http_code}' \
+              "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=12&concurrency=6&hours=24&max_age_days=14&timeout_seconds=45" || printf '000')
+            printf '%s\n' "$code" > "evidence/promote-${i}.status"
+          }
           drain_batch() {
             local i="$1"
             local code
@@ -48,65 +66,84 @@ jobs:
               --connect-timeout 10 --max-time 55 \
               --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
               "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=12&concurrency=6&hours=24&timeout_seconds=45" || printf '000')
-            jq -c --arg batch "$i" --arg code "$code" '{batch:$batch,http:$code} + (if type=="object" then . else {body:.} end)' \
-              "evidence/drain-${i}.json" > "evidence/drain-${i}.ndjson" 2>/dev/null || true
+            printf '%s\n' "$code" > "evidence/drain-${i}.status"
           }
 
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
+          recent_verified > evidence/recent-before.json
           before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
+          recent_before=$(jq -r '.total // 0' evidence/recent-before.json)
 
-          # 64-candidate calls consistently hit the endpoint's 45-second hard timeout and
-          # returned no usable conversion result. Twelve-candidate microbatches finish,
-          # release leases cleanly, and still keep enough concurrency for ATS throughput.
-          for i in $(seq 1 24); do
-            drain_batch "$i"
-            if [ $((i % 6)) -eq 0 ]; then
+          # This rebuild promotes employer-page verification rows already persisted in
+          # postings into the verified family read model before fetching more leads.
+          curl --silent --show-error --location --request POST --user-agent "$ua" \
+            --connect-timeout 10 --max-time 150 \
+            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
+            > evidence/repair-initial.json || true
+
+          # Spend the majority of this run converting fresh public-index leads into
+          # evidence-backed employer-page verifications. These are the records users see
+          # in the verified + recent product filter.
+          for i in $(seq 1 20); do
+            promote_batch "$i"
+            if [ $((i % 4)) -eq 0 ]; then
               curl --silent --show-error --location --request POST --user-agent "$ua" \
-                --connect-timeout 10 --max-time 120 \
+                --connect-timeout 10 --max-time 150 \
                 "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-                > "evidence/repair-$((i / 6)).json" || true
-              sleep 3
+                > "evidence/lead-repair-$((i / 4)).json" || true
+              sleep 2
             fi
           done
-          cat evidence/drain-*.ndjson | sort -V > evidence/drains.ndjson
 
-          sleep 15
+          # Use a smaller source-candidate fallback only after the lead backlog has had
+          # direct conversion attempts. Product jobs, not promoted source counts, remain
+          # the success criterion.
+          for i in $(seq 1 4); do
+            drain_batch "$i"
+          done
+
           curl --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 120 \
+            --connect-timeout 10 --max-time 150 \
             "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
             > evidence/repair-final.json || true
+          sleep 10
 
           get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/after.json
+          recent_verified > evidence/recent-after.json
           after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/after.json)
+          recent_after=$(jq -r '.total // 0' evidence/recent-after.json)
           delta=$((after-before))
+          recent_delta=$((recent_after-recent_before))
           discovered=$(jq -r '.funnel.discovered_postings_window // 0' evidence/after.json)
           due=$(jq -r '.sources.candidate_sources_due // 0' evidence/after.json)
           openings=$(jq -r '.funnel.active_verified_openings // 0' evidence/after.json)
+          active=$(jq -r '.funnel.active_verified_jobs // 0' evidence/after.json)
           gaps=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/after.json)
+          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
+          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
+          closed=$(jq -s '[.[] | .closed_leads // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
+          lead_completed=$(jq -s '[.[] | select(.status == "ok")] | length' evidence/promote-*.json 2>/dev/null || echo 0)
           promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          completed=$(jq -s '[.[] | select(.status == "ok")] | length' evidence/drain-*.json 2>/dev/null || echo 0)
 
-          if [ "$delta" -gt 0 ]; then state=success; else state=failure; fi
+          if [ "$delta" -gt 0 ] || [ "$recent_delta" -gt 0 ]; then state=success; else state=failure; fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=${before}->${after} verified (${delta}); ${openings} openings; ${due} due" >> "$GITHUB_OUTPUT"
+          echo "description=recent ${recent_before}->${recent_after} (${recent_delta}); window ${before}->${after} (${delta}); recovered ${recovered}" >> "$GITHUB_OUTPUT"
           {
             echo "### Verified job conversion funnel"
-            echo "- Starting verified jobs: ${before}"
-            echo "- Ending verified jobs: ${after}"
-            echo "- Delta: ${delta}"
+            echo "- Verified recent filter: ${recent_before} -> ${recent_after} (${recent_delta})"
+            echo "- Verified 24h window: ${before} -> ${after} (${delta})"
+            echo "- Active verified jobs: ${active}"
             echo "- Active verified openings: ${openings}"
             echo "- Discovered postings: ${discovered}"
-            echo "- Due candidates: ${due}"
+            echo "- Due source candidates: ${due}"
             echo "- Publication gaps: ${gaps}"
-            echo "- Completed microbatches: ${completed}/24"
-            echo "- Candidates claimed: ${claimed}"
-            echo "- Sources promoted: ${promoted}"
-            echo ""
-            echo "### Drain responses"
-            cat evidence/drains.ndjson
+            echo "- Lead pages selected: ${selected}"
+            echo "- Verified openings recovered from leads: ${recovered}"
+            echo "- Closed leads removed: ${closed}"
+            echo "- Completed lead batches: ${lead_completed}/20"
+            echo "- Fallback sources promoted: ${promoted}"
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$delta" -gt 0
+          test "$state" = success
 
       - name: Publish funnel status
         if: always()
