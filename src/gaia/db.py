@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -59,9 +60,6 @@ def _is_legacy_path(value: str | Path | None) -> bool:
     ) and "://" not in candidate
 
 
-# Vercel's Supabase integration provides POSTGRES_URL automatically. Normalize it
-# into GAIA's explicit name before importing the database implementation so local,
-# Vercel, and standalone Supabase environments share one code path.
 if database_url := _configured_database_url():
     os.environ["GAIA_DATABASE_URL"] = database_url
 
@@ -84,17 +82,11 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
     @staticmethod
     def _query(query: str) -> str:
         translated = ConnectionAdapter._query(query)
-        # Families are the public read model. Exclude roles already classified as
-        # non-internships or the wrong cycle, but preserve unknown-cycle internships:
-        # those are real opportunities and are intentionally visible in the broad feed.
         translated = translated.replace(
             "WHERE active AND target_match!='not_internship'",
             "WHERE active AND target_match IN "
             "('exact','year_confirmed','source_confirmed','unknown')",
         )
-        # Psycopg treats every percent sign in a parameterized query as part of
-        # its placeholder grammar. Preserve supported placeholders and already
-        # escaped percents, while escaping SQL literals such as ILIKE '%remote%'.
         return re.sub(r"(?<!%)%(?![sbt%])", "%%", translated)
 
     def executemany(self, query: str, params_seq: Any) -> None:
@@ -103,13 +95,7 @@ class _PsycopgConnectionAdapter(ConnectionAdapter):
 
 
 class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
-    """GAIA's PostgreSQL repository and query service.
-
-    Constructing the repository is intentionally safe without database credentials.
-    Web frameworks and build systems import application modules before runtime secrets
-    are necessarily available. Configuration is therefore required only when a real
-    database operation begins, not while importing the ASGI application.
-    """
+    """GAIA's PostgreSQL repository and query service."""
 
     def __init__(
         self,
@@ -118,10 +104,6 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
         schema: str | None = None,
         migrate: bool | None = None,
     ) -> None:
-        # The pre-PostgreSQL test suite passes a unique temporary path to request
-        # an isolated database. BaseDatabase maps that path to a deterministic
-        # PostgreSQL schema; force its idempotent migration even when CI disables
-        # automatic production migrations globally.
         if migrate is None and _is_legacy_path(url):
             migrate = True
 
@@ -143,9 +125,6 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
     @contextmanager
     def connect(self) -> Iterator[_PsycopgConnectionAdapter]:
         self._require_configuration()
-        # BaseDatabase owns transaction commit/rollback and connection cleanup.
-        # Replace only the compatibility adapter so bulk writes use a cursor,
-        # which is where psycopg3 implements executemany().
         with BaseDatabase.connect(self) as adapter:
             yield _PsycopgConnectionAdapter(adapter._connection)
 
@@ -153,27 +132,30 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
         self._require_configuration()
         BaseDatabase.migrate(self)
 
-    def rebuild_families(self) -> None:
-        """Atomically publish the family read model under a cross-worker lock.
+    def rebuild_families(self) -> int:
+        """Publish families once at a time without blocking a serverless request.
 
-        The rebuild deletes and reinserts the complete public read model. Running that
-        transaction concurrently caused deadlocks, unique-key violations, and transient
-        disappearance of verified jobs. A session-level PostgreSQL advisory lock keeps
-        all Vercel and GitHub workers on one publication path without changing posting
-        ingestion concurrency.
-
-        `verification` postings are produced only after GAIA fetches the employer-owned
-        application page and finds matching job evidence. They are therefore verified
-        inventory, not public-index backstops. The underlying posting keeps its precise
-        provenance; only the family read model normalizes it into the verified lane used
-        by the product API.
+        A full rebuild is destructive inside its transaction: it replaces the family
+        read model. Concurrent rebuilds caused unique-key violations, deadlocks, and
+        verified roles disappearing. Workers now use a PostgreSQL advisory lock. A
+        caller waits at most five seconds; if another publisher remains active it skips
+        safely and lets the next bounded repair retry.
         """
         lock_name = f"gaia:family-rebuild:{self.schema}"
         with self.connect() as lock_connection:
-            lock_connection.execute(
-                "SELECT pg_advisory_lock(hashtext(%s))",
-                (lock_name,),
-            )
+            acquired = False
+            for _ in range(20):
+                row = lock_connection.execute(
+                    "SELECT pg_try_advisory_lock(hashtext(%s)) AS acquired",
+                    (lock_name,),
+                ).fetchone()
+                acquired = bool(dict(row or {}).get("acquired"))
+                if acquired:
+                    break
+                time.sleep(0.25)
+            if not acquired:
+                return 0
+
             try:
                 super().rebuild_families()
                 with self.connect() as connection:
@@ -222,6 +204,7 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
                         WHERE family.family_key=normalized.family_key
                         """
                     )
+                return 1
             finally:
                 lock_connection.execute(
                     "SELECT pg_advisory_unlock(hashtext(%s))",
