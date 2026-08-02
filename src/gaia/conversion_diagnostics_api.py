@@ -7,11 +7,11 @@ from fastapi import FastAPI, HTTPException, Request
 
 from .conversion_funnel import (
     build_report,
-    drain_candidates,
     failure_counts,
     reason_bucket,
     repair_publication,
 )
+from .fast_candidate_drain import drain_candidates
 from .maintenance_api import _request_allowed
 
 
