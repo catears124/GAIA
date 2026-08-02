@@ -1,0 +1,130 @@
+name: Fresh lead verification retry now
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fresh-lead-retry-now.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-fresh-lead-retry-now-v1
+  cancel-in-progress: true
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Retry transient fresh leads and verify production
+        id: retry
+        env:
+          BASE_URL: https://gaiajob.vercel.app
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p evidence
+          ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
+          diagnostics() {
+            curl --fail --silent --show-error --location --user-agent "$ua" \
+              --connect-timeout 12 --max-time 120 --retry 2 --retry-all-errors --retry-delay 2 \
+              "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100"
+          }
+          recent() {
+            curl --fail --silent --show-error --location --user-agent "$ua" \
+              --connect-timeout 12 --max-time 90 --retry 2 --retry-all-errors --retry-delay 2 \
+              "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=100"
+          }
+          retry_batch() {
+            local i="$1" code
+            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time 50 \
+              --output "evidence/retry-${i}.json" --write-out '%{http_code}' \
+              "${BASE_URL}/api/maintenance/diagnostics/retry-fresh-leads?limit=12&concurrency=6&hours=24&retry_after_minutes=10&timeout_seconds=45" || printf 000)
+            printf '%s\n' "$code" > "evidence/retry-${i}.status"
+          }
+          repair() {
+            local i code
+            for i in $(seq 1 12); do
+              code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+                --connect-timeout 10 --max-time 50 \
+                --output "evidence/repair-${i}.json" --write-out '%{http_code}' \
+                "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || printf 000)
+              if [ "$code" = 200 ] && [ "$(jq -r '.families_rebuilt // 0' "evidence/repair-${i}.json" 2>/dev/null || echo 0)" -gt 0 ]; then
+                return 0
+              fi
+              sleep 2
+            done
+            return 1
+          }
+
+          diagnostics > evidence/before.json
+          recent > evidence/recent-before.json
+          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
+          active_before=$(jq -r '.funnel.active_verified_jobs // 0' evidence/before.json)
+          openings_before=$(jq -r '.funnel.active_verified_openings // 0' evidence/before.json)
+          recent_before=$(jq -r '.total // 0' evidence/recent-before.json)
+
+          for i in $(seq 1 8); do retry_batch "$i"; done
+          repair || true
+          sleep 6
+
+          diagnostics > evidence/after.json
+          recent > evidence/recent-after.json
+          after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/after.json)
+          active_after=$(jq -r '.funnel.active_verified_jobs // 0' evidence/after.json)
+          openings_after=$(jq -r '.funnel.active_verified_openings // 0' evidence/after.json)
+          recent_after=$(jq -r '.total // 0' evidence/recent-after.json)
+          delta=$((after-before)); active_delta=$((active_after-active_before))
+          opening_delta=$((openings_after-openings_before)); recent_delta=$((recent_after-recent_before))
+          reset=$(jq -s '[.[] | .fresh_retry_reset // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          verified_leads=$(jq -s '[.[] | .verified_leads // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          completed=$(jq -s '[.[] | select(.status == "ok")] | length' evidence/retry-*.json 2>/dev/null || echo 0)
+          jq -s '[.[] | .recovered_samples[]?] | unique_by(.canonical_apply_url)' evidence/retry-*.json > evidence/recovered-samples.json 2>/dev/null || echo '[]' > evidence/recovered-samples.json
+          jq -s '[.[] | .recovered_employers[]?] | unique' evidence/retry-*.json > evidence/recovered-employers.json 2>/dev/null || echo '[]' > evidence/recovered-employers.json
+
+          jq -n --argjson before "$before" --argjson after "$after" --argjson delta "$delta" \
+            --argjson recent_before "$recent_before" --argjson recent_after "$recent_after" --argjson recent_delta "$recent_delta" \
+            --argjson active_before "$active_before" --argjson active_after "$active_after" --argjson active_delta "$active_delta" \
+            --argjson openings_before "$openings_before" --argjson openings_after "$openings_after" --argjson opening_delta "$opening_delta" \
+            --argjson reset "$reset" --argjson selected "$selected" --argjson recovered "$recovered" \
+            --argjson verified_leads "$verified_leads" --argjson completed "$completed" \
+            --slurpfile samples evidence/recovered-samples.json --slurpfile employers evidence/recovered-employers.json \
+            '{starting_verified_window:$before,ending_verified_window:$after,verified_window_delta:$delta,starting_exact_recent_filter:$recent_before,ending_exact_recent_filter:$recent_after,exact_recent_filter_delta:$recent_delta,starting_active_verified_jobs:$active_before,ending_active_verified_jobs:$active_after,active_verified_jobs_delta:$active_delta,starting_active_verified_openings:$openings_before,ending_active_verified_openings:$openings_after,active_verified_openings_delta:$opening_delta,fresh_leads_reset:$reset,lead_pages_selected:$selected,recovered_verified_openings:$recovered,verified_leads:$verified_leads,completed_batches:$completed,recovered_samples:$samples[0],recovered_employers:$employers[0]}' > evidence/result.json
+
+          if [ "$recent_delta" -gt 0 ] || [ "$delta" -gt 0 ] || [ "$active_delta" -gt 0 ]; then state=success; else state=failure; fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "description=filter ${recent_before}->${recent_after} (${recent_delta}); active ${active_before}->${active_after} (${active_delta}); recovered ${recovered}" >> "$GITHUB_OUTPUT"
+          cat evidence/result.json >> "$GITHUB_STEP_SUMMARY"
+          test "$state" = success
+
+      - name: Publish status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.retry.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.retry.outputs.description || 'Fresh lead verification retry did not complete' }}
+        shell: bash
+        run: |
+          payload=$(jq -n --arg state "$STATE" --arg context gaia/fresh-lead-retry \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-lead-retry-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 30
