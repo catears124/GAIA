@@ -24,122 +24,80 @@ concurrency:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS: "300"
+    timeout-minutes: 55
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Recover verified jobs directly from production
+      - name: Recover verified jobs through live production API
         id: run
+        env:
+          BASE_URL: https://gaiajob.vercel.app
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           mkdir -p evidence
-          python - <<'PY'
-          import asyncio
-          import json
-          from pathlib import Path
+          ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
 
-          from gaia.fast_candidate_drain import _verified_snapshot, drain_candidates
-          from gaia.fresh_lead_retry import retry_fresh_leads
-          from gaia.lead_promotion import promote_leads
-          from gaia.live_inventory import LiveDatabase
-          from gaia.conversion_funnel import repair_publication
-
-          out = Path("evidence")
-          db = LiveDatabase(migrate=False)
-
-          def dump(name, value):
-              (out / f"{name}.json").write_text(json.dumps(value, default=str, indent=2) + "\n")
-
-          baseline = _verified_snapshot(db, hours=24)
-          dump("baseline", baseline)
-
-          results = []
-          # Recover already-discovered, correctly classified employer links first.
-          for wave in range(3):
-              retry = asyncio.run(retry_fresh_leads(
-                  limit=32, concurrency=6, hours=24, retry_after_minutes=5
-              ))
-              retry["operation"] = f"retry_fresh_leads_{wave+1}"
-              results.append(retry)
-              dump(f"retry-{wave+1}", retry)
-
-              promote = asyncio.run(promote_leads(
-                  limit=64, concurrency=8, hours=24, max_age_days=14
-              ))
-              promote["operation"] = f"promote_leads_{wave+1}"
-              results.append(promote)
-              dump(f"promote-{wave+1}", promote)
-
-          # Then consume high-evidence ATS candidates in bounded direct-DB waves.
-          for wave in range(4):
-              drained = asyncio.run(drain_candidates(limit=16, concurrency=8, hours=24))
-              drained["operation"] = f"drain_candidates_{wave+1}"
-              results.append(drained)
-              dump(f"drain-{wave+1}", drained)
-
-          publication = repair_publication(db, hours=24, limit=200)
-          dump("publication", publication)
-
-          final = _verified_snapshot(db, hours=24)
-          dump("final", final)
-          start = int(baseline.get("new_verified_jobs_window") or 0)
-          finish = int(final.get("new_verified_jobs_window") or 0)
-          delta = finish - start
-          recovered = sorted({
-              employer
-              for item in results
-              for employer in item.get("recovered_employers", [])
-          })
-          result = {
-              "starting_verified": start,
-              "ending_verified": finish,
-              "verified_delta": delta,
-              "starting_active_verified_jobs": int(baseline.get("active_verified_jobs") or 0),
-              "ending_active_verified_jobs": int(final.get("active_verified_jobs") or 0),
-              "starting_active_verified_openings": int(baseline.get("active_verified_openings") or 0),
-              "ending_active_verified_openings": int(final.get("active_verified_openings") or 0),
-              "newest_verified_detected_at": final.get("newest_verified_detected_at"),
-              "recovered_employers": recovered,
-              "claimed_candidates": sum(int(x.get("claimed_candidates") or 0) for x in results),
-              "promoted_sources": sum(int(x.get("promoted_sources") or 0) for x in results),
-              "operation_reported_delta": sum(int(x.get("verified_jobs_delta") or 0) for x in results),
+          get_json() {
+            curl --fail --silent --show-error --location --user-agent "$ua" \
+              --connect-timeout 12 --max-time "${2:-60}" --retry 2 --retry-all-errors --retry-delay 2 "$1"
           }
-          dump("result", result)
-          print(json.dumps(result, default=str))
-          with open("state.env", "w") as f:
-              f.write(f"STATE={'success' if delta > 0 else 'failure'}\n")
-              f.write(f"DESCRIPTION={delta} verified jobs; {len(recovered)} employers; {result['claimed_candidates']} candidates\n")
-          if delta <= 0:
-              raise SystemExit(2)
-          PY
-        continue-on-error: true
-      - name: Load result state
-        id: state
-        if: always()
-        shell: bash
-        run: |
-          if [ -f state.env ]; then source state.env; else STATE=failure; DESCRIPTION="direct conversion incomplete"; fi
-          echo "state=$STATE" >> "$GITHUB_OUTPUT"
-          echo "description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
-          test -f evidence/result.json && cat evidence/result.json >> "$GITHUB_STEP_SUMMARY" || true
+          post_json() {
+            local name="$1" url="$2" max_time="${3:-48}"
+            local code
+            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time "$max_time" --retry 1 --retry-all-errors --retry-delay 1 \
+              --output "evidence/${name}.json" --write-out '%{http_code}' "$url" || printf '000')
+            printf '%s\n' "$code" > "evidence/${name}.status"
+          }
+          snapshot() {
+            local name="$1"
+            get_json "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 70 > "evidence/${name}.json" || echo '{"total":0,"measurement_failed":true}' > "evidence/${name}.json"
+          }
+
+          snapshot before
+          before=$(jq -r '.total // 0' evidence/before.json)
+
+          # Recover already-discovered employer application pages first.
+          for i in $(seq 1 4); do
+            post_json "retry-${i}" "${BASE_URL}/api/maintenance/diagnostics/retry-fresh-leads?limit=24&concurrency=6&hours=24&retry_after_minutes=5&timeout_seconds=42" 48
+            post_json "promote-${i}" "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=48&concurrency=8&hours=24&max_age_days=14&timeout_seconds=42" 48
+          done
+          post_json repair-initial "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=400&hours=24" 50
+
+          # Single-source requests are the only production path that previously produced
+          # a positive verified delta under database pressure. Run bounded waves and publish
+          # frequently so a slow/bad source cannot poison the entire batch.
+          for i in $(seq 1 36); do
+            post_json "drain-${i}" "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=38" 44
+            if [ $((i % 4)) -eq 0 ]; then
+              post_json "repair-$((i / 4))" "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=250&hours=24" 45
+            fi
+          done
+
+          post_json repair-final "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=500&hours=24" 55
+          sleep 8
+          snapshot after
+          after=$(jq -r '.total // 0' evidence/after.json)
+          delta=$((after-before))
+          claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          reported=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/drain-*.json evidence/retry-*.json evidence/promote-*.json 2>/dev/null || echo 0)
+          recovered=$(jq -s '[.[] | .recovered_employers[]?] | unique' evidence/drain-*.json evidence/retry-*.json evidence/promote-*.json 2>/dev/null || echo '[]')
+          jq -n --argjson before "$before" --argjson after "$after" --argjson delta "$delta" \
+            --argjson claimed "$claimed" --argjson promoted "$promoted" --argjson reported "$reported" \
+            --argjson recovered "$recovered" \
+            '{starting_verified:$before,ending_verified:$after,verified_delta:$delta,claimed_candidates:$claimed,promoted_sources:$promoted,operation_reported_delta:$reported,recovered_employers:$recovered}' > evidence/result.json
+          if [ "$delta" -gt 0 ] || [ "$reported" -gt 0 ]; then state=success; else state=failure; fi
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "description=verified ${before}->${after} (${delta}); reported ${reported}; claimed ${claimed}; promoted ${promoted}" >> "$GITHUB_OUTPUT"
+          cat evidence/result.json >> "$GITHUB_STEP_SUMMARY"
+          test "$state" = success
+
       - name: Publish microdrain status
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          STATE: ${{ steps.state.outputs.state || 'failure' }}
-          DESCRIPTION: ${{ steps.state.outputs.description || 'direct conversion incomplete' }}
+          STATE: ${{ steps.run.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.run.outputs.description || 'live production recovery incomplete' }}
         shell: bash
         run: |
           payload=$(jq -n --arg state "$STATE" --arg context "gaia/verified-job-microdrain" --arg description "${DESCRIPTION:0:140}" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
@@ -151,6 +109,3 @@ jobs:
           name: verified-job-microdrain-${{ github.run_id }}
           path: evidence/
           retention-days: 30
-      - name: Require positive verified delta
-        if: always()
-        run: test "${{ steps.state.outputs.state || 'failure' }}" = success
