@@ -25,15 +25,15 @@ permissions:
   statuses: write
 
 concurrency:
-  group: verified-job-conversion-funnel-v9-bounded-yield
+  group: verified-job-conversion-funnel-v10-single-candidate
   cancel-in-progress: false
 
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 45
     steps:
-      - name: Capture baseline, exploit bounded candidate yield, and verify
+      - name: Convert candidates and verify production
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -43,87 +43,75 @@ jobs:
           mkdir -p evidence
           ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
 
-          get_optional() {
-            local name="$1" url="$2" max_time="${3:-120}"
+          request() {
+            local method="$1" name="$2" url="$3" max_time="$4"
             local code
-            code=$(curl --silent --show-error --location --user-agent "$ua" \
-              --connect-timeout 15 --max-time "$max_time" \
-              --output "evidence/${name}.json" --write-out '%{http_code}' "$url" || printf '000')
+            code=$(curl --silent --show-error --location --request "$method" \
+              --user-agent "$ua" --connect-timeout 8 --max-time "$max_time" \
+              --output "evidence/${name}.json" --write-out '%{http_code}' "$url" 2>"evidence/${name}.stderr" || true)
+            code="${code:-000}"
             printf '%s\n' "$code" > "evidence/${name}.status"
           }
 
-          post_json() {
-            local name="$1" url="$2" max_time="${3:-55}"
-            local code
-            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time "$max_time" \
-              --output "evidence/${name}.json" --write-out '%{http_code}' "$url" || printf '000')
-            printf '%s\n' "$code" > "evidence/${name}.status"
-          }
+          # Cheap public serving-table count establishes the baseline. Never block useful
+          # conversion on the broad diagnostic report.
+          request GET recent-before "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 25
 
-          # The full diagnostic is evidence, not a gate. It can be expensive under load.
-          get_optional before "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" 180
-          get_optional recent-before "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 90
-
-          # Production evidence from run 30794497608: the first eight limit=4 drains all
-          # completed, claimed 32 candidates, promoted 32 sources, and created four verified
-          # jobs. Requests after that saturated Postgres. Exploit the proven window only,
-          # then stop pressure and publish once.
-          for i in $(seq 1 8); do
-            post_json "drain-${i}" "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=4&concurrency=4&hours=24&timeout_seconds=42" 52
-            sleep 4
+          # One candidate per invocation keeps every request below the serverless limit,
+          # bounds cancellation cleanup, and prevents a failed provider from holding the
+          # whole batch. Continue through failures instead of saturating one request.
+          for i in $(seq 1 16); do
+            request POST "drain-${i}" "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=18" 24
+            sleep 3
           done
 
-          post_json repair-final "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" 65
-          sleep 12
+          # Publish once after all bounded probes. Failure is evidence, not a reason to
+          # discard successful candidate persistence from earlier requests.
+          request POST repair-final "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=1&hours=24" 45
+          sleep 8
+          request GET recent-after "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 25
+          request GET diagnostic-after "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=20" 45
 
-          get_optional after "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" 180
-          get_optional recent-after "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 90
+          number_or_zero() {
+            local value="$1"
+            if [[ "$value" =~ ^-?[0-9]+$ ]]; then printf '%s' "$value"; else printf '0'; fi
+          }
 
-          before=$(jq -r '.funnel.new_verified_jobs_window // empty' evidence/before.json 2>/dev/null || true)
-          after=$(jq -r '.funnel.new_verified_jobs_window // empty' evidence/after.json 2>/dev/null || true)
-          active_before=$(jq -r '.funnel.active_verified_jobs // empty' evidence/before.json 2>/dev/null || true)
-          active_after=$(jq -r '.funnel.active_verified_jobs // empty' evidence/after.json 2>/dev/null || true)
-          openings_before=$(jq -r '.funnel.active_verified_openings // empty' evidence/before.json 2>/dev/null || true)
-          openings_after=$(jq -r '.funnel.active_verified_openings // empty' evidence/after.json 2>/dev/null || true)
-          recent_before=$(jq -r '.total // empty' evidence/recent-before.json 2>/dev/null || true)
-          recent_after=$(jq -r '.total // empty' evidence/recent-after.json 2>/dev/null || true)
+          before=$(jq -r '.total // empty' evidence/recent-before.json 2>/dev/null || true)
+          after=$(jq -r '.total // empty' evidence/recent-after.json 2>/dev/null || true)
+          before=$(number_or_zero "$before")
+          after=$(number_or_zero "$after")
+          public_delta=$((after-before))
 
-          claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          drain_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          recovered_employers=$(jq -s '[.[] | .recovered_employers[]?] | unique' evidence/drain-*.json 2>/dev/null || echo '[]')
-          successful_drains=$(awk '$1==200{n++} END{print n+0}' evidence/drain-*.status)
+          claimed=$(jq -s '[.[] | select(type=="object") | (.claimed_candidates // 0)] | add // 0' evidence/drain-*.json 2>/dev/null || true)
+          promoted=$(jq -s '[.[] | select(type=="object") | (.promoted_sources // 0)] | add // 0' evidence/drain-*.json 2>/dev/null || true)
+          claimed=$(number_or_zero "$claimed")
+          promoted=$(number_or_zero "$promoted")
+          successful_drains=$(awk '$1==200{n++} END{print n+0}' evidence/drain-*.status 2>/dev/null)
+          successful_drains=$(number_or_zero "$successful_drains")
 
-          delta=0; active_delta=0; opening_delta=0; recent_delta=0
-          if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]]; then delta=$((after-before)); fi
-          if [[ "$active_before" =~ ^[0-9]+$ && "$active_after" =~ ^[0-9]+$ ]]; then active_delta=$((active_after-active_before)); fi
-          if [[ "$openings_before" =~ ^[0-9]+$ && "$openings_after" =~ ^[0-9]+$ ]]; then opening_delta=$((openings_after-openings_before)); fi
-          if [[ "$recent_before" =~ ^[0-9]+$ && "$recent_after" =~ ^[0-9]+$ ]]; then recent_delta=$((recent_after-recent_before)); fi
+          diagnostic_new=$(jq -r '.funnel.new_verified_jobs_window // empty' evidence/diagnostic-after.json 2>/dev/null || true)
+          diagnostic_active=$(jq -r '.funnel.active_verified_jobs // empty' evidence/diagnostic-after.json 2>/dev/null || true)
+          diagnostic_new=$(number_or_zero "$diagnostic_new")
+          diagnostic_active=$(number_or_zero "$diagnostic_active")
 
-          # Per-drain counters are database-backed before/after snapshots and remain valid
-          # even when the final broad diagnostic times out.
-          measured_delta=$drain_delta
-          if [ "$delta" -gt "$measured_delta" ]; then measured_delta=$delta; fi
-          if [ "$active_delta" -gt "$measured_delta" ]; then measured_delta=$active_delta; fi
-          if [ "$recent_delta" -gt "$measured_delta" ]; then measured_delta=$recent_delta; fi
-
+          measured_delta=$public_delta
           if [ "$measured_delta" -gt 0 ]; then state=success; else state=failure; fi
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=verified +${measured_delta}; drains ${successful_drains}/8; claimed ${claimed}; promoted ${promoted}" >> "$GITHUB_OUTPUT"
+          printf 'state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+          printf 'description=verified %+d; drains %d/16; claimed %d; promoted %d\n' \
+            "$measured_delta" "$successful_drains" "$claimed" "$promoted" >> "$GITHUB_OUTPUT"
+
           {
             echo "### Verified job conversion funnel"
-            echo "- Verified delta: +${measured_delta}"
-            echo "- Per-drain verified delta: +${drain_delta}"
-            echo "- Verified 24h window: ${before:-unavailable} -> ${after:-unavailable} (${delta})"
-            echo "- Active verified jobs: ${active_before:-unavailable} -> ${active_after:-unavailable} (${active_delta})"
-            echo "- Active verified openings: ${openings_before:-unavailable} -> ${openings_after:-unavailable} (${opening_delta})"
-            echo "- Public recent verified: ${recent_before:-unavailable} -> ${recent_after:-unavailable} (${recent_delta})"
-            echo "- Successful drains: ${successful_drains}/8"
+            echo "- Public recent verified: ${before} -> ${after} (${public_delta})"
+            echo "- Diagnostic new verified jobs: ${diagnostic_new}"
+            echo "- Diagnostic active verified jobs: ${diagnostic_active}"
+            echo "- Successful drains: ${successful_drains}/16"
             echo "- Candidates claimed: ${claimed}"
             echo "- Sources promoted: ${promoted}"
-            echo "- Recovered employers: ${recovered_employers}"
+            echo "- Publication repair HTTP: $(cat evidence/repair-final.status 2>/dev/null || echo unavailable)"
           } >> "$GITHUB_STEP_SUMMARY"
+
           test "$state" = success
 
       - name: Publish funnel status
