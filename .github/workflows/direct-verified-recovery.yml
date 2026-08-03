@@ -1,0 +1,97 @@
+name: Direct verified recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/direct-verified-recovery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS: "300"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --disable-pip-version-check -e .
+      - name: Convert recoverable production jobs
+        id: convert
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python - <<'PY'
+          import asyncio, json
+          from pathlib import Path
+          from gaia.fast_candidate_drain import _verified_snapshot, drain_candidates
+          from gaia.fresh_lead_retry import retry_fresh_leads
+          from gaia.lead_promotion import promote_leads
+          from gaia.live_inventory import LiveDatabase
+          from gaia.conversion_funnel import repair_publication
+
+          p=Path('evidence'); db=LiveDatabase(migrate=False)
+          def save(n,x): (p/f'{n}.json').write_text(json.dumps(x,default=str,indent=2)+'\n')
+          before=_verified_snapshot(db,hours=24); save('baseline',before)
+          operations=[]
+          for i in range(4):
+              x=asyncio.run(retry_fresh_leads(limit=32,concurrency=6,hours=24,retry_after_minutes=5)); operations.append(x); save(f'retry-{i+1}',x)
+              x=asyncio.run(promote_leads(limit=64,concurrency=8,hours=24,max_age_days=14)); operations.append(x); save(f'promote-{i+1}',x)
+          for i in range(6):
+              x=asyncio.run(drain_candidates(limit=16,concurrency=8,hours=24)); operations.append(x); save(f'drain-{i+1}',x)
+          save('publication',repair_publication(db,hours=24,limit=200))
+          after=_verified_snapshot(db,hours=24); save('final',after)
+          result={
+            'starting_verified':int(before.get('new_verified_jobs_window') or 0),
+            'ending_verified':int(after.get('new_verified_jobs_window') or 0),
+            'starting_active_verified_jobs':int(before.get('active_verified_jobs') or 0),
+            'ending_active_verified_jobs':int(after.get('active_verified_jobs') or 0),
+            'starting_active_verified_openings':int(before.get('active_verified_openings') or 0),
+            'ending_active_verified_openings':int(after.get('active_verified_openings') or 0),
+            'newest_verified_detected_at':after.get('newest_verified_detected_at'),
+            'claimed_candidates':sum(int(x.get('claimed_candidates') or 0) for x in operations),
+            'promoted_sources':sum(int(x.get('promoted_sources') or 0) for x in operations),
+            'recovered_employers':sorted({e for x in operations for e in x.get('recovered_employers',[])}),
+          }
+          result['verified_delta']=result['ending_verified']-result['starting_verified']
+          save('result',result); print(json.dumps(result,default=str))
+          Path('state.env').write_text(f"STATE={'success' if result['verified_delta']>0 else 'failure'}\nDESCRIPTION={result['verified_delta']} verified jobs; {len(result['recovered_employers'])} employers; {result['claimed_candidates']} candidates\n")
+          PY
+      - name: Load state
+        id: state
+        if: always()
+        shell: bash
+        run: |
+          if [ -f state.env ]; then source state.env; else STATE=failure; DESCRIPTION="direct recovery incomplete"; fi
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "description=$DESCRIPTION" >> "$GITHUB_OUTPUT"
+          test -f evidence/result.json && cat evidence/result.json >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Publish status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATE: ${{ steps.state.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.state.outputs.description || 'direct recovery incomplete' }}
+        run: |
+          payload=$(jq -n --arg state "$STATE" --arg context "gaia/verified-job-conversion" --arg description "${DESCRIPTION:0:140}" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl -fsSL -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -d "$payload"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-job-conversion-${{ github.run_id }}
+          path: evidence/
+          retention-days: 30
+      - if: always()
+        run: test "${{ steps.state.outputs.state || 'failure' }}" = success
