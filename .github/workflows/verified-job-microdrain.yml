@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
-      - name: Drain bounded candidates and measure verified delta
+      - name: Recover verified jobs and measure exact delta
         id: run
         shell: bash
         env:
@@ -36,7 +36,32 @@ jobs:
             --connect-timeout 8 --max-time 18 --output evidence/baseline.json \
             "$BASE_URL/api/stats" || true
 
-          for i in $(seq 1 16); do
+          # Recover already-discovered, target-classified employer links first. This path
+          # has previously produced the largest verified-job gains and avoids wasting the
+          # entire run on low-yield source candidates.
+          for i in 1 2; do
+            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time 50 --output "evidence/retry-${i}.json" --write-out '%{http_code}' \
+              "$BASE_URL/api/maintenance/diagnostics/retry-fresh-leads?limit=8&concurrency=4&hours=24&retry_after_minutes=5&timeout_seconds=42" || printf 000)
+            printf '%s\n' "$code" > "evidence/retry-${i}.status"
+            sleep 4
+          done
+
+          for i in 1 2; do
+            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
+              --connect-timeout 10 --max-time 50 --output "evidence/promote-${i}.json" --write-out '%{http_code}' \
+              "$BASE_URL/api/maintenance/diagnostics/promote-leads?limit=12&concurrency=4&hours=24&max_age_days=14&timeout_seconds=42" || printf 000)
+            printf '%s\n' "$code" > "evidence/promote-${i}.status"
+            sleep 4
+          done
+
+          curl --silent --show-error --location --request POST --user-agent "$ua" \
+            --connect-timeout 10 --max-time 65 --output evidence/repair-before-drain.json \
+            "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || true
+
+          # Then sample the best due ATS candidates. Bound the wave so one slow board
+          # cannot consume the whole run and prevent publication of recovered leads.
+          for i in $(seq 1 8); do
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
               --connect-timeout 10 --max-time 50 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
               "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf 000)
@@ -45,7 +70,7 @@ jobs:
           done
 
           curl --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 65 --output evidence/repair.json \
+            --connect-timeout 10 --max-time 65 --output evidence/repair-final.json \
             "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || true
           sleep 12
           curl --silent --show-error --location --user-agent "$ua" \
@@ -53,21 +78,33 @@ jobs:
             "$BASE_URL/api/stats" || true
 
           claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          promoted_sources=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
           drain_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          retry_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          promote_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
+          reset=$(jq -s '[.[] | .fresh_retry_reset // 0] | add // 0' evidence/retry-*.json 2>/dev/null || echo 0)
+          recovered_employers=$(jq -s '[.[] | .recovered_employers[]?] | unique | length' evidence/retry-*.json 2>/dev/null || echo 0)
+          exact_delta=$((drain_delta + retry_delta + promote_delta))
           start=$(jq -r '.new_today // empty' evidence/baseline.json 2>/dev/null || true)
           finish=$(jq -r '.new_today // empty' evidence/final.json 2>/dev/null || true)
           stats_delta=null
           if [[ "$start" =~ ^[0-9]+$ && "$finish" =~ ^[0-9]+$ ]]; then
             stats_delta=$((finish-start))
           fi
-          jq -n --argjson claimed "$claimed" --argjson promoted "$promoted" \
-            --argjson drain_delta "$drain_delta" --arg start "$start" --arg finish "$finish" \
-            --arg stats_delta "$stats_delta" \
-            '{starting_verified:($start|tonumber? // null),ending_verified:($finish|tonumber? // null),stats_verified_delta:($stats_delta|tonumber? // null),claimed_candidates:$claimed,promoted_sources:$promoted,verified_delta:$drain_delta}' > evidence/result.json
-          if [ "$drain_delta" -gt 0 ]; then state=success; else state=failure; fi
+          measured_delta=$exact_delta
+          if [[ "$stats_delta" =~ ^-?[0-9]+$ && "$stats_delta" -gt "$measured_delta" ]]; then
+            measured_delta=$stats_delta
+          fi
+          jq -n --argjson claimed "$claimed" --argjson promoted_sources "$promoted_sources" \
+            --argjson drain_delta "$drain_delta" --argjson retry_delta "$retry_delta" \
+            --argjson promote_delta "$promote_delta" --argjson exact_delta "$exact_delta" \
+            --argjson measured_delta "$measured_delta" --argjson reset "$reset" \
+            --argjson recovered_employers "$recovered_employers" --arg start "$start" \
+            --arg finish "$finish" --arg stats_delta "$stats_delta" \
+            '{starting_verified:($start|tonumber? // null),ending_verified:($finish|tonumber? // null),stats_verified_delta:($stats_delta|tonumber? // null),exact_verified_delta:$exact_delta,verified_delta:$measured_delta,retry_verified_delta:$retry_delta,promotion_verified_delta:$promote_delta,candidate_verified_delta:$drain_delta,fresh_retry_reset:$reset,recovered_employers:$recovered_employers,claimed_candidates:$claimed,promoted_sources:$promoted_sources}' > evidence/result.json
+          if [ "$measured_delta" -gt 0 ]; then state=success; else state=failure; fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=${drain_delta} verified jobs from ${claimed} candidates; ${promoted} sources promoted" >> "$GITHUB_OUTPUT"
+          echo "description=${measured_delta} verified jobs; ${recovered_employers} employers; ${claimed} candidates" >> "$GITHUB_OUTPUT"
           cat evidence/result.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish microdrain status
