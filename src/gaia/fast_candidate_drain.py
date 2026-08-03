@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
-from .conversion_funnel import build_report
 from .inventory import ClaimedTarget
 
 
@@ -87,6 +87,43 @@ def _claim_fast_candidates(worker, *, limit: int, lease_seconds: int) -> list[Cl
     ]
 
 
+def _verified_snapshot(database: Any, *, hours: int) -> dict[str, object]:
+    """Return only the cheap counters needed to prove conversion.
+
+    The full conversion report scans postings, snapshots, tasks, and samples. Calling it
+    before every candidate meant the repair endpoint often timed out before leasing a
+    single source. Families is the small serving table and directly represents visible
+    verified jobs, so use it as the transaction boundary for this hot path.
+    """
+    window = max(1, min(int(hours), 720))
+    with database.connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE target_match IN ('exact','year_confirmed','source_confirmed')
+                  AND direct_openings>0
+              ) AS active_verified_jobs,
+              COALESCE(SUM(direct_openings) FILTER (
+                WHERE target_match IN ('exact','year_confirmed','source_confirmed')
+                  AND direct_openings>0
+              ),0) AS active_verified_openings,
+              COUNT(*) FILTER (
+                WHERE target_match IN ('exact','year_confirmed','source_confirmed')
+                  AND direct_openings>0
+                  AND first_detected_at>=now()-(%s*interval '1 hour')
+              ) AS new_verified_jobs_window,
+              MAX(first_detected_at) FILTER (
+                WHERE target_match IN ('exact','year_confirmed','source_confirmed')
+                  AND direct_openings>0
+              ) AS newest_verified_detected_at
+            FROM families
+            """,
+            (window,),
+        ).fetchone()
+    return dict(row or {})
+
+
 async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[str, object]:
     from .dynamic_market_discovery import _client
     from .live_inventory import InventoryWorker, LiveDatabase
@@ -94,10 +131,8 @@ async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[
     probe_limit = max(1, min(int(limit), 64))
     workers = max(1, min(int(concurrency), 12))
     database = LiveDatabase(migrate=False)
-    before = build_report(database, hours=hours, limit=min(probe_limit, 50))
-    before_funnel = dict(before.get("funnel") or {})
-    before_jobs = int(before_funnel.get("new_verified_jobs_window") or 0)
-    gaps_before = int(before_funnel.get("verified_postings_missing_family") or 0)
+    before = _verified_snapshot(database, hours=hours)
+    before_jobs = int(before.get("new_verified_jobs_window") or 0)
 
     candidate_lease = max(
         60,
@@ -106,7 +141,9 @@ async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[
     worker = InventoryWorker(database, concurrency=workers)
     worker.lease_seconds = candidate_lease
 
-    database.rebuild_families()
+    # Do not rebuild the entire serving model before doing useful work. Candidate probes
+    # persist real employer-board results directly; rebuild once, and only if at least one
+    # source produced a valid result.
     claimed_targets = _claim_fast_candidates(
         worker, limit=probe_limit, lease_seconds=candidate_lease
     )
@@ -116,23 +153,19 @@ async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[
                 *(worker._probe_candidate(client, target) for target in claimed_targets)
             )
         ) if claimed_targets else 0
+
     if promoted:
         worker.store.sync_catalog()
-    database.rebuild_families()
+        database.rebuild_families()
 
-    after = build_report(database, hours=hours, limit=min(probe_limit, 50))
-    after_funnel = dict(after.get("funnel") or {})
-    after_jobs = int(after_funnel.get("new_verified_jobs_window") or 0)
-    gaps_after = int(after_funnel.get("verified_postings_missing_family") or 0)
+    after = _verified_snapshot(database, hours=hours)
+    after_jobs = int(after.get("new_verified_jobs_window") or 0)
     return {
         "status": "ok",
         "candidate_strategy": "curated_high_evidence_ats_first",
         "candidate_lease_seconds": candidate_lease,
         "claimed_candidates": len(claimed_targets),
         "promoted_sources": promoted,
-        "publication_gaps_before": gaps_before,
-        "publication_gaps_after": gaps_after,
-        "publication_gaps_repaired": max(0, gaps_before - gaps_after),
         "verified_jobs_delta": after_jobs - before_jobs,
         "before": before,
         "after": after,
