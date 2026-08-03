@@ -12,15 +12,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Vercel's Supabase integration exposes several aliases. Prefer the transaction
+# pooler URL used by Prisma, then GAIA's explicit override, before legacy aliases.
+# A recreated Supabase project can leave POSTGRES_URL pointing at the deleted
+# tenant while POSTGRES_PRISMA_URL already points at the live project.
 _DATABASE_VARIABLES = (
+    "POSTGRES_PRISMA_URL",
     "GAIA_DATABASE_URL",
+    "POSTGRES_URL_NON_POOLING",
     "POSTGRES_URL",
     "DATABASE_URL",
     "SUPABASE_DB_URL",
 )
 _DATABASE_NOT_CONFIGURED = (
-    "PostgreSQL is not configured. Set GAIA_DATABASE_URL (or DATABASE_URL) "
-    "to the Supabase pooler connection string."
+    "PostgreSQL is not configured. Set POSTGRES_PRISMA_URL or GAIA_DATABASE_URL "
+    "to the active Supabase connection string."
 )
 _SCHEMA_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -112,7 +118,7 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
             self.schema = schema or os.getenv("GAIA_SCHEMA", "public")
             if not _SCHEMA_PATTERN.fullmatch(self.schema):
                 raise ValueError(f"invalid PostgreSQL schema name: {self.schema!r}")
-            self.timeout = max(1, int(float(os.getenv("GAIA_DB_TIMEOUT", "60"))))
+            self.timeout = max(1, int(float(os.getenv("GAIA_DB_TIMEOUT", "8" if os.getenv("VERCEL") else "60"))))
             return
 
         super().__init__(url, schema=schema, migrate=migrate)
