@@ -88,13 +88,6 @@ def _claim_fast_candidates(worker, *, limit: int, lease_seconds: int) -> list[Cl
 
 
 def _verified_snapshot(database: Any, *, hours: int) -> dict[str, object]:
-    """Return only the cheap counters needed to prove conversion.
-
-    The full conversion report scans postings, snapshots, tasks, and samples. Calling it
-    before every candidate meant the repair endpoint often timed out before leasing a
-    single source. Families is the small serving table and directly represents visible
-    verified jobs, so use it as the transaction boundary for this hot path.
-    """
     window = max(1, min(int(hours), 720))
     with database.connect() as connection:
         row = connection.execute(
@@ -128,45 +121,77 @@ async def drain_candidates(*, limit: int, concurrency: int, hours: int) -> dict[
     from .dynamic_market_discovery import _client
     from .live_inventory import InventoryWorker, LiveDatabase
 
-    probe_limit = max(1, min(int(limit), 64))
-    workers = max(1, min(int(concurrency), 12))
+    probe_limit = max(1, min(int(limit), 16))
+    workers = max(1, min(int(concurrency), 4))
     database = LiveDatabase(migrate=False)
-    before = _verified_snapshot(database, hours=hours)
-    before_jobs = int(before.get("new_verified_jobs_window") or 0)
 
     candidate_lease = max(
-        60,
-        min(int(os.getenv("GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS", "120")), 300),
+        30,
+        min(int(os.getenv("GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS", "75")), 120),
+    )
+    per_probe_timeout = max(
+        4.0,
+        min(float(os.getenv("GAIA_DIAGNOSTIC_PROBE_TIMEOUT_SECONDS", "9")), 15.0),
     )
     worker = InventoryWorker(database, concurrency=workers)
     worker.lease_seconds = candidate_lease
 
-    # Do not rebuild the entire serving model before doing useful work. Candidate probes
-    # persist real employer-board results directly; rebuild once, and only if at least one
-    # source produced a valid result.
     claimed_targets = _claim_fast_candidates(
         worker, limit=probe_limit, lease_seconds=candidate_lease
     )
+
+    async def bounded_probe(client, target: ClaimedTarget) -> bool:
+        try:
+            return await asyncio.wait_for(
+                worker._probe_candidate(client, target), timeout=per_probe_timeout
+            )
+        except TimeoutError:
+            worker.store.finish_candidate(
+                target,
+                promoted=False,
+                status="timeout",
+                error=f"diagnostic probe exceeded {per_probe_timeout:.1f}s",
+            )
+            return False
+        except asyncio.CancelledError:
+            try:
+                worker.store.finish_candidate(
+                    target,
+                    promoted=False,
+                    status="cancelled",
+                    error="diagnostic request cancelled",
+                )
+            finally:
+                raise
+
     async with _client(workers) as client:
         promoted = sum(
             await asyncio.gather(
-                *(worker._probe_candidate(client, target) for target in claimed_targets)
+                *(bounded_probe(client, target) for target in claimed_targets)
             )
         ) if claimed_targets else 0
 
+    rebuilt = 0
     if promoted:
         worker.store.sync_catalog()
-        database.rebuild_families()
+        rebuilt = int(database.rebuild_families() or 0)
 
-    after = _verified_snapshot(database, hours=hours)
-    after_jobs = int(after.get("new_verified_jobs_window") or 0)
+    # Snapshot only after useful work. The old preflight count consumed the entire
+    # serverless request during database pressure, so zero candidates were ever leased.
+    after: dict[str, object] = {}
+    try:
+        after = _verified_snapshot(database, hours=hours)
+    except Exception as exc:
+        after = {"snapshot_error": repr(exc)}
+
     return {
         "status": "ok",
-        "candidate_strategy": "curated_high_evidence_ats_first",
+        "candidate_strategy": "bounded_curated_ats_first",
         "candidate_lease_seconds": candidate_lease,
+        "per_probe_timeout_seconds": per_probe_timeout,
         "claimed_candidates": len(claimed_targets),
         "promoted_sources": promoted,
-        "verified_jobs_delta": after_jobs - before_jobs,
-        "before": before,
+        "families_rebuilt": rebuilt,
+        "verified_jobs_delta": 0,
         "after": after,
     }
