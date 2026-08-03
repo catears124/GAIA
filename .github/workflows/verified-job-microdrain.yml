@@ -6,7 +6,7 @@ on:
     paths:
       - ".github/workflows/verified-job-microdrain.yml"
   schedule:
-    - cron: "47 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -32,10 +32,6 @@ jobs:
           mkdir -p evidence
           ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
 
-          # /api/stats currently performs several aggregate scans and can consume the
-          # entire workflow before conversion begins. The drain endpoint already reports
-          # database-backed before/after verified counts, so use those exact deltas as the
-          # primary measurement and keep stats strictly best-effort.
           curl --silent --show-error --location --user-agent "$ua" \
             --connect-timeout 8 --max-time 18 --output evidence/baseline.json \
             "$BASE_URL/api/stats" || true
@@ -48,8 +44,6 @@ jobs:
             sleep 4
           done
 
-          # Publish only after candidate work is complete. Rebuilding during every drain
-          # wave caused lock contention and statement timeouts without increasing jobs.
           curl --silent --show-error --location --request POST --user-agent "$ua" \
             --connect-timeout 10 --max-time 65 --output evidence/repair.json \
             "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || true
