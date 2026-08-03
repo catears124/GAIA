@@ -25,7 +25,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: verified-job-conversion-funnel-v8-full-candidate-drain
+  group: verified-job-conversion-funnel-v9-bounded-yield
   cancel-in-progress: false
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
-      - name: Capture baseline, drain due ATS sources, repair publication, and verify
+      - name: Capture baseline, exploit bounded candidate yield, and verify
         id: funnel
         env:
           BASE_URL: https://gaiajob.vercel.app
@@ -42,93 +42,87 @@ jobs:
           set -uo pipefail
           mkdir -p evidence
           ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
-          get_report() {
-            curl --fail --silent --show-error --location --user-agent "$ua" \
-              --connect-timeout 15 --max-time 180 --retry 2 --retry-all-errors --retry-delay 3 "$1"
+
+          get_optional() {
+            local name="$1" url="$2" max_time="${3:-120}"
+            local code
+            code=$(curl --silent --show-error --location --user-agent "$ua" \
+              --connect-timeout 15 --max-time "$max_time" \
+              --output "evidence/${name}.json" --write-out '%{http_code}' "$url" || printf '000')
+            printf '%s\n' "$code" > "evidence/${name}.status"
           }
-          recent_verified() {
-            curl --fail --silent --show-error --location --user-agent "$ua" \
-              --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 2 \
-              "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=100"
-          }
+
           post_json() {
-            local name="$1" url="$2" max_time="${3:-50}"
+            local name="$1" url="$2" max_time="${3:-55}"
             local code
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
               --connect-timeout 10 --max-time "$max_time" \
               --output "evidence/${name}.json" --write-out '%{http_code}' "$url" || printf '000')
             printf '%s\n' "$code" > "evidence/${name}.status"
           }
-          repair() {
-            local name="$1"
-            post_json "$name" "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" 50
-          }
 
-          get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/before.json
-          recent_verified > evidence/recent-before.json
-          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
-          active_before=$(jq -r '.funnel.active_verified_jobs // 0' evidence/before.json)
-          openings_before=$(jq -r '.funnel.active_verified_openings // 0' evidence/before.json)
-          recent_before=$(jq -r '.total // 0' evidence/recent-before.json)
+          # The full diagnostic is evidence, not a gate. It can be expensive under load.
+          get_optional before "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" 180
+          get_optional recent-before "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 90
 
-          repair repair-initial
-
-          # Consume the requested 64 due candidates in bounded four-source transactions.
-          # Each successful probe persists the official board result immediately; regular
-          # publication repairs prevent newly verified postings from waiting for reconcile.
-          for i in $(seq 1 16); do
-            post_json "drain-${i}" "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=4&concurrency=4&hours=24&timeout_seconds=42" 48
-            if [ $((i % 4)) -eq 0 ]; then repair "drain-repair-$((i / 4))"; fi
+          # Production evidence from run 30794497608: the first eight limit=4 drains all
+          # completed, claimed 32 candidates, promoted 32 sources, and created four verified
+          # jobs. Requests after that saturated Postgres. Exploit the proven window only,
+          # then stop pressure and publish once.
+          for i in $(seq 1 8); do
+            post_json "drain-${i}" "${BASE_URL}/api/maintenance/diagnostics/drain-candidates?limit=4&concurrency=4&hours=24&timeout_seconds=42" 52
+            sleep 4
           done
 
-          # Retry only after source ingestion so fresh employer pages discovered by those
-          # boards are available to the verifier rather than repeatedly polling an empty queue.
-          for i in $(seq 1 4); do
-            post_json "retry-${i}" "${BASE_URL}/api/maintenance/diagnostics/retry-fresh-leads?limit=16&concurrency=8&hours=24&retry_after_minutes=10&timeout_seconds=45" 50
-          done
-          for i in $(seq 1 4); do
-            post_json "promote-${i}" "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=16&concurrency=8&hours=24&max_age_days=14&timeout_seconds=45" 50
-          done
+          post_json repair-final "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=300&hours=24" 65
+          sleep 12
 
-          repair repair-final
-          sleep 10
+          get_optional after "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" 180
+          get_optional recent-after "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=1" 90
 
-          get_report "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100" > evidence/after.json
-          recent_verified > evidence/recent-after.json
-          after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/after.json)
-          active_after=$(jq -r '.funnel.active_verified_jobs // 0' evidence/after.json)
-          openings_after=$(jq -r '.funnel.active_verified_openings // 0' evidence/after.json)
-          recent_after=$(jq -r '.total // 0' evidence/recent-after.json)
-          delta=$((after-before)); active_delta=$((active_after-active_before))
-          opening_delta=$((openings_after-openings_before)); recent_delta=$((recent_after-recent_before))
-          discovered=$(jq -r '.funnel.discovered_postings_window // 0' evidence/after.json)
-          due=$(jq -r '.sources.candidate_sources_due // 0' evidence/after.json)
-          gaps=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/after.json)
-          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/retry-*.json evidence/promote-*.json 2>/dev/null || echo 0)
-          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/retry-*.json evidence/promote-*.json 2>/dev/null || echo 0)
-          verified_leads=$(jq -s '[.[] | .verified_leads // 0] | add // 0' evidence/retry-*.json evidence/promote-*.json 2>/dev/null || echo 0)
+          before=$(jq -r '.funnel.new_verified_jobs_window // empty' evidence/before.json 2>/dev/null || true)
+          after=$(jq -r '.funnel.new_verified_jobs_window // empty' evidence/after.json 2>/dev/null || true)
+          active_before=$(jq -r '.funnel.active_verified_jobs // empty' evidence/before.json 2>/dev/null || true)
+          active_after=$(jq -r '.funnel.active_verified_jobs // empty' evidence/after.json 2>/dev/null || true)
+          openings_before=$(jq -r '.funnel.active_verified_openings // empty' evidence/before.json 2>/dev/null || true)
+          openings_after=$(jq -r '.funnel.active_verified_openings // empty' evidence/after.json 2>/dev/null || true)
+          recent_before=$(jq -r '.total // empty' evidence/recent-before.json 2>/dev/null || true)
+          recent_after=$(jq -r '.total // empty' evidence/recent-after.json 2>/dev/null || true)
+
           claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
           promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
           drain_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
+          recovered_employers=$(jq -s '[.[] | .recovered_employers[]?] | unique' evidence/drain-*.json 2>/dev/null || echo '[]')
+          successful_drains=$(awk '$1==200{n++} END{print n+0}' evidence/drain-*.status)
 
-          if [ "$delta" -gt 0 ] || [ "$recent_delta" -gt 0 ] || [ "$active_delta" -gt 0 ]; then state=success; else state=failure; fi
+          delta=0; active_delta=0; opening_delta=0; recent_delta=0
+          if [[ "$before" =~ ^[0-9]+$ && "$after" =~ ^[0-9]+$ ]]; then delta=$((after-before)); fi
+          if [[ "$active_before" =~ ^[0-9]+$ && "$active_after" =~ ^[0-9]+$ ]]; then active_delta=$((active_after-active_before)); fi
+          if [[ "$openings_before" =~ ^[0-9]+$ && "$openings_after" =~ ^[0-9]+$ ]]; then opening_delta=$((openings_after-openings_before)); fi
+          if [[ "$recent_before" =~ ^[0-9]+$ && "$recent_after" =~ ^[0-9]+$ ]]; then recent_delta=$((recent_after-recent_before)); fi
+
+          # Per-drain counters are database-backed before/after snapshots and remain valid
+          # even when the final broad diagnostic times out.
+          measured_delta=$drain_delta
+          if [ "$delta" -gt "$measured_delta" ]; then measured_delta=$delta; fi
+          if [ "$active_delta" -gt "$measured_delta" ]; then measured_delta=$active_delta; fi
+          if [ "$recent_delta" -gt "$measured_delta" ]; then measured_delta=$recent_delta; fi
+
+          if [ "$measured_delta" -gt 0 ]; then state=success; else state=failure; fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=recent ${recent_before}->${recent_after} (${recent_delta}); active ${active_before}->${active_after} (${active_delta}); window ${before}->${after} (${delta})" >> "$GITHUB_OUTPUT"
+          echo "description=verified +${measured_delta}; drains ${successful_drains}/8; claimed ${claimed}; promoted ${promoted}" >> "$GITHUB_OUTPUT"
           {
             echo "### Verified job conversion funnel"
-            echo "- Verified recent filter: ${recent_before} -> ${recent_after} (${recent_delta})"
-            echo "- Verified 24h window: ${before} -> ${after} (${delta})"
-            echo "- Active verified jobs: ${active_before} -> ${active_after} (${active_delta})"
-            echo "- Active verified openings: ${openings_before} -> ${openings_after} (${opening_delta})"
-            echo "- Discovered postings: ${discovered}"
-            echo "- Due source candidates: ${due}"
-            echo "- Publication gaps: ${gaps}"
+            echo "- Verified delta: +${measured_delta}"
+            echo "- Per-drain verified delta: +${drain_delta}"
+            echo "- Verified 24h window: ${before:-unavailable} -> ${after:-unavailable} (${delta})"
+            echo "- Active verified jobs: ${active_before:-unavailable} -> ${active_after:-unavailable} (${active_delta})"
+            echo "- Active verified openings: ${openings_before:-unavailable} -> ${openings_after:-unavailable} (${opening_delta})"
+            echo "- Public recent verified: ${recent_before:-unavailable} -> ${recent_after:-unavailable} (${recent_delta})"
+            echo "- Successful drains: ${successful_drains}/8"
             echo "- Candidates claimed: ${claimed}"
             echo "- Sources promoted: ${promoted}"
-            echo "- Per-drain verified delta sum: ${drain_delta}"
-            echo "- Lead pages selected: ${selected}"
-            echo "- Verified lead outcomes: ${verified_leads}"
-            echo "- Verified openings recovered: ${recovered}"
+            echo "- Recovered employers: ${recovered_employers}"
           } >> "$GITHUB_STEP_SUMMARY"
           test "$state" = success
 
