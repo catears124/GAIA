@@ -31,60 +31,49 @@ jobs:
           set -uo pipefail
           mkdir -p evidence
           ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
-          get_stats() {
-            for attempt in $(seq 1 8); do
-              if curl -fsSL --user-agent "$ua" --connect-timeout 10 --max-time 75 \
-                "$BASE_URL/api/stats"; then return 0; fi
-              sleep $((attempt * 5))
-            done
-            return 1
-          }
-          baseline=$(get_stats)
-          printf '%s\n' "$baseline" > evidence/baseline.json
-          start=$(jq -r '.new_today // 0' evidence/baseline.json)
-          start_open=$(jq -r '.active_listings // 0' evidence/baseline.json)
 
-          # Single-candidate calls are the only path that has recently produced verified jobs.
-          # Keep waves small and avoid a full maintenance tick after every candidate; those
-          # ticks were saturating Postgres and causing all later calls to return 504.
-          for i in $(seq 1 24); do
+          # /api/stats currently performs several aggregate scans and can consume the
+          # entire workflow before conversion begins. The drain endpoint already reports
+          # database-backed before/after verified counts, so use those exact deltas as the
+          # primary measurement and keep stats strictly best-effort.
+          curl --silent --show-error --location --user-agent "$ua" \
+            --connect-timeout 8 --max-time 18 --output evidence/baseline.json \
+            "$BASE_URL/api/stats" || true
+
+          for i in $(seq 1 16); do
             code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 48 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
-              "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=38" || printf 000)
+              --connect-timeout 10 --max-time 50 --output "evidence/drain-${i}.json" --write-out '%{http_code}' \
+              "$BASE_URL/api/maintenance/diagnostics/drain-candidates?limit=1&concurrency=1&hours=24&timeout_seconds=42" || printf 000)
             printf '%s\n' "$code" > "evidence/drain-${i}.status"
-            if [ $((i % 6)) -eq 0 ]; then
-              curl --silent --show-error --location --request POST --user-agent "$ua" \
-                --connect-timeout 10 --max-time 55 --output "evidence/repair-${i}.json" \
-                "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=120&hours=24" || true
-              sleep 8
-            else
-              sleep 3
-            fi
+            sleep 4
           done
 
-          # One bounded maintenance pass publishes persisted crawl results without repeatedly
-          # rebuilding the entire inventory during the drain wave.
+          # Publish only after candidate work is complete. Rebuilding during every drain
+          # wave caused lock contention and statement timeouts without increasing jobs.
           curl --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 70 --output evidence/final-tick.json \
-            "$BASE_URL/api/maintenance/tick" || true
-          sleep 15
+            --connect-timeout 10 --max-time 65 --output evidence/repair.json \
+            "$BASE_URL/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" || true
+          sleep 12
+          curl --silent --show-error --location --user-agent "$ua" \
+            --connect-timeout 8 --max-time 18 --output evidence/final.json \
+            "$BASE_URL/api/stats" || true
 
-          final=$(get_stats)
-          printf '%s\n' "$final" > evidence/final.json
-          finish=$(jq -r '.new_today // 0' evidence/final.json)
-          finish_open=$(jq -r '.active_listings // 0' evidence/final.json)
-          delta=$((finish-start))
-          opening_delta=$((finish_open-start_open))
           claimed=$(jq -s '[.[] | .claimed_candidates // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
           promoted=$(jq -s '[.[] | .promoted_sources // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
           drain_delta=$(jq -s '[.[] | .verified_jobs_delta // 0] | add // 0' evidence/drain-*.json 2>/dev/null || echo 0)
-          jq -n --argjson start "$start" --argjson finish "$finish" --argjson delta "$delta" \
-            --argjson start_open "$start_open" --argjson finish_open "$finish_open" --argjson opening_delta "$opening_delta" \
-            --argjson claimed "$claimed" --argjson promoted "$promoted" --argjson drain_delta "$drain_delta" \
-            '{starting_verified:$start,ending_verified:$finish,verified_delta:$delta,starting_openings:$start_open,ending_openings:$finish_open,opening_delta:$opening_delta,claimed_candidates:$claimed,promoted_sources:$promoted,per_drain_verified_delta:$drain_delta}' > evidence/result.json
-          if [ "$delta" -gt 0 ]; then state=success; else state=failure; fi
+          start=$(jq -r '.new_today // empty' evidence/baseline.json 2>/dev/null || true)
+          finish=$(jq -r '.new_today // empty' evidence/final.json 2>/dev/null || true)
+          stats_delta=null
+          if [[ "$start" =~ ^[0-9]+$ && "$finish" =~ ^[0-9]+$ ]]; then
+            stats_delta=$((finish-start))
+          fi
+          jq -n --argjson claimed "$claimed" --argjson promoted "$promoted" \
+            --argjson drain_delta "$drain_delta" --arg start "$start" --arg finish "$finish" \
+            --arg stats_delta "$stats_delta" \
+            '{starting_verified:($start|tonumber? // null),ending_verified:($finish|tonumber? // null),stats_verified_delta:($stats_delta|tonumber? // null),claimed_candidates:$claimed,promoted_sources:$promoted,verified_delta:$drain_delta}' > evidence/result.json
+          if [ "$drain_delta" -gt 0 ]; then state=success; else state=failure; fi
           echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=${start} to ${finish} verified (${delta}); openings ${start_open} to ${finish_open}" >> "$GITHUB_OUTPUT"
+          echo "description=${drain_delta} verified jobs from ${claimed} candidates; ${promoted} sources promoted" >> "$GITHUB_OUTPUT"
           cat evidence/result.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish microdrain status
