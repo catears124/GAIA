@@ -1,201 +1,43 @@
-name: Runtime market discovery
+name: Runtime market discovery diagnostic
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/runtime-market-discovery.yml"
-      - "src/gaia/runtime_discovery_api.py"
-      - "src/gaia/dynamic_market_discovery.py"
-      - "src/gaia/market_discovery.py"
-      - "src/gaia/conversion_funnel.py"
-      - "src/gaia/conversion_diagnostics_api.py"
-      - "app.py"
-  schedule:
-    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-  statuses: write
 
 concurrency:
-  group: runtime-market-discovery
-  cancel-in-progress: false
+  group: runtime-market-discovery-diagnostic
+  cancel-in-progress: true
 
 jobs:
   discover:
+    name: Run one manual Vercel discovery pulse
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
-      - name: Search and promote new employer sources through production runtime
-        id: discovery
+      - name: Trigger bounded runtime market discovery
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          http_status=$(curl --silent --show-error --location \
+          status=$(curl --silent --show-error --location \
             --request POST \
             --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
             --connect-timeout 15 --max-time 240 \
-            --retry 2 --retry-all-errors --retry-delay 5 \
+            --dump-header evidence/discovery.headers \
             --output evidence/discovery.json \
             --write-out '%{http_code}' \
             https://gaiajob.vercel.app/api/maintenance/discover || printf '000')
-          if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "empty", "not_due"))' evidence/discovery.json >/dev/null; then
-            echo "state=failure" >> "$GITHUB_OUTPUT"
-            echo "description=Runtime market discovery failed HTTP ${http_status}" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          operation=$(jq -r '.status' evidence/discovery.json)
-          saved=$(jq -r '.summary.candidate_rows_written // 0' evidence/discovery.json)
-          promoted=$(jq -r '.summary.candidate_sources_promoted // 0' evidence/discovery.json)
-          searched=$(jq -r '.summary.successful_queries // 0' evidence/discovery.json)
-          echo "operation=$operation" >> "$GITHUB_OUTPUT"
-          echo "saved=$saved" >> "$GITHUB_OUTPUT"
-          echo "promoted=$promoted" >> "$GITHUB_OUTPUT"
-          echo "searched=$searched" >> "$GITHUB_OUTPUT"
+          cat evidence/discovery.json || true
+          test "$status" = 200
+          jq -e 'type == "object" and (.status | IN("ok", "empty", "not_due"))' evidence/discovery.json >/dev/null
 
-      - name: Drain due candidates and measure verified-job change
-        id: drain
-        shell: bash
-        run: |
-          set -uo pipefail
-          ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
-          get_report() {
-            local name="$1"
-            curl --silent --show-error --location \
-              --user-agent "$ua" \
-              --connect-timeout 10 --max-time 60 \
-              --retry 2 --retry-all-errors --retry-delay 2 \
-              --output "evidence/${name}.json" \
-              --write-out '%{http_code}' \
-              "https://gaiajob.vercel.app/api/maintenance/diagnostics/conversion?hours=24&limit=100" \
-              > "evidence/${name}.status" || {
-                printf '000\n' > "evidence/${name}.status"
-                printf '{}\n' > "evidence/${name}.json"
-              }
-          }
-
-          get_report conversion-before
-          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/conversion-before.json)
-          due_before=$(jq -r '.sources.candidate_sources_due // 0' evidence/conversion-before.json)
-          gaps_before=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/conversion-before.json)
-          claimed_total=0
-          promoted_total=0
-
-          for batch in 1 2 3 4; do
-            status=$(curl --silent --show-error --location \
-              --request POST \
-              --user-agent "$ua" \
-              --connect-timeout 15 --max-time 100 \
-              --output "evidence/drain-${batch}.json" \
-              --write-out '%{http_code}' \
-              "https://gaiajob.vercel.app/api/maintenance/diagnostics/drain-candidates?limit=12&concurrency=12&hours=24" \
-              || printf '000')
-            printf '%s\n' "$status" > "evidence/drain-${batch}.status"
-            claimed=$(jq -r '.claimed_candidates // 0' "evidence/drain-${batch}.json" 2>/dev/null || echo 0)
-            promoted=$(jq -r '.promoted_sources // 0' "evidence/drain-${batch}.json" 2>/dev/null || echo 0)
-            claimed_total=$((claimed_total + claimed))
-            promoted_total=$((promoted_total + promoted))
-            printf 'batch=%s http=%s claimed=%s promoted=%s verified_delta=%s\n' \
-              "$batch" "$status" "$claimed" "$promoted" \
-              "$(jq -r '.verified_jobs_delta // 0' "evidence/drain-${batch}.json" 2>/dev/null || echo 0)" \
-              | tee "evidence/drain-${batch}.txt"
-          done
-
-          get_report conversion-after
-          after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/conversion-after.json)
-          due_after=$(jq -r '.sources.candidate_sources_due // 0' evidence/conversion-after.json)
-          gaps_after=$(jq -r '.funnel.verified_postings_missing_family // 0' evidence/conversion-after.json)
-          delta=$((after - before))
-          echo "verified_before=$before" >> "$GITHUB_OUTPUT"
-          echo "verified_after=$after" >> "$GITHUB_OUTPUT"
-          echo "verified_delta=$delta" >> "$GITHUB_OUTPUT"
-          echo "claimed=$claimed_total" >> "$GITHUB_OUTPUT"
-          echo "promoted=$promoted_total" >> "$GITHUB_OUTPUT"
-          echo "due_before=$due_before" >> "$GITHUB_OUTPUT"
-          echo "due_after=$due_after" >> "$GITHUB_OUTPUT"
-          echo "gaps_before=$gaps_before" >> "$GITHUB_OUTPUT"
-          echo "gaps_after=$gaps_after" >> "$GITHUB_OUTPUT"
-
-      - name: Summarize discovery and conversion
-        id: summary
-        shell: bash
-        env:
-          OPERATION: ${{ steps.discovery.outputs.operation || 'unknown' }}
-          SEARCHED: ${{ steps.discovery.outputs.searched || '0' }}
-          SAVED: ${{ steps.discovery.outputs.saved || '0' }}
-          DISCOVERY_PROMOTED: ${{ steps.discovery.outputs.promoted || '0' }}
-          VERIFIED_BEFORE: ${{ steps.drain.outputs.verified_before || '0' }}
-          VERIFIED_AFTER: ${{ steps.drain.outputs.verified_after || '0' }}
-          VERIFIED_DELTA: ${{ steps.drain.outputs.verified_delta || '0' }}
-          CLAIMED: ${{ steps.drain.outputs.claimed || '0' }}
-          DRAIN_PROMOTED: ${{ steps.drain.outputs.promoted || '0' }}
-          DUE_BEFORE: ${{ steps.drain.outputs.due_before || '0' }}
-          DUE_AFTER: ${{ steps.drain.outputs.due_after || '0' }}
-          GAPS_BEFORE: ${{ steps.drain.outputs.gaps_before || '0' }}
-          GAPS_AFTER: ${{ steps.drain.outputs.gaps_after || '0' }}
-        run: |
-          if [ "$VERIFIED_DELTA" -gt 0 ]; then
-            state=success
-            description="Verified jobs +${VERIFIED_DELTA} to ${VERIFIED_AFTER}; ${DRAIN_PROMOTED} drain promotions"
-          elif [ "$DISCOVERY_PROMOTED" -gt 0 ] || [ "$DRAIN_PROMOTED" -gt 0 ]; then
-            state=pending
-            description="${DISCOVERY_PROMOTED}+${DRAIN_PROMOTED} sources promoted; verified jobs still ${VERIFIED_AFTER}"
-          else
-            state=failure
-            description="No verified-job increase; ${VERIFIED_AFTER} in 24h; ${DUE_AFTER} candidates due"
-          fi
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=$description" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Runtime market discovery and conversion"
-            echo "- Discovery result: ${OPERATION}"
-            echo "- Successful searches: ${SEARCHED}"
-            echo "- Candidate rows written: ${SAVED}"
-            echo "- Sources promoted during discovery: ${DISCOVERY_PROMOTED}"
-            echo "- Candidate rows claimed during drain: ${CLAIMED}"
-            echo "- Sources promoted during drain: ${DRAIN_PROMOTED}"
-            echo "- New verified jobs: ${VERIFIED_BEFORE} → ${VERIFIED_AFTER} (${VERIFIED_DELTA})"
-            echo "- Due candidates: ${DUE_BEFORE} → ${DUE_AFTER}"
-            echo "- Publication gaps: ${GAPS_BEFORE} → ${GAPS_AFTER}"
-            echo ""
-            echo "#### Drain batches"
-            cat evidence/drain-*.txt 2>/dev/null || true
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish discovery status
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STATE: ${{ steps.summary.outputs.state || 'failure' }}
-          DESCRIPTION: ${{ steps.summary.outputs.description || 'Runtime market discovery did not complete' }}
-        shell: bash
-        run: |
-          payload=$(jq -n \
-            --arg state "$STATE" \
-            --arg context "gaia/runtime-market-discovery" \
-            --arg description "${DESCRIPTION:0:140}" \
-            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{state:$state,context:$context,description:$description,target_url:$target_url}')
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
-            -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$payload"
-
-      - name: Upload discovery evidence
+      - name: Upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-market-discovery-${{ github.run_id }}
+          name: runtime-market-discovery-diagnostic-${{ github.run_id }}
           path: evidence/
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Fail if conversion did not advance
-        if: always()
-        run: test "${{ steps.summary.outputs.state || 'failure' }}" != failure
+          if-no-files-found: error
+          retention-days: 7
