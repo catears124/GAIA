@@ -12,6 +12,15 @@ on:
       - src/gaia/db.py
       - src/gaia/cli.py
       - src/gaia/schema.sql
+      - src/gaia/production_smoke.py
+      - src/gaia/static_snapshot.py
+      - src/gaia/static_snapshot_http.py
+      - src/gaia/frontend/index.html
+      - src/gaia/frontend/remote-snapshot.js
+      - src/gaia/frontend/api-resilience.js
+      - src/gaia/frontend/emergency-outage.js
+      - src/gaia/frontend/outage-controller.js
+      - .github/workflows/static-snapshot.yml
       - .github/workflows/production-api-smoke.yml
   schedule:
     - cron: "*/15 * * * *"
@@ -152,23 +161,30 @@ jobs:
           set -uo pipefail
 
           fetch() {
-            local name="$1" path="$2" max_time="$3" retries="$4"
+            local name="$1" target="$2" max_time="$3" retries="$4" url
+            if [[ "$target" == https://* ]]; then
+              url="$target"
+            else
+              url="${GAIA_BASE_URL}${target}"
+            fi
             if ! curl --silent --show-error --location \
               --connect-timeout 5 --max-time "$max_time" \
               --retry "$retries" --retry-all-errors --retry-delay 1 \
               --dump-header "smoke/${name}.headers" \
               --output "smoke/${name}.body" \
               --write-out '%{http_code}' \
-              "${GAIA_BASE_URL}${path}" > "smoke/${name}.status"; then
+              "$url" > "smoke/${name}.status"; then
               printf '000\n' > "smoke/${name}.status"
               : > "smoke/${name}.body"
             fi
           }
 
           fetch index / 12 1 &
-          fetch emergency /assets/emergency-outage.js 12 1 &
-          fetch controller /assets/outage-controller.js 12 1 &
-          fetch snapshot /assets/last-known-inventory.json 12 1 &
+          fetch remote '/assets/remote-snapshot.js?v=1.0.1' 12 1 &
+          fetch resilience '/assets/api-resilience.js?v=2.0.0' 12 1 &
+          fetch emergency '/assets/emergency-outage.js?v=2.0.0' 12 1 &
+          fetch controller '/assets/outage-controller.js?v=1.2.1' 12 1 &
+          fetch snapshot "https://raw.githubusercontent.com/catears124/GAIA/snapshot-data/src/gaia/frontend/last-known-inventory.json?v=${GITHUB_RUN_ID}" 20 2 &
           fetch health /api/health 12 1 &
           fetch stats /api/stats 12 0 &
           fetch families '/api/families?page=1&page_size=12&sort=newest' 12 0 &
@@ -189,7 +205,7 @@ jobs:
             echo "- URL: ${GAIA_BASE_URL}"
             echo "- Result: ${state}"
             echo "- Detail: ${description}"
-            echo "- Offline snapshot usable: ${snapshot_usable}"
+            echo "- Published snapshot usable: ${snapshot_usable}"
             echo "- Bootstrap request: HTTP $(cat smoke/bootstrap.status 2>/dev/null || echo unknown)"
             jq -r '.statuses | to_entries[] | "- \(.key): HTTP \(.value)"' smoke/result.json
           } >> "$GITHUB_STEP_SUMMARY"
