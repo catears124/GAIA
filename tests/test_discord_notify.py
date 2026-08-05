@@ -4,7 +4,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from gaia.discord_notify import CHANNELS, _payload, _source_label, _webhook_wait_url
+from gaia.discord_notify import (
+    CHANNELS,
+    _category_label,
+    _payload,
+    _source_label,
+    _webhook_wait_url,
+)
 
 
 def test_verified_alert_uses_one_clean_embed_and_pings_everyone() -> None:
@@ -26,9 +32,9 @@ def test_verified_alert_uses_one_clean_embed_and_pings_everyone() -> None:
     assert payload["allowed_mentions"] == {"parse": ["everyone"]}
 
     embed = payload["embeds"][0]
-    assert embed["title"] == "Software Engineer Intern"
+    assert embed["title"] == "Roblox"
     assert embed["url"] == "https://careers.roblox.com/jobs/123"
-    assert embed["description"] == "**Roblox**\nSan Mateo, CA"
+    assert embed["description"] == "**Software Engineer Intern**\nSan Mateo, CA"
     assert embed["footer"]["text"] == "GAIA · Verified"
     assert embed["fields"][0] == {
         "name": "Category",
@@ -37,15 +43,19 @@ def test_verified_alert_uses_one_clean_embed_and_pings_everyone() -> None:
     }
     assert embed["fields"][1] == {
         "name": "Source",
-        "value": "Employer site · ROBLOX",
+        "value": "Employer site",
         "inline": True,
     }
 
 
-def test_workday_source_is_presented_without_internal_board_slug() -> None:
+def test_workday_source_hides_internal_board_slug() -> None:
+    assert _source_label("workday:gdit:external_career_site") == "Workday"
+
+
+def test_generic_category_is_inferred_from_title() -> None:
     assert (
-        _source_label("workday:gdit:external_career_site")
-        == "Workday · GDIT"
+        _category_label("other", "2027 Information Technology Internship")
+        == "IT"
     )
 
 
@@ -66,6 +76,7 @@ def test_lead_alert_is_visibly_distinct() -> None:
     assert payload["username"] == "GAIA Lead"
     assert payload["embeds"][0]["footer"]["text"] == "GAIA · Lead"
     assert payload["embeds"][0]["fields"][0]["value"] == "ML / AI"
+    assert payload["embeds"][0]["fields"][1]["value"] == "Registry · Simplify"
     assert "Location not stated" in payload["embeds"][0]["description"]
 
 
