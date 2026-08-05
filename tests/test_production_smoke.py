@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from gaia.production_smoke import Probe, evaluate, snapshot_is_usable
 
@@ -8,9 +8,28 @@ def probes() -> dict[str, Probe]:
     return {
         "index": Probe(
             200,
-            '<script src="emergency-outage.js"></script><script src="api-resilience.js"></script>',
+            (
+                '<script src="remote-snapshot.js?v=1.0.1"></script>'
+                '<script src="api-resilience.js?v=2.0.0"></script>'
+                '<script src="emergency-outage.js?v=2.0.0"></script>'
+                '<script src="outage-controller.js?v=1.2.1"></script>'
+            ),
         ),
-        "emergency": Probe(200, "const MAX_EMERGENCY_AGE_MS = 1;"),
+        "remote": Probe(
+            200,
+            (
+                "raw.githubusercontent.com/catears124/GAIA/snapshot-data "
+                'cache: "no-store" mode: "cors"'
+            ),
+        ),
+        "resilience": Probe(
+            200,
+            (
+                "window.fetch = async function resilientFetch "
+                "staticSnapshotResponse cachedResponse gaia:stale-data"
+            ),
+        ),
+        "emergency": Probe(200, "MAX_EMERGENCY_AGE_MS = 0 retireLegacyState"),
         "controller": Probe(
             200, "function liveHealthProbe(){ return new XMLHttpRequest(); }"
         ),
@@ -42,7 +61,9 @@ def probes() -> dict[str, Probe]:
 
 
 def test_healthy_contract_succeeds() -> None:
-    assert evaluate(probes()).state == "success"
+    result = evaluate(probes())
+    assert result.state == "success"
+    assert "resilience chain" in result.description
 
 
 def test_live_degraded_inventory_is_pending_not_healthy() -> None:
@@ -120,6 +141,15 @@ def test_snapshot_rejects_stale_future_and_unbounded_expiry() -> None:
     assert snapshot_is_usable(Probe(200, json.dumps(payload)), now=now) is False
     payload["generated_at"] = "2026-07-31T16:00:00Z"
     payload["max_stale_seconds"] = 999999999
+    assert snapshot_is_usable(Probe(200, json.dumps(payload)), now=now) is False
+
+
+def test_public_snapshot_must_be_younger_than_45_minutes() -> None:
+    payload = json.loads(probes()["snapshot"].body)
+    now = datetime(2026, 8, 5, 21, 0, tzinfo=UTC)
+    payload["generated_at"] = (now - timedelta(minutes=44)).isoformat()
+    assert snapshot_is_usable(Probe(200, json.dumps(payload)), now=now) is True
+    payload["generated_at"] = (now - timedelta(minutes=46)).isoformat()
     assert snapshot_is_usable(Probe(200, json.dumps(payload)), now=now) is False
 
 
@@ -201,3 +231,16 @@ def test_missing_or_malformed_evidence_fails_closed() -> None:
     evidence = probes()
     evidence["health"] = Probe(200, "not-json")
     assert evaluate(evidence).description == "Health API returned an invalid contract"
+
+
+def test_deployed_asset_versions_and_legacy_runtime_fail_closed() -> None:
+    evidence = probes()
+    evidence["index"] = Probe(200, "api-resilience.js?v=2.0.0")
+    assert "missing resilience assets" in evaluate(evidence).description
+
+    evidence = probes()
+    evidence["emergency"] = Probe(
+        200,
+        "MAX_EMERGENCY_AGE_MS = 0 retireLegacyState window.fetch = localStorage",
+    )
+    assert evaluate(evidence).description == "Legacy durable-cache runtime is active or invalid"
