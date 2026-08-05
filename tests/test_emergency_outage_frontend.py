@@ -9,9 +9,10 @@ def test_published_snapshot_transport_loads_before_resilience_layers() -> None:
     html = (FRONTEND / "index.html").read_text(encoding="utf-8")
     snapshot = html.index("/assets/remote-snapshot.js")
     primary = html.index("/assets/api-resilience.js")
-    emergency = html.index("/assets/emergency-outage.js")
+    compatibility = html.index("/assets/emergency-outage.js")
     app = html.index("/assets/app-v2.js")
-    assert snapshot < primary < emergency < app
+    assert snapshot < primary < compatibility < app
+    assert 'emergency-outage.js?v=2.0.0' in html
 
 
 def test_remote_snapshot_bypasses_vercel_functions() -> None:
@@ -24,27 +25,21 @@ def test_remote_snapshot_bypasses_vercel_functions() -> None:
     assert "return nativeFetch(input, init);" in source
 
 
-def test_emergency_cache_is_bounded_and_truthful() -> None:
-    source = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
-    assert "30 * 24 * 60 * 60 * 1000" in source
-    assert 'headers.set("X-GAIA-Stale", "1")' in source
-    assert "data.ok = false" in source
-    assert "data.inventory = { ...(data.inventory || {}), healthy: false" in source
-    assert "Live inventory is offline" in source
-
-
-def test_degraded_but_live_health_clears_the_offline_banner() -> None:
+def test_legacy_emergency_runtime_is_inert() -> None:
     source = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
 
-    assert "async function liveReachable" in source
-    assert 'data.stale !== true' in source
-    assert 'data.reason !== "database_unavailable"' in source
-    assert "data.ok === true" not in source
-    assert "data.inventory?.healthy !== false" not in source
-    assert "if (await liveReachable(request, response)) clearBanner();" in source
+    assert "MAX_EMERGENCY_AGE_MS = 0" in source
+    assert "retireLegacyState" in source
+    assert 'LEGACY_BANNER_ID = "gaia-emergency-banner"' in source
+    assert "window.fetch =" not in source
+    assert "localStorage" not in source
+    assert "Live inventory is offline" not in source
+    assert "durable device backup" not in source
 
 
-def test_emergency_runtime_never_intercepts_writes() -> None:
-    source = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
-    assert 'method !== "GET"' in source
-    assert "READ_ENDPOINTS" in source
+def test_resilience_runtime_is_the_only_read_fallback_wrapper() -> None:
+    primary = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    compatibility = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
+
+    assert "window.fetch = async function resilientFetch" in primary
+    assert "window.fetch =" not in compatibility
