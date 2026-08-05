@@ -25,6 +25,7 @@ _CATEGORY_LABELS = {
     "hardware": "Hardware",
     "quant": "Quant",
     "product": "Product",
+    "other": "Other technical",
     "other-technical": "Other technical",
 }
 
@@ -42,6 +43,8 @@ _SOURCE_LABELS = {
     "verification-lead": "Verification lead",
     "workday": "Workday",
 }
+
+_SOURCE_DETAIL_KINDS = {"external-index", "registry", "verification-lead"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,11 +129,26 @@ def _locations(row: dict[str, Any]) -> str:
     return ", ".join(cleaned) or "Location not stated"
 
 
-def _category_label(value: object) -> str:
+def _category_label(value: object, title: object = "") -> str:
     key = _truncate(value, 80).lower()
-    if not key:
-        return "Other"
-    return _CATEGORY_LABELS.get(key, key.replace("-", " ").title())
+    if key and key not in {"other", "other-technical"}:
+        return _CATEGORY_LABELS.get(key, key.replace("-", " ").title())
+
+    normalized_title = f" {_truncate(title, 300).lower()} "
+    inferred = (
+        (("machine learning", "artificial intelligence", " ai ", " ml "), "ML / AI"),
+        (("information technology", " it intern", " it internship"), "IT"),
+        (("software", "developer", "programmer"), "Software"),
+        (("data", "analytics"), "Data"),
+        (("security", "cyber"), "Security"),
+        (("hardware", "firmware", "electrical"), "Hardware"),
+        (("quant", "trading"), "Quant"),
+        (("product",), "Product"),
+    )
+    for needles, label in inferred:
+        if any(needle in normalized_title for needle in needles):
+            return label
+    return _CATEGORY_LABELS.get(key, "Other technical")
 
 
 def _source_token(value: str) -> str:
@@ -149,13 +167,10 @@ def _source_label(value: object) -> str:
     provider = _SOURCE_LABELS.get(kind)
     if provider is None:
         return raw
+    if kind not in _SOURCE_DETAIL_KINDS or len(parts) < 2:
+        return provider
 
-    detail = ""
-    if kind == "domain" and len(parts) >= 3:
-        detail = parts[-1]
-    elif len(parts) >= 2:
-        detail = _source_token(parts[1])
-
+    detail = _source_token(parts[1])
     return _truncate(f"{provider} · {detail}" if detail else provider, 180)
 
 
@@ -170,7 +185,7 @@ def _payload(row: dict[str, Any], channel: Channel) -> dict[str, Any]:
     location = _truncate(_locations(row), 500)
     apply_url = str(row.get("apply_url") or "")
     source = _source_label(row.get("source"))
-    category = _category_label(row.get("category"))
+    category = _category_label(row.get("category"), title)
     posted = _iso(row.get("posted_at"))
     detected = _iso(row.get("first_detected_at"))
 
@@ -196,9 +211,9 @@ def _payload(row: dict[str, Any], channel: Channel) -> dict[str, Any]:
         )
 
     embed: dict[str, object] = {
-        "title": _truncate(title, 256),
+        "title": _truncate(company, 256),
         "url": apply_url,
-        "description": _truncate(f"**{company}**\n{location}", 4_096),
+        "description": _truncate(f"**{title}**\n{location}", 4_096),
         "color": channel.color,
         "fields": fields,
         "footer": {"text": f"GAIA · {channel.label}"},
