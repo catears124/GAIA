@@ -2,7 +2,7 @@ name: Publish static inventory snapshot
 
 on:
   schedule:
-    - cron: "8,38 * * * *"
+    - cron: "3,18,33,48 * * * *"
   workflow_dispatch:
   push:
     branches: [main]
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_PUBLIC_BASE_URL: https://gaiajob.vercel.app
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
@@ -40,32 +40,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Publish pending snapshot status
         shell: bash
         run: |
-          payload=$(jq -n --arg state pending --arg context gaia/static-snapshot --arg description "Refreshing deployable inventory snapshot" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          payload=$(jq -n --arg state pending --arg context gaia/static-snapshot --arg description "Refreshing public inventory snapshot" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
           curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
+
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
+
       - name: Restore latest durable snapshot artifact
         id: artifact_restore
         continue-on-error: true
         run: |
           python -m gaia.restore_snapshot_artifact --max-artifacts 50
           echo artifact-restored > snapshot-source.txt
-      - name: Export through healthy public API
-        id: api_export
-        continue-on-error: true
-        run: |
-          python -m gaia.static_snapshot_http --timeout-seconds 20
-          echo public-api > snapshot-source.txt
-      - name: Classify database fallback readiness
+
+      - name: Check direct database readiness
         id: db_gate
-        if: steps.api_export.outcome != 'success'
         shell: bash
         run: |
           set +e
@@ -100,8 +98,9 @@ jobs:
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           cat database-readiness.log
           exit 0
+
       - name: Upload database readiness evidence
-        if: always() && steps.db_gate.outcome != 'skipped'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gaia-static-snapshot-readiness-${{ github.run_id }}
@@ -110,13 +109,23 @@ jobs:
             database-readiness.json
           retention-days: 14
           if-no-files-found: warn
-      - name: Export directly from database fallback
+
+      - name: Export directly from production database
         id: db_export
-        if: steps.api_export.outcome != 'success' && steps.db_gate.outputs.state == 'ready'
+        if: steps.db_gate.outputs.state == 'ready'
         continue-on-error: true
         run: |
           python -m gaia.static_snapshot
           echo database > snapshot-source.txt
+
+      - name: Export through public API only as fallback
+        id: api_export
+        if: steps.db_export.outcome != 'success'
+        continue-on-error: true
+        run: |
+          python -m gaia.static_snapshot_http --timeout-seconds 20
+          echo public-api > snapshot-source.txt
+
       - name: Validate generated or recovered snapshot
         id: validate
         shell: bash
@@ -138,6 +147,7 @@ jobs:
             echo retained > snapshot-source.txt
           fi
           echo "source=$(cat snapshot-source.txt)" >> "$GITHUB_OUTPUT"
+
       - name: Upload durable snapshot artifact
         if: steps.validate.outcome == 'success' && (steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database')
         uses: actions/upload-artifact@v4
@@ -146,25 +156,35 @@ jobs:
           path: src/gaia/frontend/last-known-inventory.json
           retention-days: 30
           if-no-files-found: error
-      - name: Commit changed snapshot
+
+      - name: Publish snapshot to data-only branch
         if: steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database'
         shell: bash
         run: |
           set -euo pipefail
-          path=src/gaia/frontend/last-known-inventory.json
-          if git diff --quiet -- "$path"; then
+          source_path="$GITHUB_WORKSPACE/src/gaia/frontend/last-known-inventory.json"
+          cp "$source_path" /tmp/last-known-inventory.json
+          git fetch origin snapshot-data
+          rm -rf /tmp/gaia-snapshot-data
+          git worktree add /tmp/gaia-snapshot-data origin/snapshot-data
+          destination=/tmp/gaia-snapshot-data/src/gaia/frontend/last-known-inventory.json
+          mkdir -p "$(dirname "$destination")"
+          cp /tmp/last-known-inventory.json "$destination"
+          cd /tmp/gaia-snapshot-data
+          if git diff --quiet -- src/gaia/frontend/last-known-inventory.json; then
             echo "Snapshot is unchanged."
             exit 0
           fi
           git config user.name "gaia-inventory-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$path"
-          git commit -m "data: refresh deployable inventory snapshot"
+          git add src/gaia/frontend/last-known-inventory.json
+          git commit -m "data: refresh public inventory snapshot"
           for attempt in 1 2 3; do
-            if git pull --rebase origin main && git push origin HEAD:main; then exit 0; fi
+            if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then exit 0; fi
             sleep $((attempt * 5))
           done
           exit 1
+
       - name: Publish final snapshot status
         if: always()
         shell: bash
@@ -174,23 +194,19 @@ jobs:
           db_reason="${{ steps.db_gate.outputs.reason }}"
           if [ "$db_state" = invalid ]; then
             state=failure
-            description="Snapshot fallback database configuration is invalid"
+            description="Snapshot database configuration is invalid"
           elif [ "$db_state" = failed ]; then
             state=failure
             description="Snapshot database readiness probe failed internally"
           elif [ "${{ steps.validate.outcome }}" != success ]; then
             state=failure
-            description="No usable deployable inventory snapshot exists"
+            description="No usable inventory snapshot exists"
           elif [ "$source" = retained ] || [ "$source" = artifact-restored ]; then
             state=pending
-            if [ "$db_state" = recovering ]; then
-              description="Database/API recovery active; recovered snapshot remains usable"
-            else
-              description="Recovered snapshot remains usable; refresh source unavailable"
-            fi
+            description="Recovered snapshot remains usable; refresh source unavailable"
           else
             state=success
-            description="Deployable inventory snapshot refreshed via ${source}"
+            description="Public inventory snapshot refreshed via ${source}"
           fi
           echo "database_state=${db_state:-not-needed} database_reason=${db_reason:-none} source=${source:-none}"
           payload=$(jq -n --arg state "$state" --arg context gaia/static-snapshot --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
