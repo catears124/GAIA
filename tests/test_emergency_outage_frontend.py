@@ -5,12 +5,23 @@ ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "src" / "gaia" / "frontend"
 
 
-def test_emergency_outage_runtime_loads_before_primary_resilience() -> None:
+def test_published_snapshot_transport_loads_before_resilience_layers() -> None:
     html = (FRONTEND / "index.html").read_text(encoding="utf-8")
-    emergency = html.index("/assets/emergency-outage.js")
+    snapshot = html.index("/assets/remote-snapshot.js")
     primary = html.index("/assets/api-resilience.js")
+    emergency = html.index("/assets/emergency-outage.js")
     app = html.index("/assets/app-v2.js")
-    assert emergency < primary < app
+    assert snapshot < primary < emergency < app
+
+
+def test_remote_snapshot_bypasses_vercel_functions() -> None:
+    source = (FRONTEND / "remote-snapshot.js").read_text(encoding="utf-8")
+
+    assert "raw.githubusercontent.com/catears124/GAIA/snapshot-data" in source
+    assert 'url.pathname === LOCAL_PATH' in source
+    assert 'cache: "no-store"' in source
+    assert 'mode: "cors"' in source
+    assert "return nativeFetch(input, init);" in source
 
 
 def test_emergency_cache_is_bounded_and_truthful() -> None:
