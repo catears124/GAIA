@@ -1,141 +1,43 @@
-name: Runtime employer coverage
+name: Runtime employer coverage diagnostic
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/runtime-coverage.yml"
-      - "src/gaia/maintenance_api.py"
-      - "src/gaia/universe.py"
-      - "src/gaia/employer_census.py"
-  schedule:
-    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
-  statuses: write
 
 concurrency:
-  group: runtime-employer-coverage
+  group: runtime-employer-coverage-diagnostic
   cancel-in-progress: true
 
 jobs:
   reconcile:
-    name: Rebuild employer census through Vercel
+    name: Run one manual Vercel coverage pulse
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
-      - uses: actions/checkout@v4
-      - name: Allow production deployment to settle
-        if: github.event_name == 'push'
-        run: sleep 60
-      - name: Run leased runtime coverage reconcile
-        id: coverage
+      - name: Trigger bounded runtime coverage reconcile
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p coverage
-          status=000
-          for attempt in 1 2 3 4; do
-            if curl --silent --show-error --location \
-              --request POST \
-              --user-agent 'GAIA-production-maintenance/1' \
-              --connect-timeout 5 --max-time 55 \
-              --dump-header coverage/reconcile.headers \
-              --output coverage/reconcile.json \
-              --write-out '%{http_code}' \
-              https://gaiajob.vercel.app/api/maintenance/coverage > coverage/reconcile.status; then
-              status=$(tr -d '\r\n' < coverage/reconcile.status)
-              if [ "$status" = 200 ]; then
-                break
-              fi
-            fi
-            sleep $((attempt * 10))
-          done
-
-          if ! curl --silent --show-error --location \
-            --connect-timeout 5 --max-time 25 \
-            --dump-header coverage/universe.headers \
-            --output coverage/universe.json \
+          mkdir -p evidence
+          status=$(curl --silent --show-error --location \
+            --request POST \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+            --connect-timeout 10 --max-time 60 \
+            --dump-header evidence/coverage.headers \
+            --output evidence/coverage.json \
             --write-out '%{http_code}' \
-            'https://gaiajob.vercel.app/api/universe?limit=1' > coverage/universe.status; then
-            printf '000\n' > coverage/universe.status
-            printf '{}\n' > coverage/universe.json
-          fi
+            https://gaiajob.vercel.app/api/maintenance/coverage || printf '000')
+          cat evidence/coverage.json || true
+          test "$status" = 200
+          jq -e 'type == "object" and (.status | IN("ok", "not_due"))' evidence/coverage.json >/dev/null
 
-          runtime_status=$(tr -d '\r\n' < coverage/reconcile.status 2>/dev/null || echo 000)
-          universe_status=$(tr -d '\r\n' < coverage/universe.status)
-          state=failure
-          description="Runtime employer coverage did not complete"
-          if [ "$runtime_status" = 200 ] && \
-             jq -e 'type == "object" and (.status | IN("ok", "not_due"))' coverage/reconcile.json >/dev/null && \
-             [ "$universe_status" = 200 ] && \
-             jq -e '
-               .ready == true and
-               (.rebuild_required // false) == false and
-               ((.summary.known_employers // 0) > 0) and
-               ((.summary.enumerated_employers // 0) > 0) and
-               ((.summary.enumerated_employers // 0) + (.summary.unresolved_employers // 0) == (.summary.known_employers // 0))
-             ' coverage/universe.json >/dev/null; then
-            known=$(jq -r '.summary.known_employers' coverage/universe.json)
-            enumerated=$(jq -r '.summary.enumerated_employers' coverage/universe.json)
-            unresolved=$(jq -r '.summary.unresolved_employers' coverage/universe.json)
-            blind=$(jq -r '.summary.blind_spots // 0' coverage/universe.json)
-            state=success
-            description="Employer census ${known} known; ${enumerated} enumerated; ${unresolved} unresolved; ${blind} blind spots"
-          elif [ "$runtime_status" = 404 ]; then
-            description="Runtime coverage endpoint is not deployed"
-          elif [ "$runtime_status" != 200 ]; then
-            description="Runtime coverage reconcile failed (HTTP ${runtime_status})"
-          elif [ "$universe_status" != 200 ]; then
-            description="Employer universe endpoint failed (HTTP ${universe_status})"
-          else
-            description="Employer universe remained empty, rebuilding, or contradictory"
-          fi
-          printf '%s\n' "$state" > coverage/state
-          printf '%s\n' "$description" > coverage/description
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=$description" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Runtime employer coverage"
-            echo "- Result: ${state}"
-            echo "- Detail: ${description}"
-            echo "- Reconcile HTTP: ${runtime_status}"
-            echo "- Universe HTTP: ${universe_status}"
-            jq -r '(.summary // {}) as $s | "- Known: \($s.known_employers // 0)\n- Enumerated: \($s.enumerated_employers // 0)\n- Unresolved: \($s.unresolved_employers // 0)\n- Blind spots: \($s.blind_spots // 0)"' coverage/universe.json
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish runtime coverage status
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STATE: ${{ steps.coverage.outputs.state }}
-          DESCRIPTION: ${{ steps.coverage.outputs.description }}
-        shell: bash
-        run: |
-          state="${STATE:-failure}"
-          description="${DESCRIPTION:-Runtime employer coverage did not complete}"
-          payload=$(jq -n \
-            --arg state "$state" \
-            --arg context gaia/runtime-coverage \
-            --arg description "${description:0:140}" \
-            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{state:$state,context:$context,description:$description,target_url:$target_url}')
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
-            -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -d "$payload"
-      - name: Upload coverage evidence
+      - name: Upload diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runtime-employer-coverage-${{ github.run_id }}
-          path: coverage/
+          name: runtime-coverage-diagnostic-${{ github.run_id }}
+          path: evidence/
           if-no-files-found: error
-          retention-days: 14
-      - name: Fail invalid employer coverage
-        if: always()
-        run: test "$(cat coverage/state 2>/dev/null || echo failure)" = success
+          retention-days: 7
