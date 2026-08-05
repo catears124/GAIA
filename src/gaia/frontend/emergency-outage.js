@@ -148,12 +148,14 @@
     return durableCached(request) || await cacheStorageCached(request);
   }
 
-  async function liveHealthy(request, response) {
+  async function liveReachable(request, response) {
     if (!response.ok) return false;
     if (urlFor(request)?.pathname !== "/api/health") return true;
     try {
       const data = await response.clone().json();
-      return data.ok === true && data.healthy !== false && data.inventory?.healthy !== false;
+      // Inventory catch-up is a degraded-but-live state. Only stale or explicit
+      // database-outage payloads should keep the emergency offline banner visible.
+      return data.stale !== true && data.reason !== "database_unavailable";
     } catch { return false; }
   }
 
@@ -172,7 +174,7 @@
       const response = await withDeadline(nativeFetch(request.clone()));
       if (response.ok) {
         void rememberDurable(request, response);
-        if (await liveHealthy(request, response)) clearBanner();
+        if (await liveReachable(request, response)) clearBanner();
       }
       if (response.status < 500) return response;
       return await emergencyCached(request) || response;
