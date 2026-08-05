@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+MAX_PUBLIC_SNAPSHOT_AGE = timedelta(minutes=45)
+
 
 @dataclass(frozen=True)
 class Probe:
@@ -56,7 +58,8 @@ def snapshot_is_usable(probe: Probe, *, now: datetime | None = None) -> bool:
         or isinstance(max_stale_seconds, bool)
         or not 60 <= max_stale_seconds <= 604_800
         or generated > current + timedelta(minutes=5)
-        or current - generated > timedelta(seconds=max_stale_seconds)
+        or current - generated
+        > min(timedelta(seconds=max_stale_seconds), MAX_PUBLIC_SNAPSHOT_AGE)
         or not isinstance(index, list)
         or not index
         or payload.get("family_index_complete") is not True
@@ -109,8 +112,72 @@ def _inventory_counts(inventory: dict[str, object]) -> tuple[int, int] | None:
     return fresh, total
 
 
+def _validate_resilience_assets(probes: dict[str, Probe]) -> str | None:
+    index = probes["index"]
+    if index.status != 200:
+        return f"Deployed UI unavailable (HTTP {index.status})"
+    required_scripts = (
+        "remote-snapshot.js?v=1.0.1",
+        "api-resilience.js?v=2.0.0",
+        "emergency-outage.js?v=2.0.0",
+        "outage-controller.js?v=1.2.1",
+    )
+    missing_scripts = [script for script in required_scripts if script not in index.body]
+    if missing_scripts:
+        return f"Deployed UI missing resilience assets: {', '.join(missing_scripts)}"
+
+    remote = probes["remote"]
+    if (
+        remote.status != 200
+        or "raw.githubusercontent.com/catears124/GAIA/snapshot-data" not in remote.body
+        or 'cache: "no-store"' not in remote.body
+        or 'mode: "cors"' not in remote.body
+    ):
+        return "Remote snapshot transport missing or stale"
+
+    resilience = probes["resilience"]
+    if (
+        resilience.status != 200
+        or "window.fetch = async function resilientFetch" not in resilience.body
+        or "staticSnapshotResponse" not in resilience.body
+        or "cachedResponse" not in resilience.body
+        or "gaia:stale-data" not in resilience.body
+    ):
+        return "Primary API resilience runtime missing or stale"
+
+    emergency = probes["emergency"]
+    if (
+        emergency.status != 200
+        or "MAX_EMERGENCY_AGE_MS = 0" not in emergency.body
+        or "retireLegacyState" not in emergency.body
+        or "window.fetch =" in emergency.body
+        or "localStorage" in emergency.body
+        or "durable device backup" in emergency.body
+    ):
+        return "Legacy durable-cache runtime is active or invalid"
+
+    controller = probes["controller"]
+    if (
+        controller.status != 200
+        or "liveHealthProbe" not in controller.body
+        or "XMLHttpRequest" not in controller.body
+    ):
+        return "Automatic outage recovery controller missing or stale"
+    return None
+
+
 def evaluate(probes: dict[str, Probe]) -> SmokeResult:
-    required = {"index", "emergency", "controller", "snapshot", "health", "stats", "families"}
+    required = {
+        "index",
+        "remote",
+        "resilience",
+        "emergency",
+        "controller",
+        "snapshot",
+        "health",
+        "stats",
+        "families",
+    }
     missing = sorted(required - probes.keys())
     statuses = {name: probe.status for name, probe in probes.items()}
     if missing:
@@ -119,37 +186,9 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
         )
 
     snapshot_usable = snapshot_is_usable(probes["snapshot"])
-    index = probes["index"]
-    if index.status != 200:
-        return SmokeResult(
-            "failure",
-            f"Deployed UI unavailable (HTTP {index.status})",
-            snapshot_usable,
-            statuses,
-        )
-    if "emergency-outage.js" not in index.body or "api-resilience.js" not in index.body:
-        return SmokeResult(
-            "failure", "Deployed UI missing resilience runtimes", snapshot_usable, statuses
-        )
-
-    emergency = probes["emergency"]
-    if emergency.status != 200 or "MAX_EMERGENCY_AGE_MS" not in emergency.body:
-        return SmokeResult(
-            "failure", "Emergency inventory runtime missing or invalid", snapshot_usable, statuses
-        )
-
-    controller = probes["controller"]
-    if (
-        controller.status != 200
-        or "liveHealthProbe" not in controller.body
-        or "XMLHttpRequest" not in controller.body
-    ):
-        return SmokeResult(
-            "failure",
-            "Automatic outage recovery controller missing or stale",
-            snapshot_usable,
-            statuses,
-        )
+    asset_error = _validate_resilience_assets(probes)
+    if asset_error:
+        return SmokeResult("failure", asset_error, snapshot_usable, statuses)
 
     health = probes["health"]
     health_payload = _json(health.body)
@@ -194,6 +233,13 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
             return SmokeResult(
                 "failure", "Health API returned stale data as a live response", snapshot_usable, statuses
             )
+        if not snapshot_usable:
+            return SmokeResult(
+                "failure",
+                "Published inventory snapshot is missing, invalid, or older than 45 minutes",
+                False,
+                statuses,
+            )
         if health_payload["ok"] is False:
             degraded_inventory = counts
     elif health.status == 503:
@@ -207,7 +253,7 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
         if snapshot_usable:
             return SmokeResult(
                 "pending",
-                "Database recovery active; deployed offline inventory is usable",
+                "Database recovery active; published inventory snapshot is usable",
                 True,
                 statuses,
             )
@@ -270,7 +316,10 @@ def evaluate(probes: dict[str, Probe]) -> SmokeResult:
             statuses,
         )
     return SmokeResult(
-        "success", "Production UI and APIs passed black-box smoke checks", snapshot_usable, statuses
+        "success",
+        "Production UI, resilience chain, snapshot, and APIs passed black-box checks",
+        snapshot_usable,
+        statuses,
     )
 
 
@@ -291,7 +340,17 @@ def main() -> None:
     parser.add_argument("directory", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    names = ("index", "emergency", "controller", "snapshot", "health", "stats", "families")
+    names = (
+        "index",
+        "remote",
+        "resilience",
+        "emergency",
+        "controller",
+        "snapshot",
+        "health",
+        "stats",
+        "families",
+    )
     result = evaluate({name: load_probe(args.directory, name) for name in names})
     payload = json.dumps(asdict(result), separators=(",", ":"), sort_keys=True)
     if args.output:
