@@ -107,7 +107,10 @@ async def run_inventory_tick() -> dict[str, object]:
     database = LiveDatabase(migrate=False)
     worker_id = _worker_id("tick")
     interval = max(120, int(os.getenv("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "600")))
-    lease = max(60, int(os.getenv("GAIA_RUNTIME_TICK_LEASE_SECONDS", "90")))
+    lease = max(
+        30,
+        min(int(os.getenv("GAIA_RUNTIME_TICK_LEASE_SECONDS", "45")), 60),
+    )
     if not _claim_task(
         database,
         worker_id,
@@ -122,11 +125,11 @@ async def run_inventory_tick() -> dict[str, object]:
             "summary": None,
         }
 
-    # Leave substantial headroom under the platform function limit. The worker's own
-    # budget is cooperative; wait_for is the hard boundary that cancels in-flight HTTP
-    # work. LiveInventoryWorker releases each cancelled crawl lease immediately.
-    budget = max(8.0, min(float(os.getenv("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "20")), 24.0))
-    concurrency = max(1, min(int(os.getenv("GAIA_RUNTIME_TICK_CONCURRENCY", "3")), 6))
+    # Production evidence shows this Vercel function is hard-killed at roughly 25s.
+    # Finish by 13s even when an environment variable still contains the old 42s value,
+    # leaving enough room for cancellation cleanup, task finalization, and JSON response.
+    budget = max(4.0, min(float(os.getenv("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "8")), 10.0))
+    concurrency = max(1, min(int(os.getenv("GAIA_RUNTIME_TICK_CONCURRENCY", "6")), 8))
     worker = InventoryWorker(database, concurrency=concurrency)
 
     # Discovery has dedicated workflows. During an outage, this endpoint must spend its
@@ -139,7 +142,7 @@ async def run_inventory_tick() -> dict[str, object]:
     try:
         summary = await asyncio.wait_for(
             worker.run(once=True, budget_seconds=budget),
-            timeout=budget + 6.0,
+            timeout=budget + 3.0,
         )
     except TimeoutError:
         payload = worker.summary.as_dict()
