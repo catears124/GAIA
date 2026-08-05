@@ -6,7 +6,6 @@ from typing import Any
 
 from .inventory import ClaimedTarget
 
-
 _FAST_KINDS = (
     "greenhouse",
     "lever",

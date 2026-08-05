@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from gaia.activity_metrics import stall_assessment
 from gaia import career_surface_collector as career
+from gaia.activity_metrics import stall_assessment
 from gaia.provider_expansion import install_provider_expansion
 
 

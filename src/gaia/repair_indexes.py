@@ -7,7 +7,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import psycopg
 from psycopg import errors, sql
 
-
 APPLICATION_NAME = "gaia-index-repair-v4"
 SUPERSEDED_APPLICATION_NAMES = (
     "gaia-index-repair",

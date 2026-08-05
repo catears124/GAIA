@@ -2,7 +2,6 @@ from pathlib import Path
 
 from gaia.provider_health_summary import summarize
 
-
 WORKFLOW = Path(".github/workflows/production-health.yml")
 
 

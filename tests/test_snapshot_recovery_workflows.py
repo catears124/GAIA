@@ -13,7 +13,7 @@ class _FakeClient:
     def __init__(self, payloads: dict[str, dict[str, Any]], **_: Any) -> None:
         self.payloads = payloads
 
-    def __enter__(self) -> "_FakeClient":
+    def __enter__(self) -> _FakeClient:
         return self
 
     def __exit__(self, *_: object) -> None:
