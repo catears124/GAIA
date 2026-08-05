@@ -124,7 +124,10 @@ def test_runtime_tick_is_database_leased_and_budget_bounded() -> None:
     assert "budget_seconds=budget" in source
     assert "asyncio.wait_for" in source
     assert "runtime inventory tick reached its hard deadline" in source
-    assert 'status in {"broken", "partial"}' in source
+    assert 'status == "partial"' in source
+    assert 'status == "broken"' in source
+    assert "retry = 10" in source
+    assert "retry = 60" in source
 
 
 def test_claim_does_not_create_a_false_cooldown_before_work_finishes() -> None:
