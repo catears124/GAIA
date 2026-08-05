@@ -1,0 +1,37 @@
+name: Agent black-box smoke test
+
+on:
+  push:
+    branches: [agent/black-box-resilience-smoke]
+    paths:
+      - ".github/workflows/agent-black-box-smoke-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/black-box-resilience-smoke
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Ruff changed files
+        run: >-
+          ruff check
+          src/gaia/production_smoke.py
+          tests/test_production_smoke.py
+          tests/test_production_smoke_outage_contract.py
+          tests/test_production_smoke_workflow.py
+      - name: Run production smoke regressions
+        run: >-
+          pytest -q
+          tests/test_production_smoke.py
+          tests/test_production_smoke_outage_contract.py
+          tests/test_production_smoke_workflow.py
+          tests/test_static_snapshot_workflow_contract.py
