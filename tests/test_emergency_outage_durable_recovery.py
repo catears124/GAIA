@@ -1,37 +1,31 @@
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "src" / "gaia" / "frontend"
 
 
-def test_emergency_outage_has_bounded_durable_fallback():
+def test_legacy_emergency_layer_cannot_cache_or_intercept_requests() -> None:
     script = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
-    assert 'LOCAL_KEY = "gaia:emergency-api-v1"' in script
-    assert "MAX_LOCAL_ENTRIES = 48" in script
-    assert "MAX_LOCAL_BYTES = 3_500_000" in script
-    assert "MAX_EMERGENCY_AGE_MS = 30 * 24 * 60 * 60 * 1000" in script
-    assert "REQUEST_DEADLINE_MS = 9000" in script
-    assert "localStorage.setItem(LOCAL_KEY" in script
-    assert "Promise.race([promise, deadline])" in script
+
+    assert "window.fetch =" not in script
+    assert "Promise.race" not in script
+    assert "localStorage" not in script
+    assert "X-GAIA-Durable-Backup" not in script
+    assert "MAX_EMERGENCY_AGE_MS = 0" in script
 
 
-def test_emergency_health_never_reports_cached_inventory_healthy():
+def test_legacy_offline_banner_is_removed_defensively() -> None:
     script = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
-    assert "data.ok = false" in script
-    assert "data.healthy = false" in script
-    assert "data.stale = true" in script
-    assert "healthy: false, stale_snapshot: true" in script
-    assert "X-GAIA-Durable-Backup" in script
+
+    assert 'LEGACY_BANNER_ID = "gaia-emergency-banner"' in script
+    assert "document.getElementById(LEGACY_BANNER_ID)?.remove()" in script
+    assert "MutationObserver" in script
+    assert 'window.addEventListener("gaia:live-data"' in script
+    assert 'window.addEventListener("gaia:stale-data"' in script
 
 
-def test_emergency_wrapper_never_intercepts_writes():
-    script = (FRONTEND / "emergency-outage.js").read_text(encoding="utf-8")
-    assert 'method !== "GET"' in script
-    assert "url.origin !== location.origin" in script
-    assert 'READ_ENDPOINTS = new Set(["health", "stats", "facets", "families", "coverage", "universe"])' in script
-
-
-def test_outage_controller_retries_with_backoff_and_stops_when_hidden():
+def test_outage_controller_retries_with_backoff_and_stops_when_hidden() -> None:
     script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
     assert "RETRY_BASE_MS = 5000" in script
     assert "RETRY_MAX_MS = 60000" in script
