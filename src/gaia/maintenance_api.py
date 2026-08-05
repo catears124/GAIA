@@ -81,7 +81,12 @@ def _finish_task(
     status: str,
     error: str | None = None,
 ) -> None:
-    retry = 60 if status in {"broken", "partial"} else interval_seconds
+    if status == "partial":
+        retry = 10
+    elif status == "broken":
+        retry = 60
+    else:
+        retry = interval_seconds
     with database.connect() as connection:
         connection.execute(
             """
@@ -174,7 +179,11 @@ async def run_inventory_tick() -> dict[str, object]:
         raise
 
     payload = summary.as_dict()
-    status = "partial" if int(payload.get("failed") or 0) else "ok"
+    inventory = inventory_state(database)
+    fresh = int(inventory.get("fresh") or 0)
+    total = int(inventory.get("total") or 0)
+    catchup_pending = total > 0 and fresh < total
+    status = "partial" if int(payload.get("failed") or 0) or catchup_pending else "ok"
     _finish_task(
         database,
         worker_id,
@@ -182,7 +191,6 @@ async def run_inventory_tick() -> dict[str, object]:
         interval_seconds=interval,
         status=status,
     )
-    inventory = inventory_state(database)
     return {
         "status": status,
         "executed": True,
