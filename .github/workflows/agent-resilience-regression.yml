@@ -1,0 +1,32 @@
+name: Agent resilience regression
+
+on:
+  push:
+    branches: [agent/single-source-resilience]
+    paths:
+      - ".github/workflows/agent-resilience-regression.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/single-source-resilience
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Run fallback and snapshot contracts
+        run: >-
+          pytest -q
+          tests/test_emergency_outage_frontend.py
+          tests/test_emergency_outage_durable_recovery.py
+          tests/test_frontend_outage_resilience.py
+          tests/test_snapshot_status_presentation.py
+          tests/test_static_snapshot_workflow_contract.py
+          tests/test_production_smoke_outage_contract.py
