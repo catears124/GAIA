@@ -29,7 +29,6 @@ async def run_runtime_market_discovery() -> dict[str, object]:
         database,
         worker_id,
         task_key=_RUNTIME_DISCOVERY_TASK,
-        interval_seconds=interval,
         lease_seconds=lease,
     ):
         return {"status": "not_due", "executed": False, "summary": None}
