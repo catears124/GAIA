@@ -12,32 +12,72 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Vercel's Supabase integration exposes several aliases. Prefer the transaction
-# pooler URL used by Prisma, then GAIA's explicit override, before legacy aliases.
-# A recreated Supabase project can leave POSTGRES_URL pointing at the deleted
-# tenant while POSTGRES_PRISMA_URL already points at the live project.
+# An explicit GAIA override is authoritative. Vercel's Supabase integration aliases
+# follow, preferring the transaction pooler used by Prisma over the direct session URL.
+# Recreated Supabase projects can leave one alias stale, so callers that expose several
+# credentials should still probe them rather than assuming the first non-empty value works.
 _DATABASE_VARIABLES = (
-    "POSTGRES_PRISMA_URL",
     "GAIA_DATABASE_URL",
-    "POSTGRES_URL_NON_POOLING",
+    "POSTGRES_PRISMA_URL",
     "POSTGRES_URL",
+    "POSTGRES_URL_NON_POOLING",
     "DATABASE_URL",
     "SUPABASE_DB_URL",
 )
 _DATABASE_NOT_CONFIGURED = (
-    "PostgreSQL is not configured. Set POSTGRES_PRISMA_URL or GAIA_DATABASE_URL "
+    "PostgreSQL is not configured. Set GAIA_DATABASE_URL or POSTGRES_PRISMA_URL "
     "to the active Supabase connection string."
 )
 _SCHEMA_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Prisma and hosting integrations append client-only options such as `pgbouncer`,
+# `connection_limit`, `pool_timeout`, and `supa`. libpq rejects unknown URI options
+# with psycopg.ProgrammingError before it can contact PostgreSQL. Keep only options
+# accepted by libpq; GAIA configures statement timeouts after connecting.
+_LIBPQ_QUERY_PARAMETERS = frozenset(
+    {
+        "application_name",
+        "channel_binding",
+        "client_encoding",
+        "connect_timeout",
+        "fallback_application_name",
+        "gssencmode",
+        "hostaddr",
+        "keepalives",
+        "keepalives_count",
+        "keepalives_idle",
+        "keepalives_interval",
+        "krbsrvname",
+        "load_balance_hosts",
+        "options",
+        "passfile",
+        "replication",
+        "requirepeer",
+        "service",
+        "servicefile",
+        "sslcert",
+        "sslcompression",
+        "sslcrl",
+        "sslcrldir",
+        "sslkey",
+        "sslmode",
+        "sslpassword",
+        "sslrootcert",
+        "ssl_max_protocol_version",
+        "ssl_min_protocol_version",
+        "target_session_attrs",
+        "tcp_user_timeout",
+    }
+)
+
 
 def _normalize_database_url(value: str) -> str:
-    """Remove integration metadata that libpq does not recognize."""
-    parts = urlsplit(value)
+    """Strip hosting/client metadata that psycopg/libpq cannot parse."""
+    parts = urlsplit(value.strip())
     query = [
         (key, item)
         for key, item in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() != "supa"
+        if key.lower() in _LIBPQ_QUERY_PARAMETERS
     ]
     return urlunsplit(
         (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
@@ -118,7 +158,17 @@ class Database(GuardedWriteMixin, ReadMixin, BaseDatabase):
             self.schema = schema or os.getenv("GAIA_SCHEMA", "public")
             if not _SCHEMA_PATTERN.fullmatch(self.schema):
                 raise ValueError(f"invalid PostgreSQL schema name: {self.schema!r}")
-            self.timeout = max(1, int(float(os.getenv("GAIA_DB_TIMEOUT", "8" if os.getenv("VERCEL") else "60"))))
+            self.timeout = max(
+                1,
+                int(
+                    float(
+                        os.getenv(
+                            "GAIA_DB_TIMEOUT",
+                            "8" if os.getenv("VERCEL") else "60",
+                        )
+                    )
+                ),
+            )
             return
 
         super().__init__(url, schema=schema, migrate=migrate)
