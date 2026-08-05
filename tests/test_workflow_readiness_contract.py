@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 WORKFLOWS = {
     "inventory": Path(".github/workflows/inventory.yml"),
     "maintenance": Path(".github/workflows/maintenance.yml"),

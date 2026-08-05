@@ -7,7 +7,6 @@ import pytest
 
 from gaia import db as db_module
 
-
 DATABASE_VARIABLES = (
     "GAIA_DATABASE_URL",
     "POSTGRES_URL",

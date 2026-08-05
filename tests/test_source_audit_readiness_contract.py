@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 WORKFLOW = Path(".github/workflows/source-audit.yml")
 
 

@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 WORKFLOW = Path(".github/workflows/static-snapshot.yml")
 
 
 def workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_snapshot_workflow_has_independent_and_inventory_driven_triggers() -> None:
+    text = workflow_text()
+
+    assert 'cron: "3,18,33,48 * * * *"' in text
+    assert "workflow_run:" in text
+    assert 'workflows: ["Production inventory"]' in text
+    assert "types: [completed]" in text
 
 
 def test_snapshot_workflow_preserves_database_readiness_states() -> None:

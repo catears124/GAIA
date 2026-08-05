@@ -3,6 +3,9 @@ name: Publish static inventory snapshot
 on:
   schedule:
     - cron: "3,18,33,48 * * * *"
+  workflow_run:
+    workflows: ["Production inventory"]
+    types: [completed]
   workflow_dispatch:
   push:
     branches: [main]

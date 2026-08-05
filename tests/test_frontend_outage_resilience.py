@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 FRONTEND = Path(__file__).parents[1] / "src" / "gaia" / "frontend"
 
 
@@ -24,7 +23,8 @@ def test_resilience_layer_only_intercepts_safe_api_reads() -> None:
 
 def test_cached_inventory_is_explicitly_disclosed() -> None:
     script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
-    assert "Showing cached inventory" in script
+    assert 'source === "snapshot" ? "last deployed inventory" : "cached inventory"' in script
+    assert "Live database unavailable. Showing ${kind}" in script
     assert 'role", "status"' in script
     assert 'aria-live", "polite"' in script
 
