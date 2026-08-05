@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      - "src/gaia/frontend/last-known-inventory.json"
   pull_request:
   workflow_dispatch:
   schedule:

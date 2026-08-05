@@ -38,10 +38,18 @@ def test_snapshot_workflow_retains_readiness_evidence() -> None:
     assert "retention-days: 14" in text
 
 
+def test_snapshot_is_published_without_committing_to_main() -> None:
+    text = workflow_text()
+
+    assert "Publish snapshot to data-only branch" in text
+    assert "git push origin HEAD:snapshot-data" in text
+    assert "git push origin HEAD:main" not in text
+
+
 def test_invalid_or_failed_readiness_is_not_reported_as_recovery() -> None:
     text = workflow_text()
 
-    assert "Snapshot fallback database configuration is invalid" in text
+    assert "Snapshot database configuration is invalid" in text
     assert "Snapshot database readiness probe failed internally" in text
     assert 'if [ "$db_state" = invalid ] || [ "$db_state" = failed ]; then' in text
     assert "exit 1" in text
