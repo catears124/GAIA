@@ -17,6 +17,35 @@ from .quality import TECH_CATEGORIES
 TARGET_MATCHES = ("exact", "year_confirmed", "source_confirmed")
 LEAD_MODES = ("registry", "external-index", "verification-lead")
 
+_CATEGORY_LABELS = {
+    "software": "Software",
+    "ml-ai": "ML / AI",
+    "data": "Data",
+    "security": "Security",
+    "hardware": "Hardware",
+    "quant": "Quant",
+    "product": "Product",
+    "other": "Other technical",
+    "other-technical": "Other technical",
+}
+
+_SOURCE_LABELS = {
+    "ashby": "Ashby",
+    "direct": "Employer site",
+    "domain": "Employer site",
+    "external-index": "External index",
+    "greenhouse": "Greenhouse",
+    "lever": "Lever",
+    "registry": "Registry",
+    "rippling": "Rippling",
+    "smartrecruiters": "SmartRecruiters",
+    "teamtailor": "Teamtailor",
+    "verification-lead": "Verification lead",
+    "workday": "Workday",
+}
+
+_SOURCE_DETAIL_KINDS = {"external-index", "registry", "verification-lead"}
+
 
 @dataclass(frozen=True, slots=True)
 class Channel:
@@ -100,45 +129,100 @@ def _locations(row: dict[str, Any]) -> str:
     return ", ".join(cleaned) or "Location not stated"
 
 
+def _category_label(value: object, title: object = "") -> str:
+    key = _truncate(value, 80).lower()
+    if key and key not in {"other", "other-technical"}:
+        return _CATEGORY_LABELS.get(key, key.replace("-", " ").title())
+
+    normalized_title = f" {_truncate(title, 300).lower()} "
+    inferred = (
+        (("machine learning", "artificial intelligence", " ai ", " ml "), "ML / AI"),
+        (("information technology", " it intern", " it internship"), "IT"),
+        (("software", "developer", "programmer"), "Software"),
+        (("data", "analytics"), "Data"),
+        (("security", "cyber"), "Security"),
+        (("hardware", "firmware", "electrical"), "Hardware"),
+        (("quant", "trading"), "Quant"),
+        (("product",), "Product"),
+    )
+    for needles, label in inferred:
+        if any(needle in normalized_title for needle in needles):
+            return label
+    return _CATEGORY_LABELS.get(key, "Other technical")
+
+
+def _source_token(value: str) -> str:
+    cleaned = value.replace("_", " ").replace("-", " ").strip()
+    if not cleaned:
+        return ""
+    if cleaned.isalpha() and len(cleaned) <= 5:
+        return cleaned.upper()
+    return cleaned.title()
+
+
+def _source_label(value: object) -> str:
+    raw = _truncate(value, 180) or "unknown"
+    parts = [part.strip() for part in raw.split(":")]
+    kind = parts[0].lower()
+    provider = _SOURCE_LABELS.get(kind)
+    if provider is None:
+        return raw
+    if kind not in _SOURCE_DETAIL_KINDS or len(parts) < 2:
+        return provider
+
+    detail = _source_token(parts[1])
+    return _truncate(f"{provider} · {detail}" if detail else provider, 180)
+
+
+def _relative_timestamp(value: str) -> str:
+    epoch = int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    return f"<t:{epoch}:R>"
+
+
 def _payload(row: dict[str, Any], channel: Channel) -> dict[str, Any]:
     company = _truncate(row.get("company"), 120) or "Unknown company"
     title = _truncate(row.get("title"), 180) or "Untitled role"
     location = _truncate(_locations(row), 500)
     apply_url = str(row.get("apply_url") or "")
-    source = _truncate(row.get("source"), 180) or "unknown"
-    category = _truncate(row.get("category"), 80) or "other"
+    source = _source_label(row.get("source"))
+    category = _category_label(row.get("category"), title)
     posted = _iso(row.get("posted_at"))
     detected = _iso(row.get("first_detected_at"))
 
-    # Company is deliberately the first rendered line and Discord's H1 heading.
-    content = _truncate(
-        f"# **{company}**\n@everyone\n## {title}\n{location}\n<{apply_url}>",
-        2_000,
-    )
     fields: list[dict[str, object]] = [
-        {"name": "Status", "value": channel.label, "inline": True},
         {"name": "Category", "value": category, "inline": True},
-        {"name": "Source", "value": source, "inline": False},
+        {"name": "Source", "value": source, "inline": True},
     ]
     if posted:
-        epoch = int(datetime.fromisoformat(posted.replace("Z", "+00:00")).timestamp())
-        fields.append({"name": "Employer posted", "value": f"<t:{epoch}:R>", "inline": True})
+        fields.append(
+            {
+                "name": "Employer posted",
+                "value": _relative_timestamp(posted),
+                "inline": True,
+            }
+        )
     elif detected:
-        epoch = int(datetime.fromisoformat(detected.replace("Z", "+00:00")).timestamp())
-        fields.append({"name": "Detected", "value": f"<t:{epoch}:R>", "inline": True})
+        fields.append(
+            {
+                "name": "Found",
+                "value": _relative_timestamp(detected),
+                "inline": True,
+            }
+        )
 
     embed: dict[str, object] = {
-        "title": _truncate(title, 256),
+        "title": _truncate(company, 256),
         "url": apply_url,
+        "description": _truncate(f"**{title}**\n{location}", 4_096),
         "color": channel.color,
         "fields": fields,
-        "footer": {"text": f"GAIA • {channel.label}"},
+        "footer": {"text": f"GAIA · {channel.label}"},
     }
     if detected:
         embed["timestamp"] = detected
     return {
         "username": f"GAIA {channel.label}",
-        "content": content,
+        "content": "@everyone",
         "embeds": [embed],
         "allowed_mentions": {"parse": ["everyone"]},
     }
@@ -295,8 +379,18 @@ def _mark_sent(
 
 def send_notifications(database: Database | None = None) -> dict[str, object]:
     database = database or Database(migrate=False)
-    lookback = _bounded_int("GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES", 180, minimum=1, maximum=1440)
-    limit = _bounded_int("GAIA_DISCORD_MAX_PER_CHANNEL", 100, minimum=1, maximum=500)
+    lookback = _bounded_int(
+        "GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES",
+        180,
+        minimum=1,
+        maximum=1440,
+    )
+    limit = _bounded_int(
+        "GAIA_DISCORD_MAX_PER_CHANNEL",
+        100,
+        minimum=1,
+        maximum=500,
+    )
     summary: dict[str, object] = {"lookback_minutes": lookback, "channels": {}}
 
     with database.connect() as connection:
