@@ -61,7 +61,7 @@ def test_disabled_runtime_discovery_is_not_exposed(monkeypatch) -> None:
     assert response.status_code == 404
 
 
-def test_runtime_discovery_is_leased_bounded_and_officially_validated() -> None:
+def test_runtime_discovery_is_leased_bounded_and_manual_only() -> None:
     source = Path("src/gaia/runtime_discovery_api.py").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/runtime-market-discovery.yml").read_text(
         encoding="utf-8"
@@ -72,7 +72,7 @@ def test_runtime_discovery_is_leased_bounded_and_officially_validated() -> None:
     assert "GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT" in source
     assert "min(int" in source
     assert "candidate_sources_promoted" in source
-    assert 'cron: "7,22,37,52 * * * *"' in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "schedule:" not in workflow
+    assert "push:" not in workflow
     assert "/api/maintenance/discover" in workflow
-    assert "candidate_rows_written" in workflow
-    assert "candidate_sources_promoted" in workflow
