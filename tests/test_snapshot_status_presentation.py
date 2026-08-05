@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 FRONTEND = Path(__file__).parents[1] / "src" / "gaia" / "frontend"
 
 
