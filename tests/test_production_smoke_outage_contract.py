@@ -13,8 +13,27 @@ def _probe(status: int = 200, body: object | str = "") -> Probe:
 
 def _base_probes() -> dict[str, Probe]:
     return {
-        "index": _probe(body="emergency-outage.js api-resilience.js"),
-        "emergency": _probe(body="MAX_EMERGENCY_AGE_MS"),
+        "index": _probe(
+            body=(
+                "remote-snapshot.js?v=1.0.1 "
+                "api-resilience.js?v=2.0.0 "
+                "emergency-outage.js?v=2.0.0 "
+                "outage-controller.js?v=1.2.1"
+            )
+        ),
+        "remote": _probe(
+            body=(
+                "raw.githubusercontent.com/catears124/GAIA/snapshot-data "
+                'cache: "no-store" mode: "cors"'
+            )
+        ),
+        "resilience": _probe(
+            body=(
+                "window.fetch = async function resilientFetch "
+                "staticSnapshotResponse cachedResponse gaia:stale-data"
+            )
+        ),
+        "emergency": _probe(body="MAX_EMERGENCY_AGE_MS = 0 retireLegacyState"),
         "controller": _probe(body="liveHealthProbe XMLHttpRequest"),
         "snapshot": _probe(status=503),
         "health": _probe(),
@@ -54,7 +73,9 @@ def test_503_database_outage_is_not_treated_as_generic_server_failure() -> None:
     result = evaluate(probes)
 
     assert result.state == "failure"
-    assert result.description == "Database recovery active and first-visit inventory snapshot is unusable"
+    assert result.description == (
+        "Database recovery active and first-visit inventory snapshot is unusable"
+    )
 
 
 def test_invalid_503_contract_fails_closed() -> None:
@@ -75,3 +96,15 @@ def test_timeout_is_distinguished_from_http_server_failure() -> None:
 
     assert result.state == "failure"
     assert result.description == "Health API timed out or could not be reached"
+
+
+def test_active_legacy_fetch_wrapper_fails_closed() -> None:
+    probes = _base_probes()
+    probes["emergency"] = _probe(
+        body="MAX_EMERGENCY_AGE_MS = 0 retireLegacyState window.fetch = localStorage"
+    )
+
+    result = evaluate(probes)
+
+    assert result.state == "failure"
+    assert result.description == "Legacy durable-cache runtime is active or invalid"
