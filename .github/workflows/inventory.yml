@@ -187,13 +187,15 @@ jobs:
           mkdir -p fallback
           http_status=$(curl --silent --show-error --location \
             --request POST \
-            --user-agent "GAIA-inventory-fallback/${GITHUB_RUN_ID}" \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
             --connect-timeout 10 --max-time 210 \
             --retry 3 --retry-all-errors --retry-delay 3 \
             --output fallback/tick.json \
             --write-out '%{http_code}' \
             https://gaiajob.vercel.app/api/maintenance/tick || printf '000')
           if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' fallback/tick.json >/dev/null; then
+            echo "Maintenance response (HTTP ${http_status}):" >&2
+            cat fallback/tick.json >&2 || true
             echo "state=failure" >> "$GITHUB_OUTPUT"
             echo "description=Live runtime fallback failed HTTP ${http_status}" >> "$GITHUB_OUTPUT"
             exit 1
