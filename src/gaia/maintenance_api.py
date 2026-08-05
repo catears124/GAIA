@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import uuid
@@ -31,7 +32,6 @@ def _claim_task(
     worker_id: str,
     *,
     task_key: str,
-    interval_seconds: int,
     lease_seconds: int,
 ) -> bool:
     with database.connect() as connection:
@@ -53,24 +53,23 @@ def _claim_task(
                 last_error=NULL,
                 updated_at=now()
             WHERE task_key=%s
-              AND next_run_at<=now()
+              AND (
+                    next_run_at<=now()
+                    OR (
+                        last_status='running'
+                        AND lease_expires_at IS NOT NULL
+                        AND lease_expires_at<now()
+                    )
+                  )
               AND (lease_expires_at IS NULL OR lease_expires_at<now())
             RETURNING task_key
             """,
             (worker_id, lease_seconds, task_key),
         ).fetchone()
-    if row is None:
-        return False
-    with database.connect() as connection:
-        connection.execute(
-            """
-            UPDATE worker_tasks
-            SET next_run_at=now() + (%s * interval '1 second')
-            WHERE task_key=%s AND lease_owner=%s
-            """,
-            (interval_seconds, task_key, worker_id),
-        )
-    return True
+    # Do not advance next_run_at when work is merely claimed. A serverless hard kill
+    # cannot execute cleanup, and the old eager update suppressed recovery for the full
+    # interval after every timeout. The successful/partial finish path owns scheduling.
+    return row is not None
 
 
 def _finish_task(
@@ -82,7 +81,7 @@ def _finish_task(
     status: str,
     error: str | None = None,
 ) -> None:
-    retry = 60 if status == "broken" else interval_seconds
+    retry = 60 if status in {"broken", "partial"} else interval_seconds
     with database.connect() as connection:
         connection.execute(
             """
@@ -101,7 +100,7 @@ def _finish_task(
 
 
 async def run_inventory_tick() -> dict[str, object]:
-    """Run only due discovery/collector work, guarded by a database lease."""
+    """Run due inventory work inside a hard serverless deadline and database lease."""
     from .health import inventory_state
     from .live_inventory import InventoryWorker, LiveDatabase
 
@@ -113,7 +112,6 @@ async def run_inventory_tick() -> dict[str, object]:
         database,
         worker_id,
         task_key=_INVENTORY_TASK,
-        interval_seconds=interval,
         lease_seconds=lease,
     ):
         inventory = inventory_state(database)
@@ -124,13 +122,43 @@ async def run_inventory_tick() -> dict[str, object]:
             "summary": None,
         }
 
-    budget = max(10.0, min(float(os.getenv("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "42")), 48.0))
-    concurrency = max(1, min(int(os.getenv("GAIA_RUNTIME_TICK_CONCURRENCY", "6")), 12))
+    # Leave substantial headroom under the platform function limit. The worker's own
+    # budget is cooperative; wait_for is the hard boundary that cancels in-flight HTTP
+    # work. LiveInventoryWorker releases each cancelled crawl lease immediately.
+    budget = max(8.0, min(float(os.getenv("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "20")), 24.0))
+    concurrency = max(1, min(int(os.getenv("GAIA_RUNTIME_TICK_CONCURRENCY", "3")), 6))
+    worker = InventoryWorker(database, concurrency=concurrency)
+
+    # Discovery has dedicated workflows. During an outage, this endpoint must spend its
+    # small serverless budget making validated employer boards fresh, not enumerating more.
+    async def skip_discovery(_client: Any) -> bool:
+        return False
+
+    worker._run_discovery_if_due = skip_discovery  # type: ignore[method-assign]
+
     try:
-        summary = await InventoryWorker(database, concurrency=concurrency).run(
-            once=True,
-            budget_seconds=budget,
+        summary = await asyncio.wait_for(
+            worker.run(once=True, budget_seconds=budget),
+            timeout=budget + 6.0,
         )
+    except TimeoutError:
+        payload = worker.summary.as_dict()
+        payload["timed_out"] = 1
+        _finish_task(
+            database,
+            worker_id,
+            task_key=_INVENTORY_TASK,
+            interval_seconds=interval,
+            status="partial",
+            error="runtime inventory tick reached its hard deadline",
+        )
+        inventory = inventory_state(database)
+        return {
+            "status": "partial",
+            "executed": True,
+            "inventory": inventory,
+            "summary": payload,
+        }
     except Exception as error:
         _finish_task(
             database,
@@ -179,7 +207,6 @@ async def run_dynamic_source_ingest(snapshot: dict[str, Any]) -> dict[str, objec
         database,
         worker_id,
         task_key=_DYNAMIC_SOURCE_TASK,
-        interval_seconds=interval,
         lease_seconds=lease,
     ):
         return {"status": "not_due", "executed": False, "summary": None}
@@ -234,7 +261,6 @@ async def run_coverage_tick() -> dict[str, object]:
         database,
         worker_id,
         task_key=_COVERAGE_TASK,
-        interval_seconds=interval,
         lease_seconds=lease,
     ):
         report = universe_summary(database, limit=1)

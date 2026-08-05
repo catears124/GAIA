@@ -117,10 +117,23 @@ def test_runtime_tick_is_database_leased_and_budget_bounded() -> None:
 
     assert "lease_expires_at" in source
     assert "next_run_at<=now()" in source
+    assert "last_status='running'" in source
     assert "GAIA_RUNTIME_TICK_BUDGET_SECONDS" in source
     assert "min(float" in source
     assert "once=True" in source
     assert "budget_seconds=budget" in source
+    assert "asyncio.wait_for" in source
+    assert "runtime inventory tick reached its hard deadline" in source
+    assert 'status in {"broken", "partial"}' in source
+
+
+def test_claim_does_not_create_a_false_cooldown_before_work_finishes() -> None:
+    source = __import__("pathlib").Path("src/gaia/maintenance_api.py").read_text(encoding="utf-8")
+    claim_block = source.split("def _claim_task(", 1)[1].split("\ndef _finish_task(", 1)[0]
+
+    assert "SET next_run_at=now()" not in claim_block
+    assert "last_status='running'" in claim_block
+    assert "lease_expires_at<now()" in claim_block
 
 
 def test_runtime_coverage_is_leased_and_validates_the_census() -> None:
