@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime
 
 import httpx
@@ -40,16 +41,30 @@ class LiveInventoryStore(RuntimeInventoryStore):
         database: Database,
         worker_id: str,
         *,
-        shard_index: int = 0,
-        shard_count: int = 1,
+        shard_index: int | None = None,
+        shard_count: int | None = None,
     ) -> None:
         super().__init__(database, worker_id)
         raw_kinds = os.getenv("GAIA_WORKER_KINDS", "")
         self.allowed_kinds = sorted(
             {kind.strip() for kind in raw_kinds.split(",") if kind.strip()}
         )
-        self.shard_count = max(1, int(shard_count))
-        self.shard_index = int(shard_index)
+        configured_count = (
+            shard_count
+            if shard_count is not None
+            else int(os.getenv("GAIA_RUNTIME_SHARD_COUNT", "1"))
+        )
+        self.shard_count = max(1, int(configured_count))
+        configured_index = shard_index
+        if configured_index is None:
+            explicit_index = os.getenv("GAIA_RUNTIME_SHARD_INDEX", "").strip()
+            if explicit_index:
+                configured_index = int(explicit_index)
+            else:
+                # A prime shard count means both one-minute catch-up pulses and slower
+                # two-minute healthy pulses eventually visit every shard.
+                configured_index = int(time.time() // 60) % self.shard_count
+        self.shard_index = int(configured_index)
         if not 0 <= self.shard_index < self.shard_count:
             raise ValueError(
                 f"invalid inventory shard {self.shard_index}/{self.shard_count}"
@@ -165,11 +180,18 @@ class LiveInventoryStore(RuntimeInventoryStore):
         were ordered deterministically, the same slow boards were reclaimed every minute
         and hundreds of untouched employers never received a first attempt.
         """
+        retry_seconds = max(
+            60,
+            int(os.getenv("GAIA_CANCELLED_TARGET_RETRY_SECONDS", "300")),
+        )
         with self.database.connect() as connection:
             connection.execute(
                 """
                 UPDATE crawl_targets
-                SET next_run_at=now() + interval '60 seconds',
+                SET next_run_at=GREATEST(
+                        next_run_at,
+                        now() + (%s * interval '1 second')
+                    ),
                     lease_owner=NULL,
                     lease_expires_at=NULL,
                     last_finished_at=now(),
@@ -179,7 +201,7 @@ class LiveInventoryStore(RuntimeInventoryStore):
                 WHERE source=%s
                   AND lease_owner=%s
                 """,
-                (target.source, self.worker_id),
+                (retry_seconds, target.source, self.worker_id),
             )
 
     def finish_target(
@@ -243,8 +265,8 @@ class InventoryWorker(RuntimeInventoryWorker):
         database: Database,
         *,
         concurrency: int = 24,
-        shard_index: int = 0,
-        shard_count: int = 1,
+        shard_index: int | None = None,
+        shard_count: int | None = None,
     ) -> None:
         super().__init__(database, concurrency=concurrency)
         self.store = LiveInventoryStore(
