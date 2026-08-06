@@ -6,9 +6,12 @@ SRC = ROOT / "src" / "gaia"
 
 def test_supabase_owns_a_minute_level_runtime_clock() -> None:
     source = (SRC / "database_scheduler.py").read_text(encoding="utf-8")
-    assert 'CREATE EXTENSION IF NOT EXISTS pg_cron' in source
-    assert 'CREATE EXTENSION IF NOT EXISTS pg_net' in source
-    assert "'* * * * *'" in source
+    assert 'SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname=%s)' in source
+    assert 'connection.execute("CREATE EXTENSION pg_cron")' in source
+    assert 'connection.execute("CREATE EXTENSION pg_net WITH SCHEMA extensions")' in source
+    assert '"SELECT cron.schedule(%s, %s, %s) AS job_id"' in source
+    assert '(_JOB_NAME, "* * * * *", _cron_command(base_url))' in source
+    assert "%L" not in source
     assert "/api/maintenance/continuous-tick" in source
     assert "GAIA-production-maintenance/supabase-cron" in source
     assert "timeout_milliseconds := 45000" in source
