@@ -73,7 +73,9 @@ def install_database_scheduler(database: Database | None = None) -> dict[str, ob
         with database.connect() as connection:
             connection.execute(_STATE_SCHEMA)
             connection.execute("CREATE EXTENSION IF NOT EXISTS pg_cron")
-            connection.execute("CREATE EXTENSION IF NOT EXISTS pg_net")
+            connection.execute(
+                "CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions"
+            )
             row = connection.execute(
                 """
                 SELECT cron.schedule(
