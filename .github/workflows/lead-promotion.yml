@@ -1,12 +1,12 @@
 name: Lead promotion to verified jobs
 
-# The push trigger intentionally runs after the production endpoint deploys.
 on:
   push:
     branches: [main]
     paths:
       - ".github/workflows/lead-promotion.yml"
       - "src/gaia/lead_promotion.py"
+      - "src/gaia/discord_notify.py"
       - "src/gaia/conversion_diagnostics_api.py"
       - "src/gaia/db.py"
       - "src/gaia/db_write.py"
@@ -14,7 +14,8 @@ on:
       - "src/gaia/schema.sql"
       - "app.py"
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    # Follow each inventory pulse closely without launching a long overlapping batch.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -22,128 +23,132 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gaia-lead-promotion-production
+  group: gaia-lead-promotion-continuous
   cancel-in-progress: false
 
 jobs:
   promote:
+    name: Verify fresh leads with instant Discord delivery
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 6
+    environment: production
+    env:
+      BASE_URL: https://gaiajob.vercel.app
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "120"
+      GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES: "180"
+      GAIA_DISCORD_MAX_PER_CHANNEL: "250"
+      VERIFIED_DHOOK: ${{ secrets.VERIFIED_DHOOK }}
+      LEADS_DHOOK: ${{ secrets.LEADS_DHOOK }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Promote fresh leads and verify production delta
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Promote fresh leads continuously
         id: promotion
-        env:
-          BASE_URL: https://gaiajob.vercel.app
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           mkdir -p evidence
+
+          test -n "$GAIA_DATABASE_URL"
+          test -n "$VERIFIED_DHOOK"
+          test -n "$LEADS_DHOOK"
+          python -m gaia.wait_for_database --timeout-seconds 45 \
+            > evidence/database-gate.log 2>&1
+
+          # A verified posting is visible to this pump as soon as the promotion
+          # transaction commits. It is not held until the workflow finishes.
+          python -m gaia.discord_notify \
+            --watch --interval-seconds 2 --max-seconds 330 \
+            > evidence/discord-watch.log 2>&1 &
+          notifier_pid=$!
+          stop_notifier() {
+            kill "$notifier_pid" 2>/dev/null || true
+            wait "$notifier_pid" 2>/dev/null || true
+          }
+          trap stop_notifier EXIT INT TERM
+          sleep 2
+          kill -0 "$notifier_pid"
+
           ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
-
-          report() {
-            curl --fail --silent --show-error --location --user-agent "$ua" \
-              --connect-timeout 15 --max-time 180 --retry 2 --retry-all-errors --retry-delay 3 \
-              "${BASE_URL}/api/maintenance/diagnostics/conversion?hours=24&limit=100"
-          }
-          recent_verified() {
-            curl --fail --silent --show-error --location --user-agent "$ua" \
-              --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 2 \
-              "${BASE_URL}/api/families?trust=verified&posted_within=1&page=1&page_size=12"
-          }
-          promote_batch() {
-            local i="$1"
-            local code
-            code=$(curl --silent --show-error --location --request POST --user-agent "$ua" \
-              --connect-timeout 10 --max-time 50 \
-              --output "evidence/promote-${i}.json" --write-out '%{http_code}' \
-              "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=12&concurrency=6&hours=24&max_age_days=14&timeout_seconds=45" || printf '000')
-            printf '%s\n' "$code" > "evidence/promote-${i}.status"
-          }
-
-          report > evidence/before.json
-          recent_verified > evidence/recent-before.json
-          before=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/before.json)
-          recent_before=$(jq -r '.total // 0' evidence/recent-before.json)
-
-          # Rebuild first so employer-page verifications already persisted in postings
-          # immediately enter the verified product lane before fetching additional leads.
-          curl --silent --show-error --location --request POST --user-agent "$ua" \
-            --connect-timeout 10 --max-time 150 \
-            "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-            > evidence/repair-initial.json || true
-
-          for i in $(seq 1 16); do
-            promote_batch "$i"
-            if [ $((i % 4)) -eq 0 ]; then
-              curl --silent --show-error --location --request POST --user-agent "$ua" \
-                --connect-timeout 10 --max-time 150 \
-                "${BASE_URL}/api/maintenance/diagnostics/repair-publication?limit=200&hours=24" \
-                > "evidence/repair-$((i / 4)).json" || true
-              sleep 3
+          successful=0
+          for batch in 1 2; do
+            status=$(curl --silent --show-error --location \
+              --request POST --user-agent "$ua" \
+              --connect-timeout 8 --max-time 55 \
+              --retry 1 --retry-all-errors --retry-delay 2 \
+              --output "evidence/promote-${batch}.json" \
+              --write-out '%{http_code}' \
+              "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=24&concurrency=10&hours=24&max_age_days=14&timeout_seconds=45" \
+              || printf '000')
+            printf '%s\n' "$status" > "evidence/promote-${batch}.status"
+            if [ "$status" = 200 ] && \
+               jq -e 'type == "object" and .status == "ok"' \
+                 "evidence/promote-${batch}.json" >/dev/null; then
+              successful=$((successful + 1))
             fi
           done
 
-          sleep 10
-          report > evidence/after.json
-          recent_verified > evidence/recent-after.json
-          after=$(jq -r '.funnel.new_verified_jobs_window // 0' evidence/after.json)
-          recent_after=$(jq -r '.total // 0' evidence/recent-after.json)
-          delta=$((after-before))
-          recent_delta=$((recent_after-recent_before))
-          active=$(jq -r '.funnel.active_verified_jobs // 0' evidence/after.json)
-          openings=$(jq -r '.funnel.active_verified_openings // 0' evidence/after.json)
-          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
-          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
-          closed=$(jq -s '[.[] | .closed_leads // 0] | add // 0' evidence/promote-*.json 2>/dev/null || echo 0)
-          completed=$(jq -s '[.[] | select(.status == "ok")] | length' evidence/promote-*.json 2>/dev/null || echo 0)
+          python -m gaia.discord_notify > evidence/discord-final.json
+          stop_notifier
+          trap - EXIT INT TERM
 
+          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/promote-*.json)
+          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/promote-*.json)
+          verified=$(jq -s '[.[] | .verified_leads // 0] | add // 0' evidence/promote-*.json)
+          closed=$(jq -s '[.[] | .closed_leads // 0] | add // 0' evidence/promote-*.json)
           jq -n \
-            --argjson before "$before" --argjson after "$after" --argjson delta "$delta" \
-            --argjson recent_before "$recent_before" --argjson recent_after "$recent_after" \
-            --argjson recent_delta "$recent_delta" --argjson active "$active" \
-            --argjson openings "$openings" --argjson selected "$selected" \
-            --argjson recovered "$recovered" --argjson closed "$closed" \
-            --argjson completed "$completed" \
-            '{starting_verified_window:$before,ending_verified_window:$after,verified_window_delta:$delta,starting_verified_recent_filter:$recent_before,ending_verified_recent_filter:$recent_after,verified_recent_filter_delta:$recent_delta,active_verified_jobs:$active,active_verified_openings:$openings,selected_leads:$selected,recovered_verified_openings:$recovered,closed_leads:$closed,completed_batches:$completed}' \
+            --argjson successful "$successful" \
+            --argjson selected "$selected" \
+            --argjson recovered "$recovered" \
+            --argjson verified "$verified" \
+            --argjson closed "$closed" \
+            '{successful_batches:$successful,selected_leads:$selected,recovered_verified_openings:$recovered,verified_leads:$verified,closed_leads:$closed}' \
             > evidence/result.json
 
-          if [ "$delta" -gt 0 ] || [ "$recent_delta" -gt 0 ]; then state=success; else state=failure; fi
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "description=recent ${recent_before}->${recent_after} (${recent_delta}); window ${before}->${after} (${delta}); recovered ${recovered}" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Lead promotion"
-            echo "- Verified recent filter: ${recent_before} -> ${recent_after} (${recent_delta})"
-            echo "- Verified 24h window: ${before} -> ${after} (${delta})"
-            echo "- Active verified jobs: ${active}"
-            echo "- Active verified openings: ${openings}"
-            echo "- Lead pages selected: ${selected}"
-            echo "- Verified openings recovered: ${recovered}"
-            echo "- Closed leads removed: ${closed}"
-            echo "- Completed batches: ${completed}/16"
-          } >> "$GITHUB_STEP_SUMMARY"
-          test "$state" = success
+          echo "description=Promotion batches ${successful}/2; selected ${selected}; verified ${verified}; recovered ${recovered}" >> "$GITHUB_OUTPUT"
+          if [ "$successful" -lt 1 ]; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "state=success" >> "$GITHUB_OUTPUT"
 
-      - name: Publish lead promotion status
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STATE: ${{ steps.promotion.outputs.state || 'failure' }}
-          DESCRIPTION: ${{ steps.promotion.outputs.description || 'Lead promotion did not complete' }}
-        shell: bash
-        run: |
-          payload=$(jq -n --arg state "$STATE" --arg context "gaia/lead-promotion" \
-            --arg description "${DESCRIPTION:0:140}" \
-            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{state:$state,context:$context,description:$description,target_url:$target_url}')
-          curl --fail --silent --show-error -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
-
-      - name: Upload lead promotion evidence
+      - name: Upload lead-promotion evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lead-promotion-${{ github.run_id }}
           path: evidence/
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 14
+
+      - name: Publish lead-promotion status
+        if: always()
+        shell: bash
+        env:
+          STATE: ${{ steps.promotion.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.promotion.outputs.description || 'Lead promotion did not complete' }}
+        run: |
+          payload=$(jq -n \
+            --arg state "$STATE" \
+            --arg context "gaia/lead-promotion" \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"

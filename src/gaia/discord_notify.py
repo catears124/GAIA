@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import socket
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +18,7 @@ from .db import Database
 from .quality import TECH_CATEGORIES
 
 TARGET_MATCHES = ("exact", "year_confirmed", "source_confirmed")
+VERIFIED_MODES = ("direct", "verification")
 LEAD_MODES = ("registry", "external-index", "verification-lead")
 
 _CATEGORY_LABELS = {
@@ -40,6 +44,7 @@ _SOURCE_LABELS = {
     "rippling": "Rippling",
     "smartrecruiters": "SmartRecruiters",
     "teamtailor": "Teamtailor",
+    "verification": "Employer page verified",
     "verification-lead": "Verification lead",
     "workday": "Workday",
 }
@@ -76,8 +81,18 @@ CREATE TABLE IF NOT EXISTS discord_notification_deliveries (
     PRIMARY KEY (channel, family_key)
 );
 
+CREATE TABLE IF NOT EXISTS discord_notification_claims (
+    channel TEXT NOT NULL REFERENCES discord_notification_channels(channel) ON DELETE CASCADE,
+    family_key TEXT NOT NULL,
+    claim_owner TEXT NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel, family_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_discord_notification_deliveries_time
     ON discord_notification_deliveries (delivered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_discord_notification_claims_time
+    ON discord_notification_claims (claimed_at);
 """
 
 
@@ -263,14 +278,16 @@ def _post_with_retry(
     raise RuntimeError("Discord webhook exhausted retries")
 
 
-def _channel_filter(channel: Channel) -> tuple[str, list[object]]:
+def _state_predicate(channel: Channel, alias: str) -> tuple[str, list[object]]:
     if channel.name == "verified":
-        return "family.direct_openings > 0 AND posting.source_mode='direct'", []
-    return (
-        "family.direct_openings = 0 AND family.backstop_openings > 0 "
-        "AND posting.source_mode = ANY(%s)",
-        [list(LEAD_MODES)],
-    )
+        return f"{alias}.has_verified", []
+    return f"NOT {alias}.has_verified AND {alias}.has_lead", []
+
+
+def _mode_predicate(channel: Channel, alias: str) -> tuple[str, list[object]]:
+    if channel.name == "verified":
+        return f"{alias}.source_mode = ANY(%s)", [list(VERIFIED_MODES)]
+    return f"{alias}.source_mode = ANY(%s)", [list(LEAD_MODES)]
 
 
 def _ensure_channel(connection: Any, channel: Channel, lookback_minutes: int) -> int:
@@ -286,73 +303,157 @@ def _ensure_channel(connection: Any, channel: Channel, lookback_minutes: int) ->
     if inserted is None:
         return 0
 
-    predicate, predicate_params = _channel_filter(channel)
+    state_predicate, state_params = _state_predicate(channel, "eligible")
     result = connection.execute(
         f"""
+        WITH eligible AS (
+            SELECT
+                posting.family_key,
+                MIN(posting.first_seen_at) AS first_detected_at,
+                BOOL_OR(posting.source_mode = ANY(%s)) AS has_verified,
+                BOOL_OR(posting.source_mode = ANY(%s)) AS has_lead
+            FROM postings AS posting
+            WHERE posting.active
+              AND posting.removed_at IS NULL
+              AND posting.target_match = ANY(%s)
+              AND posting.category = ANY(%s)
+            GROUP BY posting.family_key
+        )
         INSERT INTO discord_notification_deliveries(channel, family_key, disposition)
-        SELECT %s, family.family_key, 'suppressed'
-        FROM families AS family
-        JOIN postings AS posting ON posting.family_key=family.family_key
-        WHERE posting.active
-          AND posting.removed_at IS NULL
-          AND {predicate}
-          AND family.target_match = ANY(%s)
-          AND family.category = ANY(%s)
-          AND family.first_detected_at < now() - make_interval(mins => %s)
-        GROUP BY family.family_key
+        SELECT %s, eligible.family_key, 'suppressed'
+        FROM eligible
+        WHERE {state_predicate}
+          AND eligible.first_detected_at < now() - make_interval(mins => %s)
         ON CONFLICT(channel, family_key) DO NOTHING
         """,
         [
-            channel.name,
-            *predicate_params,
+            list(VERIFIED_MODES),
+            list(LEAD_MODES),
             list(TARGET_MATCHES),
             list(TECH_CATEGORIES),
+            channel.name,
+            *state_params,
             lookback_minutes,
         ],
     )
     return int(result.rowcount or 0)
 
 
-def _pending(connection: Any, channel: Channel, limit: int) -> list[dict[str, Any]]:
-    predicate, predicate_params = _channel_filter(channel)
+def _pending(
+    connection: Any,
+    channel: Channel,
+    limit: int,
+    *,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    state_predicate, state_params = _state_predicate(channel, "eligible")
+    mode_predicate, mode_params = _mode_predicate(channel, "posting")
+    source_clause = ""
+    source_params: list[object] = []
+    if source:
+        source_clause = """
+          AND EXISTS (
+              SELECT 1
+              FROM postings AS touched
+              WHERE touched.family_key=posting.family_key
+                AND touched.source=%s
+          )
+        """
+        source_params.append(source)
+
     rows = connection.execute(
         f"""
-        SELECT DISTINCT ON (family.family_key)
-            family.family_key,
-            family.company,
-            family.title,
-            family.locations,
-            family.category,
-            family.first_detected_at,
-            posting.apply_url,
-            posting.source,
-            posting.posted_at,
-            posting.first_seen_at
-        FROM families AS family
-        JOIN postings AS posting ON posting.family_key=family.family_key
-        LEFT JOIN discord_notification_deliveries AS delivered
-          ON delivered.channel=%s AND delivered.family_key=family.family_key
-        WHERE delivered.family_key IS NULL
-          AND posting.active
-          AND posting.removed_at IS NULL
-          AND {predicate}
-          AND family.target_match = ANY(%s)
-          AND family.category = ANY(%s)
-        ORDER BY family.family_key,
-                 posting.posted_at DESC NULLS LAST,
-                 posting.first_seen_at DESC,
-                 posting.posting_key
+        WITH eligible AS (
+            SELECT
+                posting.family_key,
+                MIN(posting.first_seen_at) AS first_detected_at,
+                BOOL_OR(posting.source_mode = ANY(%s)) AS has_verified,
+                BOOL_OR(posting.source_mode = ANY(%s)) AS has_lead
+            FROM postings AS posting
+            WHERE posting.active
+              AND posting.removed_at IS NULL
+              AND posting.target_match = ANY(%s)
+              AND posting.category = ANY(%s)
+            GROUP BY posting.family_key
+        ), ranked AS (
+            SELECT
+                posting.family_key,
+                posting.company,
+                posting.title,
+                posting.locations,
+                posting.category,
+                eligible.first_detected_at,
+                posting.apply_url,
+                posting.source,
+                posting.posted_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY posting.family_key
+                    ORDER BY
+                        posting.posted_at DESC NULLS LAST,
+                        posting.first_seen_at DESC,
+                        posting.posting_key
+                ) AS rank
+            FROM postings AS posting
+            JOIN eligible USING(family_key)
+            LEFT JOIN discord_notification_deliveries AS delivered
+              ON delivered.channel=%s AND delivered.family_key=posting.family_key
+            WHERE delivered.family_key IS NULL
+              AND posting.active
+              AND posting.removed_at IS NULL
+              AND posting.target_match = ANY(%s)
+              AND posting.category = ANY(%s)
+              AND {state_predicate}
+              AND {mode_predicate}
+              {source_clause}
+        )
+        SELECT family_key, company, title, locations, category, first_detected_at,
+               apply_url, source, posted_at
+        FROM ranked
+        WHERE rank=1
+        ORDER BY first_detected_at, family_key
         LIMIT %s
         """,
         [
-            channel.name,
-            *predicate_params,
+            list(VERIFIED_MODES),
+            list(LEAD_MODES),
             list(TARGET_MATCHES),
             list(TECH_CATEGORIES),
+            channel.name,
+            list(TARGET_MATCHES),
+            list(TECH_CATEGORIES),
+            *state_params,
+            *mode_params,
+            *source_params,
             limit,
         ],
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _claim(connection: Any, channel: Channel, family_key: str, owner: str) -> bool:
+    connection.execute(
+        "DELETE FROM discord_notification_claims WHERE claimed_at < now() - interval '5 minutes'"
+    )
+    row = connection.execute(
+        """
+        INSERT INTO discord_notification_claims(channel, family_key, claim_owner)
+        VALUES (%s, %s, %s)
+        ON CONFLICT(channel, family_key) DO NOTHING
+        RETURNING family_key
+        """,
+        (channel.name, family_key, owner),
+    ).fetchone()
+    return row is not None
+
+
+def _release_claim(connection: Any, channel: Channel, family_key: str, owner: str) -> None:
+    connection.execute(
+        """
+        DELETE FROM discord_notification_claims
+        WHERE channel=%s AND family_key=%s AND claim_owner=%s
+        """,
+        (channel.name, family_key, owner),
+    )
 
 
 def _mark_sent(
@@ -360,6 +461,7 @@ def _mark_sent(
     channel: Channel,
     family_key: str,
     message_id: str | None,
+    owner: str,
 ) -> None:
     connection.execute(
         """
@@ -371,13 +473,18 @@ def _mark_sent(
         """,
         (channel.name, family_key, message_id),
     )
+    _release_claim(connection, channel, family_key, owner)
     connection.execute(
         "UPDATE discord_notification_channels SET updated_at=now() WHERE channel=%s",
         (channel.name,),
     )
 
 
-def send_notifications(database: Database | None = None) -> dict[str, object]:
+def send_notifications(
+    database: Database | None = None,
+    *,
+    source: str | None = None,
+) -> dict[str, object]:
     database = database or Database(migrate=False)
     lookback = _bounded_int(
         "GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES",
@@ -391,7 +498,12 @@ def send_notifications(database: Database | None = None) -> dict[str, object]:
         minimum=1,
         maximum=500,
     )
-    summary: dict[str, object] = {"lookback_minutes": lookback, "channels": {}}
+    owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    summary: dict[str, object] = {
+        "lookback_minutes": lookback,
+        "source": source,
+        "channels": {},
+    }
 
     with database.connect() as connection:
         connection.execute(_SCHEMA)
@@ -403,6 +515,7 @@ def send_notifications(database: Database | None = None) -> dict[str, object]:
                 "configured": bool(webhook),
                 "suppressed_on_bootstrap": 0,
                 "pending": 0,
+                "claimed": 0,
                 "sent": 0,
             }
             summary["channels"][channel.name] = channel_result  # type: ignore[index]
@@ -413,21 +526,67 @@ def send_notifications(database: Database | None = None) -> dict[str, object]:
                 channel_result["suppressed_on_bootstrap"] = _ensure_channel(
                     connection, channel, lookback
                 )
-                pending = _pending(connection, channel, limit)
+                pending = _pending(connection, channel, limit, source=source)
             channel_result["pending"] = len(pending)
 
             for row in pending:
-                message_id = _post_with_retry(client, webhook, _payload(row, channel))
+                family_key = str(row["family_key"])
                 with database.connect() as connection:
-                    _mark_sent(connection, channel, str(row["family_key"]), message_id)
+                    if not _claim(connection, channel, family_key, owner):
+                        continue
+                channel_result["claimed"] = int(channel_result["claimed"]) + 1
+                try:
+                    message_id = _post_with_retry(client, webhook, _payload(row, channel))
+                except Exception:
+                    with database.connect() as connection:
+                        _release_claim(connection, channel, family_key, owner)
+                    raise
+                with database.connect() as connection:
+                    _mark_sent(connection, channel, family_key, message_id, owner)
                 channel_result["sent"] = int(channel_result["sent"]) + 1
 
     return summary
 
 
+def watch_notifications(
+    *,
+    source: str | None,
+    interval_seconds: float,
+    max_seconds: float | None,
+) -> int:
+    interval = max(0.5, min(float(interval_seconds), 60.0))
+    deadline = time.monotonic() + max_seconds if max_seconds is not None else None
+    while True:
+        try:
+            result = send_notifications(source=source)
+        except Exception as error:  # noqa: BLE001 - watcher must keep retrying transient failures.
+            print(f"Discord notification pump failure: {error!r}", file=sys.stderr, flush=True)
+        else:
+            print(json.dumps(result, sort_keys=True, default=str), flush=True)
+        if deadline is not None and time.monotonic() >= deadline:
+            return 0
+        time.sleep(interval)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Deliver deduplicated GAIA Discord alerts")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--source", default=None)
+    parser.add_argument("--interval-seconds", type=float, default=2.0)
+    parser.add_argument("--max-seconds", type=float, default=None)
+    return parser
+
+
 def main() -> int:
+    args = _parser().parse_args()
+    if args.watch:
+        return watch_notifications(
+            source=args.source,
+            interval_seconds=args.interval_seconds,
+            max_seconds=args.max_seconds,
+        )
     try:
-        result = send_notifications()
+        result = send_notifications(source=args.source)
     except Exception as error:  # noqa: BLE001 - CLI must surface delivery failures to Actions.
         print(f"Discord notification failure: {error!r}", file=sys.stderr)
         return 1

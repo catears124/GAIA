@@ -8,277 +8,204 @@ on:
       - "src/gaia/**"
       - "pyproject.toml"
   schedule:
-    - cron: "4,19,34,49 * * * *"
+    # One worker every five minutes. A single runner is intentionally used instead
+    # of a ten-runner matrix so hosted-runner pressure cannot cancel the whole pulse.
+    - cron: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
   workflow_dispatch:
     inputs:
       budget_seconds:
-        description: "Maximum runtime per provider lane"
+        description: "Maximum crawl time for this pulse"
         required: false
-        default: "900"
+        default: "150"
 
 permissions:
   contents: read
   statuses: write
 
 concurrency:
-  group: production-inventory
+  group: production-inventory-continuous
+  # Never kill a live crawl. GitHub retains the newest pending pulse if one overlaps.
   cancel-in-progress: false
 
 jobs:
-  database_gate:
-    name: Check production database readiness
+  pulse:
+    name: Continuous inventory and instant Discord delivery
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     environment: production
-    outputs:
-      state: ${{ steps.gate.outputs.state }}
-      exit_code: ${{ steps.gate.outputs.exit_code }}
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Validate database configuration
-        id: config
-        shell: bash
-        run: |
-          if [ -z "$GAIA_DATABASE_URL" ]; then
-            echo "Missing all supported database secrets: POSTGRES_PRISMA_URL, POSTGRES_URL, POSTGRES_URL_NON_POOLING." >&2
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Install GAIA
-        if: steps.config.outputs.configured == 'true'
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Probe database once for the whole workflow
-        id: gate
-        shell: bash
-        run: |
-          if [ "${{ steps.config.outputs.configured }}" != true ]; then
-            echo "state=invalid" >> "$GITHUB_OUTPUT"
-            echo "exit_code=2" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          set +e
-          python -m gaia.wait_for_database --timeout-seconds 120
-          code=$?
-          set -e
-          case "$code" in
-            0) state=ready ;;
-            1) state=recovering ;;
-            2) state=invalid ;;
-            *) state=failed ;;
-          esac
-          echo "state=$state" >> "$GITHUB_OUTPUT"
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          echo "Database readiness classified as $state (exit $code)."
-
-  repair:
-    needs: database_gate
-    if: github.event_name != 'schedule' && needs.database_gate.outputs.state == 'ready'
-    name: Repair production query indexes
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL }}
-      GAIA_MIGRATION_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL }}
-      GAIA_AUTO_MIGRATE: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Require migration connection
-        run: test -n "$GAIA_DATABASE_URL"
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Repair postings indexes with retries
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if timeout 600 python -m gaia.repair_indexes; then exit 0; fi
-            if [ "$attempt" -eq 3 ]; then exit 1; fi
-            python -m gaia.wait_for_database --timeout-seconds 120
-          done
-
-  inventory:
-    needs: database_gate
-    if: needs.database_gate.outputs.state == 'ready'
-    name: Inventory · ${{ matrix.lane }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment: production
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix:
-        include:
-          - {lane: greenhouse-lever, kinds: "greenhouse,lever", workers: 4}
-          - {lane: ashby, kinds: "ashby", workers: 3}
-          - {lane: modern-ats, kinds: "smartrecruiters,recruitee,workable", workers: 3}
-          - {lane: workday-a, kinds: "workday-search", workers: 3}
-          - {lane: workday-b, kinds: "workday-search", workers: 3}
-          - {lane: workday-c, kinds: "workday-search", workers: 3}
-          - {lane: workday-d, kinds: "workday-search", workers: 3}
-          - {lane: oracle, kinds: "oracle-cloud", workers: 4}
-          - {lane: enterprise, kinds: "jobvite,icims,successfactors", workers: 2}
-          - {lane: fallback-google, kinds: "domain,verification,google-careers", workers: 2}
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "240"
+      GAIA_DB_TIMEOUT: "180"
       GAIA_READ_ONLY: "0"
-      GAIA_HTTP_TIMEOUT: "45"
-      GAIA_CRAWL_LEASE_SECONDS: "600"
+      GAIA_HTTP_TIMEOUT: "35"
+      GAIA_CRAWL_LEASE_SECONDS: "300"
       GAIA_ENABLE_DISCOVERY: "0"
       GAIA_SKIP_CATALOG_SYNC: "1"
       GAIA_DEFER_FAMILY_REBUILD: "1"
-      GAIA_WORKER_KINDS: ${{ matrix.kinds }}
+      GAIA_WORKER_KINDS: "greenhouse,lever,ashby,smartrecruiters,recruitee,workable,workday-search,oracle-cloud,jobvite,icims,successfactors,domain,verification,google-careers"
       GAIA_WORKDAY_FULL_INVENTORY: "0"
       GAIA_WORKDAY_MAX_PER_TERM: "1200"
       GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
       GAIA_WORKDAY_MIN_INTERVAL: "0.5"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-      - name: Install GAIA
-        run: python -m pip install --disable-pip-version-check -e .
-      - name: Drain due employer boards with bounded retries
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ github.event_name }}" in
-            workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
-            *) budget="480" ;;
-          esac
-          for attempt in 1 2 3; do
-            echo "${{ matrix.lane }} attempt ${attempt}/3 with ${budget}s budget"
-            if gaia worker --once --budget-seconds "$budget" --concurrency "${{ matrix.workers }}"; then exit 0; fi
-            if [ "$attempt" -eq 3 ]; then exit 1; fi
-            python -m gaia.wait_for_database --timeout-seconds 120
-          done
-
-  runtime_fallback:
-    needs: database_gate
-    if: needs.database_gate.outputs.state != 'ready'
-    name: Advance inventory through live runtime
-    runs-on: ubuntu-latest
-    timeout-minutes: 6
-    outputs:
-      state: ${{ steps.tick.outputs.state }}
-      description: ${{ steps.tick.outputs.description }}
-    steps:
-      - name: Run bounded production maintenance tick
-        id: tick
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p fallback
-          http_status=$(curl --silent --show-error --location \
-            --request POST \
-            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
-            --connect-timeout 10 --max-time 210 \
-            --retry 3 --retry-all-errors --retry-delay 3 \
-            --output fallback/tick.json \
-            --write-out '%{http_code}' \
-            https://gaiajob.vercel.app/api/maintenance/tick || printf '000')
-          if [ "$http_status" != 200 ] || ! jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due")) and (.inventory | type == "object")' fallback/tick.json >/dev/null; then
-            echo "Maintenance response (HTTP ${http_status}):" >&2
-            cat fallback/tick.json >&2 || true
-            echo "state=failure" >> "$GITHUB_OUTPUT"
-            echo "description=Live runtime fallback failed HTTP ${http_status}" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          operation=$(jq -r '.status' fallback/tick.json)
-          fresh=$(jq -r '.inventory.fresh // 0' fallback/tick.json)
-          total=$(jq -r '.inventory.total // 0' fallback/tick.json)
-          echo "state=success" >> "$GITHUB_OUTPUT"
-          echo "description=Live runtime tick ${operation}; sources ${fresh}/${total} fresh" >> "$GITHUB_OUTPUT"
-          jq . fallback/tick.json >> "$GITHUB_STEP_SUMMARY"
-
-  notify:
-    name: Send new jobs to Discord
-    needs: [database_gate, inventory]
-    if: always() && needs.database_gate.outputs.state == 'ready'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: production
-    env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
-      GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "120"
       GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES: "180"
-      GAIA_DISCORD_MAX_PER_CHANNEL: "100"
+      GAIA_DISCORD_MAX_PER_CHANNEL: "250"
       VERIFIED_DHOOK: ${{ secrets.VERIFIED_DHOOK }}
       LEADS_DHOOK: ${{ secrets.LEADS_DHOOK }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
+
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
-      - name: Deliver deduplicated job alerts
+
+      - name: Crawl continuously and deliver committed jobs immediately
+        id: pulse
         shell: bash
         run: |
-          set -euo pipefail
-          python -m gaia.discord_notify | tee discord-notifications.json
-          cat discord-notifications.json >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload notification evidence
+          set -uo pipefail
+          mkdir -p evidence
+
+          set +e
+          python -m gaia.wait_for_database --timeout-seconds 45 \
+            > evidence/database-gate.log 2>&1
+          database_code=$?
+          set -e
+
+          if [ "$database_code" -ne 0 ]; then
+            echo "Actions database connection unavailable; using the live runtime fallback."
+            status=$(curl --silent --show-error --location \
+              --request POST \
+              --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+              --connect-timeout 8 --max-time 30 \
+              --retry 2 --retry-all-errors --retry-delay 2 \
+              --output evidence/runtime-fallback.json \
+              --write-out '%{http_code}' \
+              https://gaiajob.vercel.app/api/maintenance/tick || printf '000')
+            if [ "$status" = 200 ] && \
+               jq -e 'type == "object" and (.status | IN("ok", "partial", "not_due"))' \
+                 evidence/runtime-fallback.json >/dev/null; then
+              echo "state=pending" >> "$GITHUB_OUTPUT"
+              echo "description=Actions DB path unavailable; live runtime inventory pulse completed" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Both Actions and live-runtime inventory paths failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ -z "$VERIFIED_DHOOK" ] || [ -z "$LEADS_DHOOK" ]; then
+            echo "Both VERIFIED_DHOOK and LEADS_DHOOK are required for instant delivery." >&2
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Discord webhook configuration is incomplete" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # The notification pump reads committed postings directly. It does not wait
+          # for the worker batch or the materialized families table to be rebuilt.
+          python -m gaia.discord_notify \
+            --watch --interval-seconds 2 --max-seconds 390 \
+            > evidence/discord-watch.log 2>&1 &
+          notifier_pid=$!
+
+          stop_notifier() {
+            kill "$notifier_pid" 2>/dev/null || true
+            wait "$notifier_pid" 2>/dev/null || true
+          }
+          trap stop_notifier EXIT INT TERM
+          sleep 2
+          if ! kill -0 "$notifier_pid" 2>/dev/null; then
+            echo "Discord notification pump exited before crawling started." >&2
+            cat evidence/discord-watch.log >&2 || true
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Discord notification pump failed to start" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          case "${{ github.event_name }}" in
+            workflow_dispatch) budget="${{ inputs.budget_seconds }}" ;;
+            *) budget="150" ;;
+          esac
+
+          set +e
+          gaia worker --once --budget-seconds "$budget" --concurrency 24 \
+            2>&1 | tee evidence/inventory.txt
+          worker_code=${PIPESTATUS[0]}
+          set -e
+
+          # Publish the product feed only when this pulse changed inventory. Discord
+          # delivery already happened from postings while the crawl was still running.
+          changed=$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          lines = [line.strip() for line in Path("evidence/inventory.txt").read_text().splitlines()]
+          payload = {}
+          for line in reversed(lines):
+              if line.startswith("{") and line.endswith("}"):
+                  try:
+                      candidate = ast.literal_eval(line)
+                  except (SyntaxError, ValueError):
+                      continue
+                  if isinstance(candidate, dict):
+                      payload = candidate
+                      break
+          print(int(payload.get("new", 0)) + int(payload.get("removed", 0)))
+          PY
+          )
+
+          if [ "$changed" -gt 0 ]; then
+            timeout 75 python - <<'PY' 2>&1 | tee evidence/feed-rebuild.log
+          from gaia.db import Database
+          Database(migrate=False).rebuild_families()
+          print("Public families rebuilt after inventory change.")
+          PY
+          fi
+
+          python -m gaia.discord_notify > evidence/discord-final.json
+          stop_notifier
+          trap - EXIT INT TERM
+
+          if [ "$worker_code" -ne 0 ]; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=Continuous inventory worker failed after committed partial progress" >> "$GITHUB_OUTPUT"
+            exit "$worker_code"
+          fi
+
+          echo "state=success" >> "$GITHUB_OUTPUT"
+          echo "description=Continuous inventory pulse completed; Discord delivery polled every 2 seconds" >> "$GITHUB_OUTPUT"
+
+      - name: Upload pulse evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: discord-notifications-${{ github.run_id }}
-          path: discord-notifications.json
+          name: continuous-inventory-${{ github.run_id }}
+          path: evidence/
           if-no-files-found: warn
           retention-days: 14
 
-  status:
-    name: Publish inventory pulse status
-    needs: [database_gate, repair, inventory, runtime_fallback, notify]
-    if: always()
-    runs-on: ubuntu-latest
-    permissions:
-      statuses: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Publish final commit status
+      - name: Publish inventory pulse status
+        if: always()
         shell: bash
+        env:
+          STATE: ${{ steps.pulse.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.pulse.outputs.description || 'Continuous inventory pulse did not complete' }}
         run: |
-          gate="${{ needs.database_gate.outputs.state }}"
-          fallback="${{ needs.runtime_fallback.result }}"
-          state=success
-          description="All provider inventory lanes completed"
-          if [ "$gate" != ready ]; then
-            if [ "$fallback" = success ]; then
-              state=success
-              description="${{ needs.runtime_fallback.outputs.description }}"
-            elif [ "$gate" = recovering ]; then
-              state=pending; description="Database recovery active and live runtime fallback failed"
-            elif [ "$gate" = invalid ]; then
-              state=failure; description="Actions DB credentials invalid and live runtime fallback failed"
-            else
-              state=failure; description="Database gate and live runtime fallback failed"
-            fi
-          elif [ "${{ needs.inventory.result }}" != success ]; then
-            state=failure; description="One or more provider inventory lanes failed after retries"
-          elif [ "${{ needs.repair.result }}" != success ] && [ "${{ needs.repair.result }}" != skipped ]; then
-            state=failure; description="Production index repair failed"
-          elif [ "${{ needs.notify.result }}" != success ]; then
-            state=failure; description="Inventory completed but Discord notification delivery failed"
-          fi
-          payload=$(jq -n --arg state "$state" --arg context "gaia/production-inventory" --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state, context:$context, description:$description, target_url:$target_url}')
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 -X POST -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
+          payload=$(jq -n \
+            --arg state "$STATE" \
+            --arg context "gaia/production-inventory" \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
