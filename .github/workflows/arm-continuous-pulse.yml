@@ -1,0 +1,174 @@
+name: ARM continuous inventory pulse
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/arm-continuous-pulse.yml"
+      - "src/gaia/discord_notify.py"
+      - "src/gaia/inventory.py"
+      - "src/gaia/live_inventory.py"
+      - "src/gaia/db_write.py"
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-critical-arm-continuous
+  cancel-in-progress: false
+
+jobs:
+  pulse:
+    name: Crawl, verify, publish, and alert
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 7
+    environment: production
+    env:
+      BASE_URL: https://gaiajob.vercel.app
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "120"
+      GAIA_READ_ONLY: "0"
+      GAIA_HTTP_TIMEOUT: "35"
+      GAIA_CRAWL_LEASE_SECONDS: "300"
+      GAIA_ENABLE_DISCOVERY: "0"
+      GAIA_SKIP_CATALOG_SYNC: "1"
+      GAIA_DEFER_FAMILY_REBUILD: "1"
+      GAIA_WORKER_KINDS: "greenhouse,lever,ashby,smartrecruiters,recruitee,workable,workday-search,oracle-cloud,jobvite,icims,successfactors,domain,verification,google-careers"
+      GAIA_WORKDAY_FULL_INVENTORY: "0"
+      GAIA_WORKDAY_MAX_PER_TERM: "1200"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
+      GAIA_WORKDAY_MIN_INTERVAL: "0.5"
+      GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES: "180"
+      GAIA_DISCORD_MAX_PER_CHANNEL: "250"
+      VERIFIED_DHOOK: ${{ secrets.VERIFIED_DHOOK }}
+      LEADS_DHOOK: ${{ secrets.LEADS_DHOOK }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Run bounded continuous pulse
+        id: pulse
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test -n "$GAIA_DATABASE_URL"
+          test -n "$VERIFIED_DHOOK"
+          test -n "$LEADS_DHOOK"
+          python -m gaia.wait_for_database --timeout-seconds 45 \
+            > evidence/database-gate.log 2>&1
+
+          python -m gaia.discord_notify \
+            --watch --interval-seconds 2 --max-seconds 390 \
+            > evidence/discord-watch.log 2>&1 &
+          notifier_pid=$!
+          stop_notifier() {
+            kill "$notifier_pid" 2>/dev/null || true
+            wait "$notifier_pid" 2>/dev/null || true
+          }
+          trap stop_notifier EXIT INT TERM
+          sleep 2
+          kill -0 "$notifier_pid"
+
+          set +e
+          gaia worker --once --budget-seconds 150 --concurrency 24 \
+            2>&1 | tee evidence/inventory.txt
+          worker_code=${PIPESTATUS[0]}
+          set -e
+
+          changed=$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          payload = {}
+          for line in reversed(Path("evidence/inventory.txt").read_text().splitlines()):
+              line = line.strip()
+              if not (line.startswith("{") and line.endswith("}")):
+                  continue
+              try:
+                  candidate = ast.literal_eval(line)
+              except (SyntaxError, ValueError):
+                  continue
+              if isinstance(candidate, dict):
+                  payload = candidate
+                  break
+          print(int(payload.get("new", 0)) + int(payload.get("removed", 0)))
+          PY
+          )
+
+          if [ "$changed" -gt 0 ]; then
+            timeout 75 python - <<'PY' 2>&1 | tee evidence/feed-rebuild.log
+          from gaia.db import Database
+          Database(migrate=False).rebuild_families()
+          print("Public families rebuilt after inventory change.")
+          PY
+          fi
+
+          promotion_status=$(curl --silent --show-error --location \
+            --request POST \
+            --user-agent "GAIA-production-maintenance/${GITHUB_RUN_ID}" \
+            --connect-timeout 8 --max-time 55 \
+            --retry 1 --retry-all-errors --retry-delay 2 \
+            --output evidence/promotion.json \
+            --write-out '%{http_code}' \
+            "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=24&concurrency=10&hours=24&max_age_days=14&timeout_seconds=45" \
+            || printf '000')
+          printf '%s\n' "$promotion_status" > evidence/promotion.status
+
+          python -m gaia.discord_notify > evidence/discord-final.json
+          stop_notifier
+          trap - EXIT INT TERM
+
+          if [ "$worker_code" -ne 0 ]; then
+            echo "state=failure" >> "$GITHUB_OUTPUT"
+            echo "description=ARM inventory worker failed after partial progress" >> "$GITHUB_OUTPUT"
+            exit "$worker_code"
+          fi
+          if [ "$promotion_status" != 200 ]; then
+            echo "state=pending" >> "$GITHUB_OUTPUT"
+            echo "description=Inventory current; lead-promotion endpoint returned HTTP ${promotion_status}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "state=success" >> "$GITHUB_OUTPUT"
+          echo "description=ARM continuous pulse completed with two-second Discord delivery" >> "$GITHUB_OUTPUT"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm-continuous-pulse-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish status
+        if: always()
+        shell: bash
+        env:
+          STATE: ${{ steps.pulse.outputs.state || 'failure' }}
+          DESCRIPTION: ${{ steps.pulse.outputs.description || 'ARM continuous pulse did not complete' }}
+        run: |
+          payload=$(jq -n \
+            --arg state "$STATE" \
+            --arg context "gaia/arm-continuous-pulse" \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
