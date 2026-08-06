@@ -1,0 +1,44 @@
+name: Agent continuous delivery test
+
+on:
+  push:
+    branches: [agent/continuous-inventory-instant-discord]
+    paths:
+      - ".github/workflows/agent-continuous-delivery-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/continuous-inventory-instant-discord
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - name: Validate workflow YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for name in ("inventory.yml", "lead-promotion.yml"):
+              path = Path(".github/workflows") / name
+              payload = yaml.safe_load(path.read_text())
+              assert isinstance(payload, dict) and payload.get("jobs"), path
+          PY
+      - name: Ruff changed Python
+        run: >-
+          ruff check
+          src/gaia/discord_notify.py
+          tests/test_discord_notify.py
+          tests/test_continuous_inventory_delivery.py
+      - name: Run focused contracts
+        run: >-
+          pytest -q
+          tests/test_discord_notify.py
+          tests/test_continuous_inventory_delivery.py
