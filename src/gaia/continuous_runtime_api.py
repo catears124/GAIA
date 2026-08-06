@@ -11,18 +11,25 @@ from .database_scheduler import scheduler_status
 from .db import Database
 from .discord_notify import send_notifications
 from .maintenance_api import _request_allowed, run_inventory_tick
-from .runtime_secrets import resolved_runtime_secret
+from .runtime_secrets import resolved_runtime_secret, sync_runtime_secrets
 
 _LOCK = asyncio.Lock()
+_RUNTIME_SECRETS_SYNCED = False
 
 
 @contextmanager
 def _runtime_discord_environment(database: Database) -> Iterator[dict[str, bool]]:
+    global _RUNTIME_SECRETS_SYNCED
     names = ("VERIFIED_DHOOK", "LEADS_DHOOK")
     previous = {name: os.environ.get(name) for name in names}
     previous_limit = os.environ.get("GAIA_DISCORD_MAX_PER_CHANNEL")
     resolved: dict[str, bool] = {}
     try:
+        if not _RUNTIME_SECRETS_SYNCED and any(
+            os.getenv(name, "").strip() for name in names
+        ):
+            sync_runtime_secrets(database)
+            _RUNTIME_SECRETS_SYNCED = True
         for name in names:
             value = resolved_runtime_secret(database, name)
             resolved[name] = bool(value)
