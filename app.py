@@ -3,7 +3,8 @@
 The build imports only lightweight application code. Schema initialization and
 empty-database recovery begin on the first real API request. Ongoing inventory ticks
 also run inside Vercel, so a recreated Supabase project does not depend on stale
-GitHub database credentials.
+GitHub database credentials. Successful production deployment status also wakes the
+independent ARM inventory pulse.
 """
 
 from __future__ import annotations
