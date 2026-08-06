@@ -68,6 +68,7 @@ install_domain_graph_coverage_extension()
 
 from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
+from gaia.continuous_pulse_api import install_continuous_pulse_api  # noqa: E402
 from gaia.conversion_diagnostics_api import (  # noqa: E402
     install_conversion_diagnostics_api,
 )
@@ -81,6 +82,7 @@ install_request_bootstrap(app)
 install_activity_api(app)
 install_coverage_api(app)
 install_maintenance_api(app)
+install_continuous_pulse_api(app)
 install_runtime_discovery_api(app)
 install_conversion_diagnostics_api(app)
 install_database_outage_guard(app)
