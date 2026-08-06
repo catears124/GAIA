@@ -27,7 +27,9 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_PUBLIC_BASE_URL", "https://gaiajob.vercel.app")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_TICK", "1")
     os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "120")
-    os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "48")
+    # Preserve the hard serverless deadline for feed projection and Discord delivery.
+    # Seven sharded pulses per rotation provide more useful coverage than one long pulse.
+    os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "6")
     os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "12")
     # Seven is intentionally prime. Minute-level partial retries and slower healthy
     # pulses both rotate through every source shard rather than revisiting one parity.
