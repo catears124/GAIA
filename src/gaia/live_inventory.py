@@ -33,21 +33,34 @@ class LiveDatabase(Database):
 
 
 class LiveInventoryStore(RuntimeInventoryStore):
-    """Production source lifecycle with optional provider-lane filtering."""
+    """Production source lifecycle with optional provider and hash-lane filtering."""
 
-    def __init__(self, database: Database, worker_id: str) -> None:
+    def __init__(
+        self,
+        database: Database,
+        worker_id: str,
+        *,
+        shard_index: int = 0,
+        shard_count: int = 1,
+    ) -> None:
         super().__init__(database, worker_id)
         raw_kinds = os.getenv("GAIA_WORKER_KINDS", "")
         self.allowed_kinds = sorted(
             {kind.strip() for kind in raw_kinds.split(",") if kind.strip()}
         )
+        self.shard_count = max(1, int(shard_count))
+        self.shard_index = int(shard_index)
+        if not 0 <= self.shard_index < self.shard_count:
+            raise ValueError(
+                f"invalid inventory shard {self.shard_index}/{self.shard_count}"
+            )
 
     def claim_target(self, *, lease_seconds: int) -> ClaimedTarget | None:
         # Resolve the small validated catalog set before taking any row locks. A joined
         # SELECT ... FOR UPDATE caused PostgreSQL to choose a pathological plan under
         # several concurrent worker lanes, timing out before any source could be leased.
-        # The second statement now operates only on crawl_targets' primary key and its
-        # partial due index, while SKIP LOCKED still distributes work safely.
+        # Hash sharding lets several minute-level serverless pulses advance disjoint
+        # portions of the catalog without contending for the same crawl target.
         kinds = self.allowed_kinds or None
         with self.database.connect() as connection:
             eligible_rows = connection.execute(
@@ -56,8 +69,18 @@ class LiveInventoryStore(RuntimeInventoryStore):
                 FROM source_catalog
                 WHERE validated
                   AND (%s::text[] IS NULL OR kind = ANY(%s::text[]))
+                  AND (
+                        %s = 1
+                        OR mod(abs(hashtext(source)::bigint), %s) = %s
+                      )
                 """,
-                (kinds, kinds),
+                (
+                    kinds,
+                    kinds,
+                    self.shard_count,
+                    self.shard_count,
+                    self.shard_index,
+                ),
             ).fetchall()
             eligible_sources = [str(item["source"]) for item in eligible_rows]
             if not eligible_sources:
@@ -73,7 +96,13 @@ class LiveInventoryStore(RuntimeInventoryStore):
                       AND source = ANY(%s::text[])
                       AND next_run_at <= now()
                       AND (lease_expires_at IS NULL OR lease_expires_at < now())
-                    ORDER BY priority, next_run_at, source
+                    ORDER BY
+                        CASE WHEN last_complete_at IS NULL THEN 0 ELSE 1 END,
+                        COALESCE(last_complete_at, 'epoch'::timestamptz),
+                        COALESCE(last_started_at, 'epoch'::timestamptz),
+                        next_run_at,
+                        priority,
+                        source
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
@@ -130,14 +159,22 @@ class LiveInventoryStore(RuntimeInventoryStore):
         return row is not None
 
     def abandon_target(self, target: ClaimedTarget) -> None:
-        """Release a crawl immediately when its task is cancelled cleanly."""
+        """Yield a deadline-cancelled source so it cannot starve the due queue.
+
+        The old implementation made the source immediately due again. Because targets
+        were ordered deterministically, the same slow boards were reclaimed every minute
+        and hundreds of untouched employers never received a first attempt.
+        """
         with self.database.connect() as connection:
             connection.execute(
                 """
                 UPDATE crawl_targets
-                SET next_run_at=LEAST(next_run_at, now()),
+                SET next_run_at=now() + interval '60 seconds',
                     lease_owner=NULL,
                     lease_expires_at=NULL,
+                    last_finished_at=now(),
+                    last_status='partial',
+                    last_error='bounded runtime pulse ended before source completed',
                     updated_at=now()
                 WHERE source=%s
                   AND lease_owner=%s
@@ -201,9 +238,21 @@ class LiveInventoryStore(RuntimeInventoryStore):
 class InventoryWorker(RuntimeInventoryWorker):
     """Horizontally scalable worker with safe retirement and census expansion."""
 
-    def __init__(self, database: Database, *, concurrency: int = 24) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        concurrency: int = 24,
+        shard_index: int = 0,
+        shard_count: int = 1,
+    ) -> None:
         super().__init__(database, concurrency=concurrency)
-        self.store = LiveInventoryStore(database, self.store.worker_id)
+        self.store = LiveInventoryStore(
+            database,
+            self.store.worker_id,
+            shard_index=shard_index,
+            shard_count=shard_count,
+        )
 
     async def run(
         self,
