@@ -12,8 +12,7 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-  issues:
-    types: [opened]
+  status:
 
 permissions:
   contents: read
@@ -25,7 +24,7 @@ concurrency:
 
 jobs:
   pulse:
-    if: github.event_name != 'issues' || github.event.issue.title == '[GAIA] Run continuous pulse'
+    if: github.event_name != 'status' || (github.event.context == 'Vercel' && github.event.state == 'success')
     name: Crawl, verify, publish, and alert
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 7
