@@ -48,15 +48,20 @@ def test_database_tick_publishes_and_drains_after_inventory_commit() -> None:
 
 def test_fresh_lead_verification_is_bounded_and_publishes_immediately() -> None:
     source = (SRC / "continuous_runtime_api.py").read_text(encoding="utf-8")
+    verifier = (SRC / "runtime_lead_verification.py").read_text(encoding="utf-8")
     verification = source.split("async def run_runtime_lead_verification", 1)[1].split(
         "\n\ndef install_continuous_runtime_api", 1
     )[0]
-    assert "promote_leads(" in verification
+    assert "verify_fresh_leads(" in verification
+    assert "promote_leads(" not in verification
     assert "asyncio.wait_for(" in verification
     assert "GAIA_RUNTIME_VERIFICATION_LIMIT" in verification
     assert "GAIA_RUNTIME_VERIFICATION_TIMEOUT_SECONDS" in verification
     assert "published = await publish_committed_updates" in verification
     assert '"/api/maintenance/verify-fresh-leads"' in source
+    assert "database.rebuild_families()" not in verifier
+    assert "build_report" not in verifier
+    assert "database.apply_result(result, rebuild=False)" in verifier
 
 
 def test_runtime_secret_store_is_not_exposed_through_postgrest() -> None:
@@ -70,8 +75,10 @@ def test_vercel_installs_bounded_continuous_runtime_components() -> None:
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'os.environ.setdefault("GAIA_ENABLE_DATABASE_CRON", "1")' in source
     assert 'os.environ.setdefault("GAIA_ENABLE_RUNTIME_VERIFICATION", "1")' in source
-    assert 'os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LIMIT", "4")' in source
+    assert 'os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LIMIT", "3")' in source
+    assert 'os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_TIMEOUT_SECONDS", "10")' in source
     assert 'os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_INTERVAL_SECONDS", "900")' in source
     assert 'os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "4")' in source
+    assert 'os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS", "10")' in source
     assert "install_continuous_runtime_api(app)" in source
     assert "install_runtime_discovery_api(app)" in source
