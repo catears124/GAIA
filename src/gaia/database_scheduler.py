@@ -98,7 +98,7 @@ def install_database_scheduler(database: Database | None = None) -> dict[str, ob
                     )
                 ) AS job_id
                 """,
-                (_JOB_NAME, f"{base_url}/api/maintenance/tick"),
+                (_JOB_NAME, f"{base_url}/api/maintenance/continuous-tick"),
             ).fetchone()
             job_id = int(dict(row or {}).get("job_id") or 0)
             verification = connection.execute(
