@@ -260,8 +260,13 @@ def continuous_status(database: Database | None = None) -> dict[str, Any]:
                 FROM worker_tasks
                 WHERE task_key = ANY(%s)
                 """,
-                (["vercel-runtime-inventory-tick", _VERIFICATION_TASK,
-                  "vercel-runtime-market-discovery"],),
+                (
+                    [
+                        "vercel-runtime-inventory-tick",
+                        _VERIFICATION_TASK,
+                        "vercel-runtime-market-discovery",
+                    ],
+                ),
             ).fetchall()
             tasks = {str(row["task_key"]): dict(row) for row in rows}
             channel_rows = connection.execute(
@@ -325,7 +330,7 @@ async def run_continuous_runtime_tick() -> dict[str, Any]:
 
 async def run_runtime_lead_verification() -> dict[str, Any]:
     """Verify the freshest actionable leads independently of GitHub Actions."""
-    from .lead_promotion import promote_leads
+    from .runtime_lead_verification import verify_fresh_leads
 
     async with _VERIFICATION_LOCK:
         database = Database(migrate=False)
@@ -366,10 +371,10 @@ async def run_runtime_lead_verification() -> dict[str, Any]:
         )
         try:
             summary = await asyncio.wait_for(
-                promote_leads(
+                verify_fresh_leads(
+                    database,
                     limit=limit,
                     concurrency=concurrency,
-                    hours=24,
                     max_age_days=2,
                 ),
                 timeout=timeout,
