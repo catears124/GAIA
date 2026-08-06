@@ -35,7 +35,7 @@ if os.getenv("VERCEL"):
     # pulses both rotate through every source shard rather than revisiting one parity.
     os.environ.setdefault("GAIA_RUNTIME_SHARD_COUNT", "7")
     os.environ.setdefault("GAIA_CANCELLED_TARGET_RETRY_SECONDS", "300")
-    os.environ.setdefault("GAIA_RUNTIME_DISCORD_TIMEOUT_SECONDS", "8")
+    os.environ.setdefault("GAIA_RUNTIME_DISCORD_TIMEOUT_SECONDS", "6")
     os.environ.setdefault("GAIA_RUNTIME_DISCORD_MAX_PER_CHANNEL", "10")
 
     # Recent lead pages receive their own small verification pulse. Successful
@@ -43,9 +43,9 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_VERIFICATION", "1")
     os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_INTERVAL_SECONDS", "120")
     os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LEASE_SECONDS", "120")
-    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LIMIT", "4")
-    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_CONCURRENCY", "4")
-    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_TIMEOUT_SECONDS", "16")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LIMIT", "3")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_CONCURRENCY", "3")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_TIMEOUT_SECONDS", "10")
 
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "120")
@@ -61,7 +61,7 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_LEASE_SECONDS", "240")
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "4")
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "4")
-    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS", "16")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS", "10")
 
     os.environ.setdefault("GAIA_ENABLE_CONVERSION_DIAGNOSTICS", "1")
     os.environ.setdefault("GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS", "120")
