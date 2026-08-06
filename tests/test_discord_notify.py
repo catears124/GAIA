@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from gaia.discord_notify import (
     CHANNELS,
+    VERIFIED_MODES,
     _category_label,
     _payload,
     _source_label,
@@ -92,3 +94,18 @@ def test_webhook_wait_parameter_is_added_without_losing_existing_query() -> None
 def test_non_discord_webhook_is_rejected() -> None:
     with pytest.raises(RuntimeError):
         _webhook_wait_url("https://example.com/api/webhooks/123/token")
+
+
+def test_employer_page_promotion_is_a_verified_delivery_event() -> None:
+    assert VERIFIED_MODES == ("direct", "verification")
+    assert _source_label("verification:example.com:Example") == "Employer page verified"
+
+
+def test_notifier_reads_committed_postings_without_waiting_for_family_rebuild() -> None:
+    source = (Path(__file__).parents[1] / "src" / "gaia" / "discord_notify.py").read_text()
+    assert "FROM postings AS posting" in source
+    assert "BOOL_OR(posting.source_mode = ANY(%s)) AS has_verified" in source
+    assert "discord_notification_claims" in source
+    assert 'parser.add_argument("--watch"' in source
+    assert 'parser.add_argument("--interval-seconds", type=float, default=2.0)' in source
+    assert "FROM families AS family" not in source
