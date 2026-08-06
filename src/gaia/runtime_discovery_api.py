@@ -1,29 +1,34 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 
+from .continuous_runtime_api import publish_committed_updates
 from .maintenance_api import _claim_task, _finish_task, _request_allowed, _worker_id
 
 _RUNTIME_DISCOVERY_TASK = "vercel-runtime-market-discovery"
 
 
 async def run_runtime_market_discovery() -> dict[str, object]:
-    """Search public internship indexes and promote official employer sources in production."""
+    """Continuously discover and validate new employer sources within a hard deadline."""
     from .dynamic_market_discovery import run_dynamic_market_discovery
     from .live_inventory import LiveDatabase
 
     database = LiveDatabase(migrate=False)
     worker_id = _worker_id("market-discovery")
     interval = max(
-        300,
+        900,
         int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_INTERVAL_SECONDS", "900")),
     )
     lease = max(
         120,
-        int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_LEASE_SECONDS", "240")),
+        min(
+            int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_LEASE_SECONDS", "240")),
+            300,
+        ),
     )
     if not _claim_task(
         database,
@@ -35,19 +40,45 @@ async def run_runtime_market_discovery() -> dict[str, object]:
 
     probe_limit = max(
         1,
-        min(int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "10")), 24),
+        min(int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "4")), 8),
     )
     concurrency = max(
         1,
-        min(int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "6")), 10),
+        min(int(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "4")), 6),
+    )
+    timeout = max(
+        8.0,
+        min(
+            float(os.getenv("GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS", "16")),
+            18.0,
+        ),
     )
     try:
-        summary: dict[str, Any] = await run_dynamic_market_discovery(
-            database,
-            probe_limit=probe_limit,
-            concurrency=concurrency,
+        summary: dict[str, Any] = await asyncio.wait_for(
+            run_dynamic_market_discovery(
+                database,
+                probe_limit=probe_limit,
+                concurrency=concurrency,
+            ),
+            timeout=timeout,
         )
-    except Exception as error:
+    except TimeoutError:
+        _finish_task(
+            database,
+            worker_id,
+            task_key=_RUNTIME_DISCOVERY_TASK,
+            interval_seconds=interval,
+            status="partial",
+            error=f"runtime market discovery exceeded {timeout:g} seconds",
+        )
+        published = await publish_committed_updates(database)
+        return {
+            "status": "partial",
+            "executed": True,
+            "summary": None,
+            **published,
+        }
+    except Exception as error:  # noqa: BLE001 - isolate one discovery pulse.
         _finish_task(
             database,
             worker_id,
@@ -56,7 +87,12 @@ async def run_runtime_market_discovery() -> dict[str, object]:
             status="broken",
             error=repr(error),
         )
-        raise
+        return {
+            "status": "broken",
+            "executed": True,
+            "summary": None,
+            "error": repr(error),
+        }
 
     promoted = int(summary.get("candidate_sources_promoted") or 0)
     saved = int(summary.get("candidate_rows_written") or 0)
@@ -68,7 +104,16 @@ async def run_runtime_market_discovery() -> dict[str, object]:
         interval_seconds=interval,
         status=status,
     )
-    return {"status": status, "executed": True, "summary": summary}
+    published = await publish_committed_updates(
+        database,
+        force_projection=promoted > 0,
+    )
+    return {
+        "status": status,
+        "executed": True,
+        "summary": summary,
+        **published,
+    }
 
 
 def install_runtime_discovery_api(app: FastAPI) -> None:
