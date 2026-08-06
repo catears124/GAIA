@@ -29,6 +29,11 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "120")
     os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "48")
     os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "12")
+    # Seven is intentionally prime. Minute-level partial retries and slower healthy
+    # pulses both rotate through every source shard rather than revisiting one parity.
+    os.environ.setdefault("GAIA_RUNTIME_SHARD_COUNT", "7")
+    os.environ.setdefault("GAIA_CANCELLED_TARGET_RETRY_SECONDS", "300")
+    os.environ.setdefault("GAIA_RUNTIME_DISCORD_TIMEOUT_SECONDS", "8")
     os.environ.setdefault("GAIA_RUNTIME_DISCORD_MAX_PER_CHANNEL", "10")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "120")
