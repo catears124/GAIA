@@ -61,18 +61,25 @@ def test_disabled_runtime_discovery_is_not_exposed(monkeypatch) -> None:
     assert response.status_code == 404
 
 
-def test_runtime_discovery_is_leased_bounded_and_manual_only() -> None:
+def test_runtime_discovery_is_leased_bounded_and_database_scheduled() -> None:
     source = Path("src/gaia/runtime_discovery_api.py").read_text(encoding="utf-8")
+    scheduler = Path("src/gaia/database_scheduler.py").read_text(encoding="utf-8")
     workflow = Path(".github/workflows/runtime-market-discovery.yml").read_text(
         encoding="utf-8"
     )
 
     assert "vercel-runtime-market-discovery" in source
     assert "run_dynamic_market_discovery" in source
+    assert "asyncio.wait_for(" in source
     assert "GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT" in source
-    assert "min(int" in source
+    assert "GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS" in source
+    assert "publish_committed_updates" in source
     assert "candidate_sources_promoted" in source
+    assert 'schedule="3,18,33,48 * * * *"' in scheduler
+    assert "/api/maintenance/discover" in scheduler
+
+    # The old GitHub/Vercel workflow stays manual. Supabase owns the production clock,
+    # avoiding two independent scheduled loops and the CPU burn that caused the outage.
     assert "workflow_dispatch:" in workflow
     assert "schedule:" not in workflow
     assert "push:" not in workflow
-    assert "/api/maintenance/discover" in workflow
