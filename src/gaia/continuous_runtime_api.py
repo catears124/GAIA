@@ -7,6 +7,7 @@ from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException, Request
 
+from .database_scheduler import scheduler_status
 from .db import Database
 from .discord_notify import send_notifications
 from .maintenance_api import _request_allowed, run_inventory_tick
@@ -44,6 +45,56 @@ def _runtime_discord_environment(database: Database) -> Iterator[dict[str, bool]
             os.environ["GAIA_DISCORD_MAX_PER_CHANNEL"] = previous_limit
 
 
+def continuous_status(database: Database | None = None) -> dict[str, Any]:
+    database = database or Database(migrate=False)
+    scheduler = scheduler_status(database)
+    webhooks = {
+        name: bool(resolved_runtime_secret(database, name))
+        for name in ("VERIFIED_DHOOK", "LEADS_DHOOK")
+    }
+    tick: dict[str, Any] = {}
+    channels: list[dict[str, Any]] = []
+    try:
+        with database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT task_key, next_run_at, last_started_at, last_finished_at,
+                       last_status, last_error, updated_at
+                FROM worker_tasks
+                WHERE task_key='vercel-runtime-inventory-tick'
+                """
+            ).fetchone()
+            tick = dict(row or {})
+            rows = connection.execute(
+                """
+                SELECT channel, initialized_at, updated_at,
+                       (
+                           SELECT COUNT(*)
+                           FROM discord_notification_deliveries AS delivery
+                           WHERE delivery.channel=channel_state.channel
+                             AND delivery.disposition='sent'
+                       ) AS sent_total,
+                       (
+                           SELECT MAX(delivered_at)
+                           FROM discord_notification_deliveries AS delivery
+                           WHERE delivery.channel=channel_state.channel
+                             AND delivery.disposition='sent'
+                       ) AS last_sent_at
+                FROM discord_notification_channels AS channel_state
+                ORDER BY channel
+                """
+            ).fetchall()
+            channels = [dict(item) for item in rows]
+    except Exception as error:  # noqa: BLE001 - status must remain available during recovery.
+        tick = {"error": repr(error)}
+    return {
+        "scheduler": scheduler,
+        "webhooks_configured": webhooks,
+        "inventory_tick": tick,
+        "discord_channels": channels,
+    }
+
+
 async def run_continuous_runtime_tick() -> dict[str, Any]:
     async with _LOCK:
         inventory = await run_inventory_tick()
@@ -76,6 +127,10 @@ def install_continuous_runtime_api(app: FastAPI) -> None:
     if getattr(app.state, "gaia_continuous_runtime_api_installed", False):
         return
     app.state.gaia_continuous_runtime_api_installed = True
+
+    @app.get("/api/continuous-status", include_in_schema=False)
+    async def public_continuous_status() -> dict[str, Any]:
+        return await asyncio.to_thread(continuous_status)
 
     @app.post("/api/maintenance/continuous-tick", include_in_schema=False)
     async def continuous_runtime_tick(request: Request) -> dict[str, Any]:
