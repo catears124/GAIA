@@ -37,16 +37,32 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_CANCELLED_TARGET_RETRY_SECONDS", "300")
     os.environ.setdefault("GAIA_RUNTIME_DISCORD_TIMEOUT_SECONDS", "8")
     os.environ.setdefault("GAIA_RUNTIME_DISCORD_MAX_PER_CHANNEL", "10")
+
+    # Recent lead pages receive their own small verification pulse. Successful
+    # verification publishes the feed and drains Discord in the same invocation.
+    os.environ.setdefault("GAIA_ENABLE_RUNTIME_VERIFICATION", "1")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_INTERVAL_SECONDS", "120")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LEASE_SECONDS", "120")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_LIMIT", "4")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_CONCURRENCY", "4")
+    os.environ.setdefault("GAIA_RUNTIME_VERIFICATION_TIMEOUT_SECONDS", "16")
+
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "120")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "180")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_PROBE_LIMIT", "24")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_CONCURRENCY", "12")
+
+    # Market expansion is continuous but deliberately sparse and bounded. This avoids
+    # recreating the old Vercel CPU burn while still discovering employers not yet in
+    # the validated source catalog.
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_MARKET_DISCOVERY", "1")
-    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_INTERVAL_SECONDS", "300")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_INTERVAL_SECONDS", "900")
     os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_LEASE_SECONDS", "240")
-    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "24")
-    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "10")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_PROBE_LIMIT", "4")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_CONCURRENCY", "4")
+    os.environ.setdefault("GAIA_RUNTIME_MARKET_DISCOVERY_TIMEOUT_SECONDS", "16")
+
     os.environ.setdefault("GAIA_ENABLE_CONVERSION_DIAGNOSTICS", "1")
     os.environ.setdefault("GAIA_DIAGNOSTIC_CANDIDATE_LEASE_SECONDS", "120")
     os.environ.setdefault("GAIA_DB_TIMEOUT", "8")
