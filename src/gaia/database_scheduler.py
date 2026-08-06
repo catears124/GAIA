@@ -61,6 +61,47 @@ def _record(database: Database, *, ready: bool, detail: str) -> None:
         )
 
 
+def _extension_installed(database: Database, name: str) -> bool:
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname=%s) AS installed",
+            (name,),
+        ).fetchone()
+    return bool(dict(row or {}).get("installed"))
+
+
+def _ensure_extensions(database: Database) -> None:
+    # Avoid issuing CREATE EXTENSION against an already-provisioned Supabase project;
+    # some pooler roles can use installed extensions but cannot create them.
+    if not _extension_installed(database, "pg_cron"):
+        with database.connect() as connection:
+            connection.execute("CREATE EXTENSION pg_cron")
+    if not _extension_installed(database, "pg_net"):
+        with database.connect() as connection:
+            connection.execute("CREATE EXTENSION pg_net WITH SCHEMA extensions")
+
+
+def _cron_command(base_url: str) -> str:
+    # base_url is allowlisted by _base_url(), so interpolating it into the command
+    # stored by pg_cron cannot introduce arbitrary SQL. The complete command is then
+    # passed as one ordinary psycopg parameter to cron.schedule.
+    endpoint = f"{base_url}/api/maintenance/continuous-tick"
+    return f"""
+        SELECT net.http_post(
+            url := '{endpoint}',
+            headers := jsonb_build_object(
+                'Content-Type', 'application/json',
+                'User-Agent', 'GAIA-production-maintenance/supabase-cron'
+            ),
+            body := jsonb_build_object(
+                'scheduler', 'supabase-pg-cron',
+                'requested_at', now()
+            ),
+            timeout_milliseconds := 45000
+        ) AS request_id
+    """
+
+
 def install_database_scheduler(database: Database | None = None) -> dict[str, object]:
     """Install a Supabase-native minute pulse independent of GitHub Actions.
 
@@ -72,35 +113,11 @@ def install_database_scheduler(database: Database | None = None) -> dict[str, ob
     try:
         with database.connect() as connection:
             connection.execute(_STATE_SCHEMA)
-            connection.execute("CREATE EXTENSION IF NOT EXISTS pg_cron")
-            connection.execute(
-                "CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions"
-            )
+        _ensure_extensions(database)
+        with database.connect() as connection:
             row = connection.execute(
-                """
-                SELECT cron.schedule(
-                    %s,
-                    '* * * * *',
-                    format(
-                        $command$
-                        SELECT net.http_post(
-                            url := %L,
-                            headers := jsonb_build_object(
-                                'Content-Type', 'application/json',
-                                'User-Agent', 'GAIA-production-maintenance/supabase-cron'
-                            ),
-                            body := jsonb_build_object(
-                                'scheduler', 'supabase-pg-cron',
-                                'requested_at', now()
-                            ),
-                            timeout_milliseconds := 45000
-                        ) AS request_id
-                        $command$,
-                        %s
-                    )
-                ) AS job_id
-                """,
-                (_JOB_NAME, f"{base_url}/api/maintenance/continuous-tick"),
+                "SELECT cron.schedule(%s, %s, %s) AS job_id",
+                (_JOB_NAME, "* * * * *", _cron_command(base_url)),
             ).fetchone()
             job_id = int(dict(row or {}).get("job_id") or 0)
             verification = connection.execute(
