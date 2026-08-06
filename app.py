@@ -3,8 +3,8 @@
 The build imports only lightweight application code. Schema initialization and
 empty-database recovery begin on the first real API request. Ongoing inventory ticks
 also run inside Vercel, so a recreated Supabase project does not depend on stale
-GitHub database credentials. Successful production deployment status also wakes the
-independent ARM inventory pulse.
+GitHub database credentials. Supabase owns the minute-level production clock; GitHub
+Actions remains a higher-throughput redundant worker.
 """
 
 from __future__ import annotations
@@ -23,10 +23,13 @@ if os.getenv("VERCEL"):
     os.environ.setdefault("GAIA_BOOTSTRAP_EMPTY_DATABASE", "1")
     os.environ.setdefault("GAIA_BOOTSTRAP_BUDGET_SECONDS", "38")
     os.environ.setdefault("GAIA_CANDIDATE_PROBE_LIMIT", "24")
+    os.environ.setdefault("GAIA_ENABLE_DATABASE_CRON", "1")
+    os.environ.setdefault("GAIA_PUBLIC_BASE_URL", "https://gaiajob.vercel.app")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_TICK", "1")
     os.environ.setdefault("GAIA_RUNTIME_TICK_INTERVAL_SECONDS", "120")
     os.environ.setdefault("GAIA_RUNTIME_TICK_BUDGET_SECONDS", "48")
     os.environ.setdefault("GAIA_RUNTIME_TICK_CONCURRENCY", "12")
+    os.environ.setdefault("GAIA_RUNTIME_DISCORD_MAX_PER_CHANNEL", "10")
     os.environ.setdefault("GAIA_ENABLE_RUNTIME_DYNAMIC_SOURCES", "1")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_INTERVAL_SECONDS", "120")
     os.environ.setdefault("GAIA_RUNTIME_DYNAMIC_SOURCE_LEASE_SECONDS", "180")
@@ -69,6 +72,7 @@ install_domain_graph_coverage_extension()
 
 from gaia.activity_api import install_activity_api  # noqa: E402
 from gaia.api_resilience import install_database_outage_guard  # noqa: E402
+from gaia.continuous_runtime_api import install_continuous_runtime_api  # noqa: E402
 from gaia.conversion_diagnostics_api import (  # noqa: E402
     install_conversion_diagnostics_api,
 )
@@ -82,6 +86,7 @@ install_request_bootstrap(app)
 install_activity_api(app)
 install_coverage_api(app)
 install_maintenance_api(app)
+install_continuous_runtime_api(app)
 install_runtime_discovery_api(app)
 install_conversion_diagnostics_api(app)
 install_database_outage_guard(app)

@@ -10,8 +10,11 @@ from fastapi import FastAPI, Request, Response
 
 LOGGER = logging.getLogger("gaia.request-bootstrap")
 _LOCK = asyncio.Lock()
+_SCHEDULER_LOCK = asyncio.Lock()
 _READY = False
+_SCHEDULER_READY = False
 _NEXT_ATTEMPT_AT = 0.0
+_NEXT_SCHEDULER_ATTEMPT_AT = 0.0
 
 
 async def _ensure_runtime_database() -> None:
@@ -41,6 +44,33 @@ async def _ensure_runtime_database() -> None:
             _NEXT_ATTEMPT_AT = time.monotonic() + 30.0
 
 
+async def _ensure_database_scheduler() -> None:
+    global _NEXT_SCHEDULER_ATTEMPT_AT, _SCHEDULER_READY
+    if _SCHEDULER_READY or os.getenv("GAIA_ENABLE_DATABASE_CRON", "1") != "1":
+        return
+    now = time.monotonic()
+    if now < _NEXT_SCHEDULER_ATTEMPT_AT:
+        return
+    async with _SCHEDULER_LOCK:
+        if _SCHEDULER_READY:
+            return
+        now = time.monotonic()
+        if now < _NEXT_SCHEDULER_ATTEMPT_AT:
+            return
+        try:
+            from .database_scheduler import install_database_scheduler
+
+            result = await asyncio.to_thread(install_database_scheduler)
+            _SCHEDULER_READY = result.get("ready") is True
+            if not _SCHEDULER_READY:
+                LOGGER.warning("database scheduler not ready: %s", result.get("detail"))
+        except Exception:
+            LOGGER.exception("request-time database scheduler installation crashed")
+            _SCHEDULER_READY = False
+        if not _SCHEDULER_READY:
+            _NEXT_SCHEDULER_ATTEMPT_AT = time.monotonic() + 300.0
+
+
 def install_request_bootstrap(app: FastAPI) -> None:
     if getattr(app.state, "gaia_request_bootstrap_installed", False):
         return
@@ -53,4 +83,5 @@ def install_request_bootstrap(app: FastAPI) -> None:
     ) -> Response:
         if request.url.path.startswith("/api/"):
             await _ensure_runtime_database()
+            await _ensure_database_scheduler()
         return await call_next(request)
