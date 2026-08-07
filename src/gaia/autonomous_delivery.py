@@ -10,33 +10,12 @@ from .db import Database
 from .discord_notify_fast import send_notifications
 from .runtime_lead_verification import verify_fresh_leads
 
-_INDEX_STATEMENTS = (
-    """
-    CREATE INDEX IF NOT EXISTS idx_postings_runtime_lead_due
-        ON postings (first_seen_at DESC, link_checked_at, posting_key)
-        WHERE active
-          AND source_mode IN ('registry','external-index','verification-lead')
-          AND target_match IN ('exact','year_confirmed','source_confirmed')
-          AND link_status NOT IN ('closed','invalid','verified')
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_families_discord_verified_due
-        ON families (first_detected_at, family_key)
-        WHERE direct_openings > 0
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_families_discord_lead_due
-        ON families (first_detected_at, family_key)
-        WHERE direct_openings = 0 AND backstop_openings > 0
-    """,
-)
 
-
-def ensure_delivery_indexes(database: Database) -> None:
-    """Install small targeted indexes used by autonomous verification/delivery."""
-    with database.connect() as connection:
-        for statement in _INDEX_STATEMENTS:
-            connection.execute(statement)
+async def _drain(database: Database) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        return await asyncio.to_thread(send_notifications, database), None
+    except Exception as error:  # noqa: BLE001 - a later drain gets one independent retry.
+        return None, repr(error)
 
 
 async def run_autonomous_delivery(
@@ -45,8 +24,18 @@ async def run_autonomous_delivery(
     concurrency: int = 6,
     timeout_seconds: float = 150.0,
 ) -> dict[str, Any]:
+    """Deliver first, then do bounded verification work, then deliver new commits.
+
+    Nothing expensive is allowed in front of the first webhook drain. In particular,
+    this function performs no schema/index DDL and does not call Vercel. That guarantees
+    an old verification backlog or slow maintenance query cannot starve already-pending
+    Discord notifications.
+    """
     database = Database(migrate=False)
-    await asyncio.to_thread(ensure_delivery_indexes, database)
+
+    # Highest-priority invariant: committed/projected alerts get a send attempt as soon
+    # as the scheduled runner starts. Do this before verification or family rebuilding.
+    pre_notifications, pre_notification_error = await _drain(database)
 
     verification: dict[str, object] | None = None
     verification_error: str | None = None
@@ -62,7 +51,7 @@ async def run_autonomous_delivery(
         )
     except TimeoutError:
         verification_error = f"direct verification exceeded {timeout_seconds:g} seconds"
-    except Exception as error:  # noqa: BLE001 - Discord must still drain on verifier failure.
+    except Exception as error:  # noqa: BLE001 - Discord gets its second drain regardless.
         verification_error = repr(error)
 
     changed = bool(
@@ -85,18 +74,18 @@ async def run_autonomous_delivery(
             database,
             force=changed,
         )
-    except Exception as error:  # noqa: BLE001 - notifications can still use last projection.
+    except Exception as error:  # noqa: BLE001 - final Discord drain must still execute.
         projection_error = repr(error)
 
-    notifications: dict[str, object] | None = None
-    notification_error: str | None = None
-    try:
-        notifications = await asyncio.to_thread(send_notifications, database)
-    except Exception as error:  # noqa: BLE001 - expose exact failure to workflow evidence.
-        notification_error = repr(error)
+    # Drain again so jobs recovered by this very verification pulse are delivered in
+    # the same run. This also acts as one independent retry if the first drain failed.
+    notifications, notification_error = await _drain(database)
 
+    delivery_succeeded = notification_error is None
     result: dict[str, Any] = {
-        "status": "ok" if notification_error is None else "partial",
+        "status": "ok" if delivery_succeeded else "partial",
+        "pre_notifications": pre_notifications,
+        "pre_notification_error": pre_notification_error,
         "verification": verification,
         "verification_error": verification_error,
         "projection": projection,
@@ -104,9 +93,9 @@ async def run_autonomous_delivery(
         "notifications": notifications,
         "notification_error": notification_error,
     }
-    # A verifier timeout is recoverable: the next five-minute pulse retries. A notifier
-    # failure is not recoverable from the user's perspective and must make the job red.
-    if notification_error is not None:
+    # Verification/projection failures are recoverable next pulse. A failed final drain
+    # is not: make the workflow red so transport failures can never masquerade as health.
+    if not delivery_succeeded:
         raise RuntimeError(json.dumps(result, sort_keys=True, default=str))
     return result
 
