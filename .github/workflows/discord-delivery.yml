@@ -1,0 +1,108 @@
+name: Discord alert delivery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/discord-delivery.yml"
+      - "src/gaia/discord_notify.py"
+      - "src/gaia/discord_notify_fast.py"
+  schedule:
+    # Offset from lead verification so alert transport has an independent runner.
+    - cron: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-discord-delivery
+  cancel-in-progress: true
+
+jobs:
+  deliver:
+    name: Drain Discord alerts
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "45"
+      GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES: "180"
+      GAIA_DISCORD_MAX_PER_CHANNEL: "250"
+      VERIFIED_DHOOK: ${{ secrets.VERIFIED_DHOOK }}
+      LEADS_DHOOK: ${{ secrets.LEADS_DHOOK }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Require alert dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GAIA_DATABASE_URL"
+          test -n "$VERIFIED_DHOOK"
+          test -n "$LEADS_DHOOK"
+
+      - name: Drain pending alerts
+        id: drain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python -m gaia.discord_notify_fast | tee evidence/discord.json
+          description=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path("evidence/discord.json").read_text())
+          channels = result.get("channels") or {}
+          verified = channels.get("verified") or {}
+          leads = channels.get("leads") or {}
+          print(
+              f"Discord sent verified={verified.get('sent', 0)} "
+              f"leads={leads.get('sent', 0)}; "
+              f"pending={verified.get('pending', 0) + leads.get('pending', 0)}"
+          )
+          PY
+          )
+          echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Discord evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-delivery-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish delivery status
+        if: always()
+        shell: bash
+        env:
+          DESCRIPTION: ${{ steps.drain.outputs.description || 'Discord delivery failed' }}
+        run: |
+          if [ "${{ steps.drain.outcome }}" = success ]; then state=success; else state=failure; fi
+          payload=$(jq -n \
+            --arg state "$state" \
+            --arg context "gaia/discord-delivery" \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -d "$payload"
