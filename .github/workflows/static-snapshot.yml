@@ -34,7 +34,9 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      # Snapshot publication is a background DB reader. Prefer the direct endpoint so a
+      # saturated Supavisor transaction pool cannot make the fallback itself go stale.
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_PUBLIC_BASE_URL: https://gaiajob.vercel.app
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
