@@ -62,10 +62,12 @@ class GuardedWriteMixin(WriteMixin):
         current_keys = {posting.posting_key for posting in postings}
 
         with self.connect() as db:
-            # One-time compatibility repair for direct rows that the old one-scan
-            # deletion path hard-disabled without recording removed_at. They receive
-            # a fresh pending-close grace window and will either be recovered by the
-            # provider or confirmed closed on a later complete crawl.
+            # Compatibility repair for rows from *this source* that the old one-scan
+            # deletion path hard-disabled without recording removed_at. This used to
+            # run as an unscoped UPDATE over the entire postings table for every source
+            # result, turning every crawl/candidate promotion into a historical-table
+            # maintenance scan. Source-local repair preserves the safety behavior while
+            # making apply_result scale with the board being processed.
             legacy_restore_seconds = max(
                 60,
                 int(
@@ -79,12 +81,13 @@ class GuardedWriteMixin(WriteMixin):
                 """
                 UPDATE postings
                 SET active=TRUE, removed_at=%s
-                WHERE NOT active
+                WHERE source=%s
+                  AND NOT active
                   AND removed_at IS NULL
                   AND source_mode='direct'
                   AND last_seen_at >= %s - make_interval(secs => %s)
                 """,
-                (observed, observed, legacy_restore_seconds),
+                (observed, result.source, observed, legacy_restore_seconds),
             )
 
             old_keys = {
