@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
-from .product_api import live_facets, live_families, live_health, live_stats
+from .product_api import live_facets, live_families, live_health
 
 DEFAULT_OUTPUT = Path(__file__).with_name("frontend") / "last-known-inventory.json"
 FAMILY_FIELDS = (
@@ -80,7 +80,7 @@ def _compact_family(raw: dict[str, object]) -> dict[str, object]:
 
 
 def _family_index() -> tuple[list[dict[str, object]], int, bool]:
-    """Export a compact visible-family feed for offline filtering and details."""
+    """Export the materialized visible-family feed without scanning raw postings."""
 
     page_size = 100
     max_pages = max(1, int(os.getenv("GAIA_STATIC_SNAPSHOT_MAX_PAGES", "100")))
@@ -107,6 +107,82 @@ def _family_index() -> tuple[list[dict[str, object]], int, bool]:
 
     complete = expected_total == 0 or len(items) >= expected_total
     return items, expected_total, complete
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _fast_snapshot_stats(
+    families: list[dict[str, object]],
+    health: dict[str, object],
+) -> dict[str, object]:
+    """Build outage-mode counters from the small materialized read model.
+
+    `live_stats()` also scans the raw postings table for URL movement and rebuilds
+    employer-universe summaries. Under production write pressure that query has taken
+    more than two minutes and repeatedly prevented *any* fallback snapshot from being
+    published. Snapshot mode needs dependable current inventory, not an expensive
+    analytics query, so every counter here is derived from the already-exported family
+    rows plus the health payload.
+    """
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=24)
+    direct_families = [item for item in families if int(item.get("direct_openings") or 0) > 0]
+    lead_families = [
+        item
+        for item in families
+        if int(item.get("direct_openings") or 0) == 0
+        and int(item.get("backstop_openings") or 0) > 0
+    ]
+    new_families = sum(
+        1
+        for item in direct_families
+        if (detected := _parse_timestamp(item.get("first_detected_at"))) is not None
+        and detected >= cutoff
+    )
+    direct_openings = sum(int(item.get("direct_openings") or 0) for item in direct_families)
+    lead_openings = sum(int(item.get("backstop_openings") or 0) for item in lead_families)
+    companies = len({str(item.get("company") or "").casefold() for item in direct_families if item.get("company")})
+
+    inventory = health.get("inventory") if isinstance(health, dict) else None
+    inventory_row = inventory if isinstance(inventory, dict) else {}
+    validated_sources = int(inventory_row.get("total") or 0)
+
+    # Keep the API shape expected by the frontend. URL-level movement is deliberately
+    # conservative in snapshot mode; the live API remains authoritative for removals.
+    return {
+        "role_families": len(direct_families),
+        "active_listings": direct_openings,
+        "companies": companies,
+        "new_families_today": new_families,
+        "new_today": new_families,
+        "new_24h": new_families,
+        "new_urls_today": new_families,
+        "removed_urls_today": 0,
+        "verified_listings": direct_openings,
+        "verified_families": len(direct_families),
+        "validated_sources": validated_sources,
+        "known_employers": 0,
+        "enumerated_employers": 0,
+        "unresolved_employers": 0,
+        "blind_spots": 0,
+        "leads": len(lead_families),
+        "lead_apps": lead_openings,
+        "snapshot_stats_mode": "materialized-families",
+    }
 
 
 def _snapshot_stats(payload: dict[str, object]) -> dict[str, object]:
@@ -154,9 +230,15 @@ def _validate_snapshot(payload: dict[str, object], previous: dict[str, object] |
 
 
 def build_snapshot() -> dict[str, object]:
+    # Health and families are the essential outage-mode data. Build them first and keep
+    # snapshot publication independent of raw-posting analytics and universe reports.
+    health = live_health()
+    family_index, family_index_total, family_index_complete = _family_index()
+    stats = _fast_snapshot_stats(family_index, health)
+
     responses: dict[str, object] = {
-        "/api/health": live_health(),
-        "/api/stats": live_stats(),
+        "/api/health": health,
+        "/api/stats": stats,
         "/api/facets": live_facets(),
         _key("/api/facets", trust="verified"): live_facets(trust="verified"),
         _key("/api/facets", target="exact", trust="verified"): live_facets(
@@ -179,8 +261,6 @@ def build_snapshot() -> dict[str, object]:
     for params in presets:
         responses[_key("/api/families", **params)] = _families(**params)
 
-    family_index, family_index_total, family_index_complete = _family_index()
-    health = responses["/api/health"]
     inventory = health.get("inventory", {}) if isinstance(health, dict) else {}
     return {
         "schema_version": 2,
