@@ -7,8 +7,15 @@ on:
       - ".github/workflows/discord-delivery.yml"
       - "src/gaia/discord_notify.py"
       - "src/gaia/discord_notify_fast.py"
+  workflow_run:
+    workflows:
+      - "Publish static inventory snapshot"
+      - "Production inventory"
+      - "Lead promotion to verified jobs"
+      - "Dynamic market discovery"
+    types: [completed]
   schedule:
-    # Offset from lead verification so alert transport has an independent runner.
+    # Offset from lead verification so alert transport also has an independent clock.
     - cron: "1,6,11,16,21,26,31,36,41,46,51,56 * * * *"
   workflow_dispatch:
 
