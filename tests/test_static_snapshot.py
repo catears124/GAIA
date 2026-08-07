@@ -26,12 +26,12 @@ def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp
     monkeypatch.setattr(
         static_snapshot,
         "live_health",
-        lambda: {"inventory": {"latest_activity_at": "2026-07-31T00:00:00+00:00"}},
-    )
-    monkeypatch.setattr(
-        static_snapshot,
-        "live_stats",
-        lambda: {"active_listings": 2, "companies": 1, "new_today": 1},
+        lambda: {
+            "inventory": {
+                "latest_activity_at": "2026-07-31T00:00:00+00:00",
+                "total": 10,
+            }
+        },
     )
     monkeypatch.setattr(
         static_snapshot,
@@ -41,7 +41,20 @@ def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp
     monkeypatch.setattr(
         static_snapshot,
         "live_families",
-        lambda **kwargs: {"items": [{"family_key": "one"}], "total": 1, "page": kwargs["page"]},
+        lambda **kwargs: {
+            "items": [
+                {
+                    "family_key": "one",
+                    "company": "Example",
+                    "title": "Software Intern",
+                    "direct_openings": 2,
+                    "backstop_openings": 0,
+                    "first_detected_at": "2026-07-31T00:00:00+00:00",
+                }
+            ],
+            "total": 1,
+            "page": kwargs["page"],
+        },
     )
 
     output = tmp_path / "snapshot.json"
@@ -51,17 +64,24 @@ def test_snapshot_writer_is_atomic_and_contains_required_routes(monkeypatch, tmp
     assert payload["generated_at"]
     assert payload["source_activity_at"] == "2026-07-31T00:00:00+00:00"
     assert payload["responses"]["/api/health"]
-    assert payload["responses"]["/api/stats"]
+    assert payload["responses"]["/api/stats"]["active_listings"] == 2
+    assert payload["responses"]["/api/stats"]["snapshot_stats_mode"] == "materialized-families"
     assert payload["responses"]["/api/families"]["items"]
-    assert payload["family_index"] == [{"family_key": "one", "openings": []}]
+    assert payload["family_index"][0]["family_key"] == "one"
     assert payload["family_index_total"] == 1
     assert payload["family_index_complete"] is True
     assert not output.with_suffix(".json.tmp").exists()
 
 
+def test_snapshot_export_never_calls_expensive_live_stats() -> None:
+    source = Path("src/gaia/static_snapshot.py").read_text(encoding="utf-8")
+    assert "live_stats" not in source
+    assert "FROM postings" not in source
+    assert "materialized-families" in source
+
+
 def test_snapshot_contains_common_first_visit_searches(monkeypatch) -> None:
     monkeypatch.setattr(static_snapshot, "live_health", lambda: {"inventory": {}})
-    monkeypatch.setattr(static_snapshot, "live_stats", lambda: {})
     monkeypatch.setattr(static_snapshot, "live_facets", lambda trust="all", target="": {})
     monkeypatch.setattr(static_snapshot, "live_families", lambda **kwargs: {"items": [], "total": 0})
 
