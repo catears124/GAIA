@@ -5,16 +5,18 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/lead-promotion.yml"
-      - "src/gaia/lead_promotion.py"
+      - "src/gaia/autonomous_delivery.py"
+      - "src/gaia/runtime_lead_verification.py"
       - "src/gaia/discord_notify.py"
-      - "src/gaia/conversion_diagnostics_api.py"
+      - "src/gaia/discord_notify_fast.py"
+      - "src/gaia/continuous_runtime_api.py"
       - "src/gaia/db.py"
       - "src/gaia/db_write.py"
       - "src/gaia/page_verification.py"
       - "src/gaia/schema.sql"
-      - "app.py"
   schedule:
-    # Follow each inventory pulse closely without launching a long overlapping batch.
+    # GitHub's minimum reliable schedule cadence is five minutes. This path talks
+    # directly to Supabase and Discord and does not depend on Vercel being healthy.
     - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch:
 
@@ -28,12 +30,11 @@ concurrency:
 
 jobs:
   promote:
-    name: Verify fresh leads with instant Discord delivery
+    name: Direct DB verification and Discord delivery
     runs-on: ubuntu-latest
     timeout-minutes: 6
     environment: production
     env:
-      BASE_URL: https://gaiajob.vercel.app
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
@@ -53,77 +54,43 @@ jobs:
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
 
-      - name: Promote fresh leads continuously
-        id: promotion
+      - name: Require direct production dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GAIA_DATABASE_URL"
+          test -n "$VERIFIED_DHOOK"
+          test -n "$LEADS_DHOOK"
+          python -m gaia.wait_for_database --timeout-seconds 45
+
+      - name: Verify, publish, and drain Discord directly
+        id: delivery
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
+          python -m gaia.autonomous_delivery \
+            --limit 12 --concurrency 6 --timeout-seconds 150 \
+            | tee evidence/result.json
+          description=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("evidence/result.json").read_text())
+          verify = payload.get("verification") or {}
+          notify = payload.get("notifications") or {}
+          channels = notify.get("channels") or notify
+          print(
+              "Direct delivery: "
+              f"selected {verify.get('selected_leads', 0)}, "
+              f"verified {verify.get('verified_leads', 0)}, "
+              f"recovered {verify.get('recovered_verified_openings', 0)}, "
+              f"notifications {channels}"
+          )
+          PY
+          )
+          echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
 
-          test -n "$GAIA_DATABASE_URL"
-          test -n "$VERIFIED_DHOOK"
-          test -n "$LEADS_DHOOK"
-          python -m gaia.wait_for_database --timeout-seconds 45 \
-            > evidence/database-gate.log 2>&1
-
-          # A verified posting is visible to this pump as soon as the promotion
-          # transaction commits. It is not held until the workflow finishes.
-          python -m gaia.discord_notify \
-            --watch --interval-seconds 2 --max-seconds 330 \
-            > evidence/discord-watch.log 2>&1 &
-          notifier_pid=$!
-          stop_notifier() {
-            kill "$notifier_pid" 2>/dev/null || true
-            wait "$notifier_pid" 2>/dev/null || true
-          }
-          trap stop_notifier EXIT INT TERM
-          sleep 2
-          kill -0 "$notifier_pid"
-
-          ua="GAIA-production-maintenance/${GITHUB_RUN_ID}"
-          successful=0
-          for batch in 1 2; do
-            status=$(curl --silent --show-error --location \
-              --request POST --user-agent "$ua" \
-              --connect-timeout 8 --max-time 55 \
-              --retry 1 --retry-all-errors --retry-delay 2 \
-              --output "evidence/promote-${batch}.json" \
-              --write-out '%{http_code}' \
-              "${BASE_URL}/api/maintenance/diagnostics/promote-leads?limit=24&concurrency=10&hours=24&max_age_days=14&timeout_seconds=45" \
-              || printf '000')
-            printf '%s\n' "$status" > "evidence/promote-${batch}.status"
-            if [ "$status" = 200 ] && \
-               jq -e 'type == "object" and .status == "ok"' \
-                 "evidence/promote-${batch}.json" >/dev/null; then
-              successful=$((successful + 1))
-            fi
-          done
-
-          python -m gaia.discord_notify > evidence/discord-final.json
-          stop_notifier
-          trap - EXIT INT TERM
-
-          selected=$(jq -s '[.[] | .selected_leads // 0] | add // 0' evidence/promote-*.json)
-          recovered=$(jq -s '[.[] | .recovered_verified_openings // 0] | add // 0' evidence/promote-*.json)
-          verified=$(jq -s '[.[] | .verified_leads // 0] | add // 0' evidence/promote-*.json)
-          closed=$(jq -s '[.[] | .closed_leads // 0] | add // 0' evidence/promote-*.json)
-          jq -n \
-            --argjson successful "$successful" \
-            --argjson selected "$selected" \
-            --argjson recovered "$recovered" \
-            --argjson verified "$verified" \
-            --argjson closed "$closed" \
-            '{successful_batches:$successful,selected_leads:$selected,recovered_verified_openings:$recovered,verified_leads:$verified,closed_leads:$closed}' \
-            > evidence/result.json
-
-          echo "description=Promotion batches ${successful}/2; selected ${selected}; verified ${verified}; recovered ${recovered}" >> "$GITHUB_OUTPUT"
-          if [ "$successful" -lt 1 ]; then
-            echo "state=failure" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          echo "state=success" >> "$GITHUB_OUTPUT"
-
-      - name: Upload lead-promotion evidence
+      - name: Upload delivery evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -136,11 +103,15 @@ jobs:
         if: always()
         shell: bash
         env:
-          STATE: ${{ steps.promotion.outputs.state || 'failure' }}
-          DESCRIPTION: ${{ steps.promotion.outputs.description || 'Lead promotion did not complete' }}
+          DESCRIPTION: ${{ steps.delivery.outputs.description || 'Direct verification/Discord delivery failed' }}
         run: |
+          if [ "${{ steps.delivery.outcome }}" = success ]; then
+            state=success
+          else
+            state=failure
+          fi
           payload=$(jq -n \
-            --arg state "$STATE" \
+            --arg state "$state" \
             --arg context "gaia/lead-promotion" \
             --arg description "${DESCRIPTION:0:140}" \
             --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
