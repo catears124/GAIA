@@ -1,0 +1,47 @@
+name: Discord ledger diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/discord-ledger-diagnostics.yml"
+      - "src/gaia/discord_ledger_diagnostics.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gaia-discord-ledger-diagnostics
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    name: Inspect newest family delivery state
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install GAIA
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Inspect Discord ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m gaia.discord_ledger_diagnostics --limit 30 | tee discord-ledger.json
+      - name: Upload ledger evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-ledger-${{ github.run_id }}
+          path: discord-ledger.json
+          retention-days: 7
+          if-no-files-found: error
