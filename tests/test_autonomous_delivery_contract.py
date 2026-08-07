@@ -27,6 +27,7 @@ def test_direct_delivery_never_calls_vercel() -> None:
     assert "api/maintenance/diagnostics/promote-leads" not in workflow
     assert "python -m gaia.autonomous_delivery" in workflow
     assert 'cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"' in workflow
+    assert "POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL" in workflow
 
 
 def test_stale_snapshot_is_not_reported_as_success() -> None:
@@ -38,9 +39,13 @@ def test_stale_snapshot_is_not_reported_as_success() -> None:
     assert 'exit "$fail"' in workflow
 
 
-def test_autonomous_delivery_installs_due_queue_indexes() -> None:
+def test_discord_drain_happens_before_verification_and_no_runtime_ddl() -> None:
     source = (SRC / "autonomous_delivery.py").read_text(encoding="utf-8")
+    runtime = source.split("async def run_autonomous_delivery", 1)[1]
 
-    assert "idx_postings_runtime_lead_due" in source
-    assert "idx_families_discord_verified_due" in source
-    assert "idx_families_discord_lead_due" in source
+    first_drain = runtime.index("pre_notifications, pre_notification_error = await _drain")
+    verification = runtime.index("verify_fresh_leads(")
+    final_drain = runtime.index("notifications, notification_error = await _drain")
+    assert first_drain < verification < final_drain
+    assert "CREATE INDEX" not in source
+    assert "ensure_delivery_indexes" not in source
