@@ -13,6 +13,7 @@ on:
       - "Production inventory"
       - "Lead promotion to verified jobs"
       - "Dynamic market discovery"
+      - "Candidate source drain"
     types: [completed]
   schedule:
     # Offset from lead verification so alert transport also has an independent clock.
