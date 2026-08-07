@@ -8,6 +8,7 @@ on:
       - "src/gaia/candidate_drain.py"
       - "src/gaia/fast_dynamic_ingest.py"
       - "src/gaia/live_inventory.py"
+      - "src/gaia/removal_guard.py"
       - "src/gaia/source_catalog.py"
       - "src/gaia/discord_notify_fast.py"
   workflow_run:
