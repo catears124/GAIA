@@ -7,6 +7,7 @@ on:
       - ".github/workflows/discord-delivery.yml"
       - "src/gaia/discord_notify.py"
       - "src/gaia/discord_notify_fast.py"
+      - "src/gaia/discord_delivery_pump.py"
   workflow_run:
     workflows:
       - "Publish static inventory snapshot"
@@ -30,7 +31,7 @@ concurrency:
 
 jobs:
   deliver:
-    name: Drain Discord alerts
+    name: Repair projection and drain Discord alerts
     runs-on: ubuntu-latest
     timeout-minutes: 2
     environment: production
@@ -62,24 +63,29 @@ jobs:
           test -n "$VERIFIED_DHOOK"
           test -n "$LEADS_DHOOK"
 
-      - name: Drain pending alerts
+      - name: Repair projection and drain pending alerts
         id: drain
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          python -m gaia.discord_notify_fast | tee evidence/discord.json
+          python -m gaia.discord_delivery_pump \
+            --projection-attempts 5 --retry-seconds 3 \
+            | tee evidence/discord.json
           description=$(python - <<'PY'
           import json
           from pathlib import Path
           result = json.loads(Path("evidence/discord.json").read_text())
-          channels = result.get("channels") or {}
+          notification = result.get("notifications") or {}
+          channels = notification.get("channels") or {}
           verified = channels.get("verified") or {}
           leads = channels.get("leads") or {}
+          projection = result.get("projection") or {}
           print(
               f"Discord sent verified={verified.get('sent', 0)} "
               f"leads={leads.get('sent', 0)}; "
-              f"pending={verified.get('pending', 0) + leads.get('pending', 0)}"
+              f"pending={verified.get('pending', 0) + leads.get('pending', 0)}; "
+              f"projection_lagging={projection.get('lagging')}"
           )
           PY
           )
