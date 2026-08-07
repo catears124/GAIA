@@ -10,26 +10,33 @@ from .db import Database
 from .discord_notify_fast import send_notifications
 from .runtime_lead_verification import verify_fresh_leads
 
-_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_postings_runtime_lead_due
-    ON postings (first_seen_at DESC, link_checked_at, posting_key)
-    WHERE active
-      AND source_mode IN ('registry','external-index','verification-lead')
-      AND target_match IN ('exact','year_confirmed','source_confirmed')
-      AND link_status NOT IN ('closed','invalid','verified');
-CREATE INDEX IF NOT EXISTS idx_families_discord_verified_due
-    ON families (first_detected_at, family_key)
-    WHERE direct_openings > 0;
-CREATE INDEX IF NOT EXISTS idx_families_discord_lead_due
-    ON families (first_detected_at, family_key)
-    WHERE direct_openings = 0 AND backstop_openings > 0;
-"""
+_INDEX_STATEMENTS = (
+    """
+    CREATE INDEX IF NOT EXISTS idx_postings_runtime_lead_due
+        ON postings (first_seen_at DESC, link_checked_at, posting_key)
+        WHERE active
+          AND source_mode IN ('registry','external-index','verification-lead')
+          AND target_match IN ('exact','year_confirmed','source_confirmed')
+          AND link_status NOT IN ('closed','invalid','verified')
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_families_discord_verified_due
+        ON families (first_detected_at, family_key)
+        WHERE direct_openings > 0
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_families_discord_lead_due
+        ON families (first_detected_at, family_key)
+        WHERE direct_openings = 0 AND backstop_openings > 0
+    """,
+)
 
 
 def ensure_delivery_indexes(database: Database) -> None:
     """Install small targeted indexes used by autonomous verification/delivery."""
     with database.connect() as connection:
-        connection.execute(_INDEXES)
+        for statement in _INDEX_STATEMENTS:
+            connection.execute(statement)
 
 
 async def run_autonomous_delivery(
