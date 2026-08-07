@@ -26,7 +26,9 @@ permissions:
 
 concurrency:
   group: gaia-lead-promotion-continuous
-  cancel-in-progress: false
+  # A newer five-minute pulse is more useful than allowing a pool-starved predecessor
+  # to occupy the only delivery slot until its timeout.
+  cancel-in-progress: true
 
 jobs:
   promote:
@@ -35,7 +37,10 @@ jobs:
     timeout-minutes: 6
     environment: production
     env:
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_PRISMA_URL || secrets.POSTGRES_URL || secrets.POSTGRES_URL_NON_POOLING }}
+      # Background workers must bypass Supavisor transaction-pool checkout contention.
+      # Prefer the direct Postgres endpoint; keep pooled URLs only as fallbacks for old
+      # environments where the non-pooling secret has not been provisioned yet.
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "120"
       GAIA_DISCORD_BOOTSTRAP_LOOKBACK_MINUTES: "180"
@@ -54,14 +59,13 @@ jobs:
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
 
-      - name: Require direct production dependencies
+      - name: Require autonomous production dependencies
         shell: bash
         run: |
           set -euo pipefail
           test -n "$GAIA_DATABASE_URL"
           test -n "$VERIFIED_DHOOK"
           test -n "$LEADS_DHOOK"
-          python -m gaia.wait_for_database --timeout-seconds 45
 
       - name: Verify, publish, and drain Discord directly
         id: delivery
@@ -69,6 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
+          # Let the worker own database attempts instead of aborting at a separate
+          # readiness gate. Its notification path is deliberately independent of Vercel.
           python -m gaia.autonomous_delivery \
             --limit 12 --concurrency 6 --timeout-seconds 150 \
             | tee evidence/result.json
