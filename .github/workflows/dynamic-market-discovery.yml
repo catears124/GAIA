@@ -32,7 +32,7 @@ jobs:
   discover:
     name: Search fresh internship indexes and validate sources
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 8
     environment: production
     env:
       GAIA_DB_CANDIDATE_GAIA: ${{ secrets.GAIA_DATABASE_URL }}
@@ -48,13 +48,13 @@ jobs:
       GAIA_DB_COMPONENT_DATABASE: ${{ secrets.POSTGRES_DATABASE }}
       GAIA_MAINTENANCE_TOKEN: ${{ secrets.GAIA_MAINTENANCE_TOKEN }}
       GAIA_AUTO_MIGRATE: "0"
-      GAIA_DB_TIMEOUT: "120"
-      GAIA_HTTP_TIMEOUT: "45"
+      GAIA_DB_TIMEOUT: "45"
+      GAIA_HTTP_TIMEOUT: "15"
       GAIA_READ_ONLY: "0"
       GAIA_GITHUB_TOKEN: ${{ github.token }}
-      GAIA_CANDIDATE_PROBE_LIMIT: "96"
-      GAIA_STATELESS_AUDIT_LIMIT: "96"
-      GAIA_WORKER_CONCURRENCY: "16"
+      GAIA_CANDIDATE_PROBE_LIMIT: "16"
+      GAIA_STATELESS_AUDIT_LIMIT: "16"
+      GAIA_WORKER_CONCURRENCY: "8"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -118,13 +118,15 @@ jobs:
 
           selected=""
           attempted=0
+          # Background workers prefer the direct endpoint. Pooler URLs remain fallback
+          # credentials only; Supavisor checkout contention previously wedged this lane.
           for name in \
+            GAIA_DB_CANDIDATE_NON_POOLING \
+            GAIA_DB_CANDIDATE_POSTGRES \
+            GAIA_DB_CANDIDATE_PRISMA \
             GAIA_DB_CANDIDATE_GAIA \
             GAIA_DB_CANDIDATE_DATABASE \
             GAIA_DB_CANDIDATE_SUPABASE \
-            GAIA_DB_CANDIDATE_NON_POOLING \
-            GAIA_DB_CANDIDATE_PRISMA \
-            GAIA_DB_CANDIDATE_POSTGRES \
             component_candidate
           do
             if [ "$name" = component_candidate ]; then
@@ -138,7 +140,7 @@ jobs:
             attempted=$((attempted + 1))
             echo "::add-mask::$candidate"
             set +e
-            GAIA_DATABASE_URL="$candidate" python -m gaia.wait_for_database --timeout-seconds 30
+            GAIA_DATABASE_URL="$candidate" python -m gaia.wait_for_database --timeout-seconds 20
             code=$?
             set -e
             if [ "$code" -eq 0 ]; then
@@ -170,26 +172,42 @@ jobs:
           echo "ready=true" >> "$GITHUB_OUTPUT"
           echo "reason=ready" >> "$GITHUB_OUTPUT"
       - name: Validate and schedule discovered employer sources
+        id: ingest
         if: steps.database.outputs.ready == 'true'
         shell: bash
         run: |
-          set -euo pipefail
-          python -m gaia.dynamic_market_discovery \
-            --snapshot-input dynamic-market-snapshot.json \
-            --probe-limit "$GAIA_CANDIDATE_PROBE_LIMIT" \
-            --concurrency "$GAIA_WORKER_CONCURRENCY" \
+          set -uo pipefail
+          # A bounded slice is better than a 15-minute monolith. save_candidates and
+          # each completed promotion commit independently; remaining candidates stay
+          # available for the next scheduled pulse.
+          timeout --signal=TERM --kill-after=10s 210s \
+            python -m gaia.dynamic_market_discovery \
+              --snapshot-input dynamic-market-snapshot.json \
+              --probe-limit "$GAIA_CANDIDATE_PROBE_LIMIT" \
+              --concurrency "$GAIA_WORKER_CONCURRENCY" \
             | tee dynamic-market-ingest.json
+          code=${PIPESTATUS[0]}
+          if [ "$code" -eq 124 ] || [ "$code" -eq 143 ]; then
+            echo "state=partial" >> "$GITHUB_OUTPUT"
+            echo "Discovery ingest reached its 210s budget; committed progress is retained."
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+          echo "state=complete" >> "$GITHUB_OUTPUT"
       - name: Audit official boards while database credentials are stale
         if: steps.database.outputs.ready != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          python -m gaia.dynamic_market_discovery \
-            --audit-only \
-            --snapshot-input dynamic-market-snapshot.json \
-            --snapshot-output dynamic-market-snapshot.json \
-            --audit-probe-limit "$GAIA_STATELESS_AUDIT_LIMIT" \
-            --concurrency "$GAIA_WORKER_CONCURRENCY" \
+          timeout --signal=TERM --kill-after=10s 180s \
+            python -m gaia.dynamic_market_discovery \
+              --audit-only \
+              --snapshot-input dynamic-market-snapshot.json \
+              --snapshot-output dynamic-market-snapshot.json \
+              --audit-probe-limit "$GAIA_STATELESS_AUDIT_LIMIT" \
+              --concurrency "$GAIA_WORKER_CONCURRENCY" \
             | tee dynamic-market-audit.json
       - name: Bridge discovered sources through production runtime
         id: runtime_bridge
@@ -206,11 +224,11 @@ jobs:
             --silent \
             --show-error \
             --location \
-            --retry 3 \
+            --retry 2 \
             --retry-all-errors \
-            --retry-delay 3 \
-            --connect-timeout 15 \
-            --max-time 180 \
+            --retry-delay 2 \
+            --connect-timeout 10 \
+            --max-time 45 \
             --output dynamic-market-production-ingest.json \
             --write-out '%{http_code}' \
             -X POST \
@@ -239,6 +257,7 @@ jobs:
           if [ -f dynamic-market-production-ingest.json ]; then cat dynamic-market-production-ingest.json >> "$GITHUB_STEP_SUMMARY"; fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "Database state: ${{ steps.database.outputs.reason || 'not-checked' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Ingest state: ${{ steps.ingest.outputs.state || 'not-run' }}" >> "$GITHUB_STEP_SUMMARY"
           echo "Runtime bridge: ${{ steps.runtime_bridge.outcome || 'not-needed' }}" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload discovery evidence
         if: always()
@@ -261,12 +280,16 @@ jobs:
         run: |
           database_ready="${{ steps.database.outputs.ready }}"
           bridge_outcome="${{ steps.runtime_bridge.outcome }}"
+          ingest_state="${{ steps.ingest.outputs.state }}"
           if [ "${{ job.status }}" != success ]; then
             state=failure
             description="Dynamic market search or employer source validation failed"
+          elif [ "$database_ready" = true ] && [ "$ingest_state" = partial ]; then
+            state=pending
+            description="Fresh market search committed a bounded source-validation slice"
           elif [ "$database_ready" = true ]; then
             state=success
-            description="Fresh market search and direct database source validation completed"
+            description="Fresh market search and bounded source validation completed"
           elif [ "$bridge_outcome" = success ]; then
             state=success
             description="Fresh source candidates delivered through production runtime"
