@@ -3,9 +3,6 @@ name: Publish static inventory snapshot
 on:
   schedule:
     - cron: "3,18,33,48 * * * *"
-  workflow_run:
-    workflows: ["Production inventory"]
-    types: [completed]
   workflow_dispatch:
   push:
     branches: [main]
@@ -23,7 +20,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gaia-static-inventory-snapshot
+  group: gaia-static-inventory-snapshot-v2
   cancel-in-progress: false
 
 jobs:
@@ -37,6 +34,7 @@ jobs:
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "25"
       GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS: "4"
+      GAIA_STATIC_SNAPSHOT_FAMILY_PAGE_SIZE: "256"
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
