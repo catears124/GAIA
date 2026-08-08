@@ -9,7 +9,7 @@ on:
     paths:
       - ".github/workflows/static-snapshot.yml"
       - "src/gaia/static_snapshot.py"
-      - "src/gaia/static_snapshot_http.py"
+      - "src/gaia/static_snapshot_fast.py"
       - "src/gaia/snapshot_validation.py"
       - "src/gaia/product_api.py"
       - "src/gaia/api.py"
@@ -20,17 +20,16 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gaia-static-inventory-snapshot-v2
+  group: gaia-static-inventory-snapshot-v3
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 6
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
-      GAIA_PUBLIC_BASE_URL: https://gaiajob.vercel.app
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "25"
       GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS: "4"
@@ -76,8 +75,8 @@ jobs:
             printf '%s\n' "GAIA_DATABASE_URL is not configured" > database-readiness.log
           else
             state=configured
-            reason=exporter_owns_connection_retries
-            printf '%s\n' "Database URL configured; snapshot exporter owns checkout retries." > database-readiness.log
+            reason=job_exporter_owns_connection_retries
+            printf '%s\n' "Database URL configured; job snapshot exporter owns checkout retries." > database-readiness.log
           fi
           printf '{"state":"%s","reason":"%s"}\n' "$state" "$reason" > database-readiness.json
           echo "state=$state" >> "$GITHUB_OUTPUT"
@@ -95,25 +94,15 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Export directly from production database
+      - name: Export current jobs from production database
         id: db_export
         if: steps.db_gate.outputs.state == 'configured'
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 170s python -m gaia.static_snapshot
+          timeout --signal=TERM --kill-after=10s 170s python -m gaia.static_snapshot_fast
           echo database > snapshot-source.txt
-
-      - name: Export through public API only as fallback
-        id: api_export
-        if: steps.db_export.outcome != 'success'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          timeout --signal=TERM --kill-after=5s 30s python -m gaia.static_snapshot_http --timeout-seconds 20
-          echo public-api > snapshot-source.txt
 
       - name: Validate generated or recovered snapshot
         id: validate
@@ -138,7 +127,7 @@ jobs:
           echo "source=$(cat snapshot-source.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Upload durable snapshot artifact
-        if: steps.validate.outcome == 'success' && (steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database')
+        if: steps.validate.outcome == 'success' && steps.validate.outputs.source == 'database'
         uses: actions/upload-artifact@v4
         with:
           name: gaia-inventory-snapshot-${{ github.run_id }}
@@ -147,7 +136,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish snapshot to data-only branch
-        if: steps.validate.outputs.source == 'public-api' || steps.validate.outputs.source == 'database'
+        if: steps.validate.outputs.source == 'database'
         shell: bash
         run: |
           set -euo pipefail
@@ -186,17 +175,21 @@ jobs:
             state=failure
             description="Snapshot database configuration is invalid"
             fail=1
+          elif [ "${{ steps.db_export.outcome }}" != success ]; then
+            state=failure
+            description="Fresh job snapshot export failed; serving last published copy"
+            fail=1
           elif [ "${{ steps.validate.outcome }}" != success ]; then
             state=failure
-            description="Fresh inventory snapshot was not produced"
+            description="Fresh job snapshot failed validation"
             fail=1
-          elif [ "$source" = published-snapshot ] || [ "$source" = retained ]; then
+          elif [ "$source" != database ]; then
             state=failure
-            description="Snapshot refresh failed; serving the last published copy"
+            description="Fresh job snapshot was not published"
             fail=1
           else
             state=success
-            description="Public inventory snapshot refreshed via ${source}"
+            description="Public job snapshot refreshed directly from database"
           fi
           echo "database_state=${db_state:-unknown} database_reason=${db_reason:-none} source=${source:-none}"
           payload=$(jq -n --arg state "$state" --arg context gaia/static-snapshot --arg description "$description" --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{state:$state,context:$context,description:$description,target_url:$target_url}')
