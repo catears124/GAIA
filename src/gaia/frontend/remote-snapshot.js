@@ -5,6 +5,7 @@
   const LOCAL_PATH = "/assets/last-known-inventory.json";
   const REMOTE_URL = "https://raw.githubusercontent.com/catears124/GAIA/snapshot-data/src/gaia/frontend/last-known-inventory.json";
   const SNAPSHOT_BANNER_ID = "gaia-stale-data-banner";
+  const FETCH_TIMEOUT_MS = 6000;
 
   function requestUrl(input) {
     try { return new URL(input instanceof Request ? input.url : input, location.href); }
@@ -40,11 +41,26 @@
     });
   }
 
+  async function fetchWithDeadline(input, init = {}) {
+    const sourceSignal = init.signal || (input instanceof Request ? input.signal : null);
+    if (sourceSignal?.aborted) throw sourceSignal.reason || new DOMException("Aborted", "AbortError");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(sourceSignal?.reason);
+    sourceSignal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(new DOMException("Snapshot fetch timed out", "TimeoutError")), FETCH_TIMEOUT_MS);
+    try {
+      return await nativeFetch(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+      sourceSignal?.removeEventListener("abort", onAbort);
+    }
+  }
+
   async function remoteSnapshot(init) {
     const version = Math.floor(Date.now() / 60000);
     const headers = new Headers(init?.headers || {});
     headers.set("Accept", "application/json");
-    const response = await nativeFetch(`${REMOTE_URL}?v=${version}`, {
+    const response = await fetchWithDeadline(`${REMOTE_URL}?v=${version}`, {
       ...init,
       method: "GET",
       headers,
@@ -62,8 +78,10 @@
     if (!isSnapshotRequest(input, init)) return nativeFetch(input, init);
     try {
       return await remoteSnapshot(init);
-    } catch {
-      return nativeFetch(input, init);
+    } catch (error) {
+      const sourceSignal = init.signal || (input instanceof Request ? input.signal : null);
+      if (sourceSignal?.aborted) throw error;
+      return fetchWithDeadline(input, init);
     }
   };
 })();
