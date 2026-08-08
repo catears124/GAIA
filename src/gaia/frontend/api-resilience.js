@@ -6,10 +6,14 @@
   const CACHEABLE = new Set(["health", "stats", "facets", "families", "coverage", "universe"]);
   const MAX_STALE_MS = 24 * 60 * 60 * 1000;
   const MAX_CACHE_ENTRIES = 120;
+  const LIVE_TIMEOUT_MS = 7000;
+  const SNAPSHOT_TIMEOUT_MS = 6500;
+  const SNAPSHOT_REFRESH_MS = 60 * 1000;
   const TARGET_MATCHES = new Set(["exact", "year_confirmed", "source_confirmed"]);
   const nativeFetch = window.fetch.bind(window);
   let staleBanner;
   let staticSnapshotPromise;
+  let staticSnapshotFetchedAt = 0;
 
   function requestUrl(input) {
     try { return new URL(input instanceof Request ? input.url : input, location.href); }
@@ -32,6 +36,32 @@
     if (!url || url.origin !== location.origin || !url.pathname.startsWith(API_PREFIX)) return false;
     const resource = url.pathname.slice(API_PREFIX.length).split("/", 1)[0];
     return CACHEABLE.has(resource);
+  }
+
+  async function fetchWithDeadline(input, init = {}, timeoutMs = LIVE_TIMEOUT_MS) {
+    const sourceSignal = init.signal || (input instanceof Request ? input.signal : null);
+    if (sourceSignal?.aborted) throw sourceSignal.reason || new DOMException("Aborted", "AbortError");
+    const controller = new AbortController();
+    let timedOut = false;
+    const onAbort = () => controller.abort(sourceSignal?.reason);
+    sourceSignal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("GAIA request timed out", "TimeoutError"));
+    }, timeoutMs);
+    try {
+      return await nativeFetch(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (timedOut) {
+        const timeout = new Error(`GAIA request exceeded ${timeoutMs}ms`);
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      sourceSignal?.removeEventListener("abort", onAbort);
+    }
   }
 
   function ageLabel(milliseconds) {
@@ -105,11 +135,13 @@
   }
 
   async function loadStaticSnapshot() {
-    if (!staticSnapshotPromise) {
-      const minute = Math.floor(Date.now() / 60000);
-      staticSnapshotPromise = nativeFetch(`/assets/last-known-inventory.json?v=${minute}`, {
+    const now = Date.now();
+    if (!staticSnapshotPromise || now - staticSnapshotFetchedAt >= SNAPSHOT_REFRESH_MS) {
+      staticSnapshotFetchedAt = now;
+      const minute = Math.floor(now / 60000);
+      staticSnapshotPromise = fetchWithDeadline(`/assets/last-known-inventory.json?v=${minute}`, {
         headers: { Accept: "application/json" }, cache: "no-store",
-      }).then(response => {
+      }, SNAPSHOT_TIMEOUT_MS).then(response => {
         if (!response.ok) throw new Error(String(response.status));
         return response.json();
       }).catch(() => null);
@@ -246,7 +278,7 @@
   }
 
   async function fallbackResponse(request) {
-    return await cachedResponse(request) || await staticSnapshotResponse(request);
+    return await staticSnapshotResponse(request) || await cachedResponse(request);
   }
 
   async function prune(cache) {
@@ -281,7 +313,7 @@
     if (!isCacheable(input, init)) return nativeFetch(input, init);
     const request = input instanceof Request ? input : new Request(input, init);
     try {
-      const response = await nativeFetch(request.clone());
+      const response = await fetchWithDeadline(request.clone(), { cache: "no-store" }, LIVE_TIMEOUT_MS);
       if (response.ok) {
         clearStaleBanner();
         void remember(request, response);
@@ -293,6 +325,7 @@
       }
       return response;
     } catch (error) {
+      if (request.signal?.aborted) throw error;
       const fallback = await fallbackResponse(request);
       if (fallback) return fallback;
       throw error;
