@@ -5,12 +5,15 @@ FRONTEND = Path(__file__).parents[1] / "src" / "gaia" / "frontend"
 
 def test_resilience_layer_loads_before_application_fetches() -> None:
     html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    remote = html.index("remote-snapshot.js")
     resilience = html.index("api-resilience.js")
     detail = html.index("offline-family-detail.js")
     application = html.index("app-v2.js")
-    assert resilience < detail < application
-    assert 'api-resilience.js?v=2.0.0' in html
+    assert remote < resilience < detail < application
+    assert 'remote-snapshot.js?v=1.0.2' in html
+    assert 'api-resilience.js?v=2.1.0' in html
     assert 'offline-family-detail.js?v=1.0.0' in html
+    assert 'outage-controller.js?v=1.2.2' in html
 
 
 def test_resilience_layer_only_intercepts_safe_api_reads() -> None:
@@ -19,6 +22,32 @@ def test_resilience_layer_only_intercepts_safe_api_reads() -> None:
     assert 'url.origin !== location.origin' in script
     assert 'response.status >= 500' in script
     assert 'X-GAIA-Stale' in script
+
+
+def test_live_api_requests_have_a_hard_deadline() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert "LIVE_TIMEOUT_MS = 7000" in script
+    assert "fetchWithDeadline" in script
+    assert "new AbortController()" in script
+    assert "GAIA request exceeded" in script
+    assert "if (request.signal?.aborted) throw error" in script
+
+
+def test_published_snapshot_is_refreshable_and_preferred_over_device_cache() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert "SNAPSHOT_TIMEOUT_MS = 6500" in script
+    assert "SNAPSHOT_REFRESH_MS = 60 * 1000" in script
+    assert "staticSnapshotFetchedAt" in script
+    assert "now - staticSnapshotFetchedAt >= SNAPSHOT_REFRESH_MS" in script
+    assert "return await staticSnapshotResponse(request) || await cachedResponse(request)" in script
+
+
+def test_remote_snapshot_transport_has_its_own_deadline() -> None:
+    script = (FRONTEND / "remote-snapshot.js").read_text(encoding="utf-8")
+    assert "FETCH_TIMEOUT_MS = 6000" in script
+    assert "fetchWithDeadline" in script
+    assert "Snapshot fetch timed out" in script
+    assert "sourceSignal?.aborted" in script
 
 
 def test_cached_inventory_is_explicitly_disclosed() -> None:
@@ -108,6 +137,13 @@ def test_outage_controller_probes_live_health_without_fetch_fallbacks() -> None:
     assert "data.stale !== true" in script
 
 
+def test_outage_controller_accepts_real_inventory_activity_timestamp() -> None:
+    script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
+    assert "data.inventory?.latest_activity_at" in script
+    assert "data.data?.last_success_at" in script
+    assert "MAX_HEALTH_AGE_MS" in script
+
+
 def test_outage_controller_restores_pagination_after_recovery() -> None:
     script = (FRONTEND / "outage-controller.js").read_text(encoding="utf-8")
     assert "gaiaPreofflineDisabled" in script
@@ -154,7 +190,6 @@ def test_hidden_tabs_suspend_summary_polling_and_resume_immediately() -> None:
 def test_outage_controller_is_loaded_at_most_once() -> None:
     script = (FRONTEND / "app-improvements.js").read_text(encoding="utf-8")
     assert 'script.src.includes("/assets/outage-controller.js")' in script
-    assert 'outage-controller.js?v=1.2.1' in script
     assert "if (alreadyLoaded) return" in script
 
 
