@@ -11,9 +11,10 @@ from pathlib import Path
 import psycopg
 
 from . import api as legacy
+from .db_base import TARGET_RANK
 from .static_snapshot import (
     DEFAULT_OUTPUT,
-    _direct_family_index,
+    _compact_family,
     _responses_from_index,
     _validate_snapshot,
 )
@@ -93,6 +94,40 @@ def _source_activity(
     return None
 
 
+def _indexed_family_index(connection: object) -> tuple[list[dict[str, object]], int, bool]:
+    """Read only technical families through the existing feed index.
+
+    idx_families_feed starts with (target_match, category). Splitting the export by
+    target_match lets PostgreSQL satisfy each small read from that index instead of
+    scanning/sorting the entire family table or walking irrelevant family keys.
+    """
+
+    categories = list(legacy.TECH_CATEGORIES)
+    targets = [value for value in TARGET_RANK if value != "not_internship"]
+    items: list[dict[str, object]] = []
+    for target in targets:
+        started = time.monotonic()
+        rows = connection.execute(  # type: ignore[attr-defined]
+            """
+            SELECT *
+            FROM families
+            WHERE target_match=%s
+              AND category = ANY(%s)
+            """,
+            (target, categories),
+        ).fetchall()
+        print(
+            f"snapshot family bucket target={target} rows={len(rows)} "
+            f"elapsed={time.monotonic() - started:.3f}s",
+            flush=True,
+        )
+        items.extend(
+            _compact_family(legacy._present_family(row, trust="all"))  # noqa: SLF001
+            for row in rows
+        )
+    return items, len(items), True
+
+
 def build_snapshot(path: Path = DEFAULT_OUTPUT) -> tuple[dict[str, object], dict[str, object] | None]:
     previous = _load_previous(path)
     attempts = max(1, min(6, int(os.getenv("GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS", "4"))))
@@ -103,13 +138,29 @@ def build_snapshot(path: Path = DEFAULT_OUTPUT) -> tuple[dict[str, object], dict
 
     for attempt in range(1, attempts + 1):
         try:
+            started = time.monotonic()
+            print(f"snapshot DB attempt={attempt} connecting", flush=True)
             with legacy.db.connect() as connection:
-                family_index, family_index_total, family_index_complete = _direct_family_index(
+                print(
+                    f"snapshot DB attempt={attempt} connected "
+                    f"elapsed={time.monotonic() - started:.3f}s",
+                    flush=True,
+                )
+                family_index, family_index_total, family_index_complete = _indexed_family_index(
                     connection
                 )
+            print(
+                f"snapshot DB attempt={attempt} complete families={family_index_total} "
+                f"elapsed={time.monotonic() - started:.3f}s",
+                flush=True,
+            )
             break
         except (psycopg.Error, OSError, TimeoutError) as error:
             last_error = error
+            print(
+                f"snapshot DB attempt={attempt} failed type={type(error).__name__}: {error}",
+                flush=True,
+            )
             if attempt >= attempts:
                 raise
             time.sleep(min(8, 2 * attempt))
