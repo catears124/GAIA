@@ -18,32 +18,39 @@ def test_snapshot_workflow_has_independent_and_inventory_driven_triggers() -> No
     assert "types: [completed]" in text
 
 
-def test_snapshot_workflow_preserves_database_readiness_states() -> None:
+def test_snapshot_exporter_owns_database_checkout_retries() -> None:
     text = workflow_text()
 
-    assert "--json-output database-readiness.json" in text
-    assert "0) state=ready" in text
-    assert "1) state=recovering" in text
-    assert "2) state=invalid" in text
-    assert "*) state=failed" in text
-    assert 'echo "state=$state" >> "$GITHUB_OUTPUT"' in text
-    assert 'echo "exit_code=$code" >> "$GITHUB_OUTPUT"' in text
+    assert 'GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS: "4"' in text
+    assert "exporter_owns_connection_retries" in text
+    assert "wait_for_database" not in text
+    assert "--json-output database-readiness.json" not in text
 
 
-def test_snapshot_database_export_requires_exact_ready_state() -> None:
+def test_snapshot_database_export_only_requires_configuration() -> None:
     text = workflow_text()
 
-    assert "steps.db_gate.outputs.state == 'ready'" in text
-    assert "steps.db_gate.outcome == 'success'" not in text
+    assert "steps.db_gate.outputs.state == 'configured'" in text
+    assert "steps.db_gate.outputs.state == 'ready'" not in text
+    assert "timeout --signal=TERM --kill-after=10s 170s python -m gaia.static_snapshot" in text
 
 
-def test_snapshot_workflow_retains_readiness_evidence() -> None:
+def test_snapshot_workflow_retains_configuration_evidence() -> None:
     text = workflow_text()
 
-    assert "Upload database readiness evidence" in text
+    assert "Upload database configuration evidence" in text
     assert "database-readiness.log" in text
     assert "database-readiness.json" in text
     assert "retention-days: 14" in text
+
+
+def test_snapshot_recovery_uses_published_branch_not_broken_artifact_download() -> None:
+    text = workflow_text()
+
+    assert "Restore latest published snapshot" in text
+    assert "git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json" in text
+    assert "restore_snapshot_artifact" not in text
+    assert "artifact-restored" not in text
 
 
 def test_snapshot_is_published_without_committing_to_main() -> None:
@@ -54,10 +61,10 @@ def test_snapshot_is_published_without_committing_to_main() -> None:
     assert "git push origin HEAD:main" not in text
 
 
-def test_invalid_or_failed_readiness_is_not_reported_as_recovery() -> None:
+def test_old_published_copy_is_not_reported_as_a_fresh_refresh() -> None:
     text = workflow_text()
 
     assert "Snapshot database configuration is invalid" in text
-    assert "Snapshot database readiness probe failed internally" in text
-    assert 'if [ "$db_state" = invalid ] || [ "$db_state" = failed ]; then' in text
-    assert "exit 1" in text
+    assert "Snapshot refresh failed; serving the last published copy" in text
+    assert '[ "$source" = published-snapshot ]' in text
+    assert 'exit "$fail"' in text
