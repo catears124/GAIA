@@ -77,7 +77,11 @@
   function inventoryIsFresh(data) {
     const total = Number(data.inventory?.total ?? data.inventory?.sources_total ?? 0);
     if (!Number.isFinite(total) || total <= 0) return false;
-    const generatedAt = data.generated_at || data.inventory?.generated_at || data.inventory?.updated_at;
+    const generatedAt = data.inventory?.latest_activity_at ||
+      data.data?.last_success_at ||
+      data.generated_at ||
+      data.inventory?.generated_at ||
+      data.inventory?.updated_at;
     if (!generatedAt) return false;
     const generatedMs = Date.parse(generatedAt);
     if (!Number.isFinite(generatedMs)) return false;
