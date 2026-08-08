@@ -3,19 +3,27 @@ from __future__ import annotations
 from pathlib import Path
 
 WORKFLOW = Path(".github/workflows/static-snapshot.yml")
+SNAPSHOT = Path("src/gaia/static_snapshot.py")
 
 
 def workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_snapshot_workflow_has_independent_and_inventory_driven_triggers() -> None:
+def test_snapshot_workflow_has_independent_schedule_without_inventory_spam() -> None:
     text = workflow_text()
 
     assert 'cron: "3,18,33,48 * * * *"' in text
-    assert "workflow_run:" in text
-    assert 'workflows: ["Production inventory"]' in text
-    assert "types: [completed]" in text
+    assert "workflow_dispatch:" in text
+    assert 'workflows: ["Production inventory"]' not in text
+    assert "workflow_run:" not in text
+
+
+def test_snapshot_workflow_never_restarts_an_inflight_refresh() -> None:
+    text = workflow_text()
+
+    assert "group: gaia-static-inventory-snapshot-v2" in text
+    assert "cancel-in-progress: false" in text
 
 
 def test_snapshot_exporter_owns_database_checkout_retries() -> None:
@@ -25,6 +33,23 @@ def test_snapshot_exporter_owns_database_checkout_retries() -> None:
     assert "exporter_owns_connection_retries" in text
     assert "wait_for_database" not in text
     assert "--json-output database-readiness.json" not in text
+
+
+def test_snapshot_family_reads_are_bounded_keyset_pages() -> None:
+    workflow = workflow_text()
+    code = SNAPSHOT.read_text(encoding="utf-8")
+
+    assert 'GAIA_STATIC_SNAPSHOT_FAMILY_PAGE_SIZE: "256"' in workflow
+    assert 'GAIA_STATIC_SNAPSHOT_FAMILY_PAGE_SIZE", "256"' in code
+    assert "WHERE family_key > %s" in code
+    assert "ORDER BY family_key" in code
+    assert "LIMIT %s" in code
+    assert "OFFSET" not in code.split("def _direct_family_index", 1)[1].split(
+        "def _responses_from_index", 1
+    )[0]
+    assert "COALESCE(latest_posted_at, first_detected_at) DESC" not in code.split(
+        "def _direct_family_index", 1
+    )[1].split("def _responses_from_index", 1)[0]
 
 
 def test_snapshot_database_export_only_requires_configuration() -> None:
