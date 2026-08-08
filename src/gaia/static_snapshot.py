@@ -244,10 +244,13 @@ def _facets_from_index(
         if bool(item.get("remote"))
         or "remote" in " ".join(str(value) for value in item.get("locations") or []).casefold()
     )
-    ranked = lambda counter: [
-        {"value": value, "count": count}
-        for value, count in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0].casefold()))
-    ]
+
+    def ranked(counter: Counter[str]) -> list[dict[str, object]]:
+        return [
+            {"value": value, "count": count}
+            for value, count in sorted(counter.items(), key=lambda pair: (-pair[1], pair[0].casefold()))
+        ]
+
     return {
         "companies": ranked(companies),
         "categories": ranked(categories),
@@ -422,21 +425,39 @@ def _health_from_inventory(inventory: dict[str, object], generated_at: str) -> d
 
 
 def _direct_family_index(connection: object) -> tuple[list[dict[str, object]], int, bool]:
-    rows = connection.execute(  # type: ignore[attr-defined]
-        """
-        SELECT * FROM families
-        WHERE category = ANY(%s)
-        ORDER BY COALESCE(latest_posted_at, first_detected_at) DESC,
-                 last_verified_at DESC,
-                 first_detected_at DESC,
-                 family_key
-        """,
-        (list(legacy.TECH_CATEGORIES),),
-    ).fetchall()
-    items = [
-        _compact_family(legacy._present_family(row, trust="all"))  # noqa: SLF001
-        for row in rows
-    ]
+    """Read the family table through bounded primary-key pages.
+
+    The snapshot is sorted in memory for every offline view, so a database-side global
+    activity sort is wasted work and can spill or time out under production pressure.
+    Keyset paging turns the export into small predictable index walks and avoids OFFSET.
+    """
+
+    page_size = max(32, min(1000, int(os.getenv("GAIA_STATIC_SNAPSHOT_FAMILY_PAGE_SIZE", "256"))))
+    last_key = ""
+    items: list[dict[str, object]] = []
+    tech_categories = set(legacy.TECH_CATEGORIES)
+
+    while True:
+        rows = connection.execute(  # type: ignore[attr-defined]
+            """
+            SELECT *
+            FROM families
+            WHERE family_key > %s
+            ORDER BY family_key
+            LIMIT %s
+            """,
+            (last_key, page_size),
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            if str(row["category"]) not in tech_categories:
+                continue
+            items.append(_compact_family(legacy._present_family(row, trust="all")))  # noqa: SLF001
+        last_key = str(rows[-1]["family_key"])
+        if len(rows) < page_size:
+            break
+
     return items, len(items), True
 
 
