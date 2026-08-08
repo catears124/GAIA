@@ -24,7 +24,7 @@ permissions:
 
 concurrency:
   group: gaia-static-inventory-snapshot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publish:
