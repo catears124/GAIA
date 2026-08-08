@@ -4,6 +4,7 @@ from pathlib import Path
 
 WORKFLOW = Path(".github/workflows/static-snapshot.yml")
 SNAPSHOT = Path("src/gaia/static_snapshot.py")
+FAST_SNAPSHOT = Path("src/gaia/static_snapshot_fast.py")
 
 
 def workflow_text() -> str:
@@ -22,15 +23,17 @@ def test_snapshot_workflow_has_independent_schedule_without_inventory_spam() -> 
 def test_snapshot_workflow_never_restarts_an_inflight_refresh() -> None:
     text = workflow_text()
 
-    assert "group: gaia-static-inventory-snapshot-v2" in text
+    assert "group: gaia-static-inventory-snapshot-v3" in text
     assert "cancel-in-progress: false" in text
 
 
 def test_snapshot_exporter_owns_database_checkout_retries() -> None:
     text = workflow_text()
+    fast = FAST_SNAPSHOT.read_text(encoding="utf-8")
 
     assert 'GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS: "4"' in text
-    assert "exporter_owns_connection_retries" in text
+    assert "job_exporter_owns_connection_retries" in text
+    assert "GAIA_STATIC_SNAPSHOT_DB_ATTEMPTS" in fast
     assert "wait_for_database" not in text
     assert "--json-output database-readiness.json" not in text
 
@@ -52,12 +55,24 @@ def test_snapshot_family_reads_are_bounded_keyset_pages() -> None:
     )[1].split("def _responses_from_index", 1)[0]
 
 
+def test_snapshot_publication_is_decoupled_from_crawler_health() -> None:
+    workflow = workflow_text()
+    fast = FAST_SNAPSHOT.read_text(encoding="utf-8")
+
+    assert "python -m gaia.static_snapshot_fast" in workflow
+    assert "_inventory_state_from_connection" not in fast
+    assert "live_health" not in fast
+    assert "_snapshot_health" in fast
+    assert 'health["stale"] = True' in fast
+    assert 'inventory["stale_snapshot"] = True' in fast
+
+
 def test_snapshot_database_export_only_requires_configuration() -> None:
     text = workflow_text()
 
     assert "steps.db_gate.outputs.state == 'configured'" in text
     assert "steps.db_gate.outputs.state == 'ready'" not in text
-    assert "timeout --signal=TERM --kill-after=10s 170s python -m gaia.static_snapshot" in text
+    assert "timeout --signal=TERM --kill-after=10s 170s python -m gaia.static_snapshot_fast" in text
 
 
 def test_snapshot_workflow_retains_configuration_evidence() -> None:
@@ -78,6 +93,14 @@ def test_snapshot_recovery_uses_published_branch_not_broken_artifact_download() 
     assert "artifact-restored" not in text
 
 
+def test_snapshot_does_not_call_the_public_api_as_a_circular_fallback() -> None:
+    text = workflow_text()
+
+    assert "static_snapshot_http" not in text
+    assert "GAIA_PUBLIC_BASE_URL" not in text
+    assert "Export through public API" not in text
+
+
 def test_snapshot_is_published_without_committing_to_main() -> None:
     text = workflow_text()
 
@@ -90,6 +113,6 @@ def test_old_published_copy_is_not_reported_as_a_fresh_refresh() -> None:
     text = workflow_text()
 
     assert "Snapshot database configuration is invalid" in text
-    assert "Snapshot refresh failed; serving the last published copy" in text
-    assert '[ "$source" = published-snapshot ]' in text
+    assert "Fresh job snapshot export failed; serving last published copy" in text
+    assert 'elif [ "$source" != database ]' in text
     assert 'exit "$fail"' in text
