@@ -12,7 +12,7 @@ on:
       - "tests/test_smb_ats_collectors.py"
       - "tests/test_stateless_inventory.py"
   schedule:
-    - cron: "12,27,42,57 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -41,6 +41,7 @@ jobs:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_STATELESS_SHARDS: "16"
+      GAIA_STATELESS_BATCH_SHARDS: "4"
       GAIA_STATELESS_CONCURRENCY: "48"
       GAIA_STATELESS_HTTP_TIMEOUT: "15"
       GH_TOKEN: ${{ github.token }}
@@ -108,7 +109,7 @@ jobs:
             --snapshot-output platform-sitemap-census.json \
             | tee platform-sitemap-summary.json
 
-      - name: Refresh tenant shard directly
+      - name: Refresh tenant shards directly
         if: steps.gate.outputs.run == 'true'
         id: stateless
         shell: bash
@@ -116,17 +117,23 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
         run: |
           set -euo pipefail
-          current_shard=$(python - <<'PY'
+          shard_list=$(python - <<'PY'
+          import os
           from datetime import UTC, datetime
-          shards = 16
-          print(int(datetime.now(UTC).timestamp() // 900) % shards)
+
+          shards = max(1, int(os.environ.get("GAIA_STATELESS_SHARDS", "16")))
+          batch = max(1, min(shards, int(os.environ.get("GAIA_STATELESS_BATCH_SHARDS", "4"))))
+          slot = int(datetime.now(UTC).timestamp() // 300)
+          batches = max(1, (shards + batch - 1) // batch)
+          start = (slot % batches) * batch
+          print(" ".join(str(index) for index in range(start, min(start + batch, shards))))
           PY
           )
           if [[ "$COMMIT_MESSAGE" == *"[full-sweep]"* ]]; then
-            shard_list=$(seq 0 15)
+            shard_list=$(seq 0 $((GAIA_STATELESS_SHARDS - 1)))
             echo "Bootstrap full stateless sweep enabled."
           else
-            shard_list="$current_shard"
+            echo "Refreshing bounded stateless batch: $shard_list"
           fi
 
           rm -rf stateless-summaries
