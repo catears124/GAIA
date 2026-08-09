@@ -6,10 +6,10 @@ on:
     paths:
       - ".github/workflows/platform-sitemap-census.yml"
       - "src/gaia/platform_sitemap_census.py"
+      - "src/gaia/census_queue.py"
+      - "src/gaia/database_failover.py"
       - "tests/test_platform_sitemap_census.py"
   schedule:
-    # Six cheap public-feed requests. Re-running frequently also makes the
-    # census self-replaying after a temporary production database outage.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
@@ -28,6 +28,9 @@ jobs:
     timeout-minutes: 15
     environment: production
     env:
+      POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+      POSTGRES_PRISMA_URL: ${{ secrets.POSTGRES_PRISMA_URL }}
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "45"
@@ -47,7 +50,7 @@ jobs:
       - name: Verify sitemap census lane
         run: |
           set -euo pipefail
-          ruff check src/gaia/platform_sitemap_census.py tests/test_platform_sitemap_census.py
+          ruff check src/gaia/platform_sitemap_census.py src/gaia/census_queue.py src/gaia/database_failover.py tests/test_platform_sitemap_census.py
           pytest -q tests/test_platform_sitemap_census.py
 
       - name: Enumerate complete public tenant feeds
@@ -69,15 +72,14 @@ jobs:
           )
           echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for production database recovery
+      - name: Select reachable production database endpoint
         run: |
           set -euo pipefail
-          test -n "$GAIA_DATABASE_URL"
-          # A successful census is valuable even during a Supabase failover. Keep
-          # this runner attached long enough to capture the snapshot as soon as the
-          # pooler starts accepting connections again; the 15-minute schedule is the
-          # outer retry if recovery takes longer.
-          python -m gaia.wait_for_database --timeout-seconds 480
+          python -m gaia.database_failover \
+            --timeout-seconds 480 \
+            --connect-timeout 8 \
+            --github-env "$GITHUB_ENV" \
+            --json-output database-failover.json
 
       - name: Feed source candidate queue
         id: capture
@@ -98,6 +100,7 @@ jobs:
             platform-sitemap-census.json
             platform-sitemap-summary.json
             platform-sitemap-capture.json
+            database-failover.json
           if-no-files-found: warn
           retention-days: 30
 
