@@ -53,7 +53,7 @@ function relative(value, precision = "timestamp") {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Unknown";
   const minutes = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
-  if (precision === "day") return `~${Math.max(1, Math.round(minutes / 1440))}d ago`;
+  if (["day", "date"].includes(precision)) return `~${Math.max(1, Math.round(minutes / 1440))}d ago`;
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -180,18 +180,15 @@ function jobRow(item) {
   const locations = item.locations || [];
   const location = locations.slice(0, 2).join(" · ") || "Location not stated";
   const postedAt = item.latest_posted_at ? new Date(item.latest_posted_at).getTime() : Number.NaN;
-  const foundAt = item.first_detected_at ? new Date(item.first_detected_at).getTime() : Number.NaN;
-  const foundIsNewer = Number.isFinite(foundAt) && (!Number.isFinite(postedAt) || foundAt > postedAt);
-  const primaryTimestamp = foundIsNewer
-    ? item.first_detected_at
-    : (item.latest_posted_at || item.first_detected_at);
-  const primaryDate = foundIsNewer
+  const hasEmployerDate = Number.isFinite(postedAt);
+  const primaryTimestamp = hasEmployerDate ? item.latest_posted_at : item.first_detected_at;
+  const primaryDate = hasEmployerDate
+    ? `Posted ${relative(item.latest_posted_at, item.posted_precision)}`
+    : item.first_detected_at
+      ? `Found ${relative(item.first_detected_at)}`
+      : "Date unavailable";
+  const secondaryDate = hasEmployerDate && item.first_detected_at
     ? `Found ${relative(item.first_detected_at)}`
-    : `Posted ${relative(item.latest_posted_at, item.posted_precision)}`;
-  const secondaryDate = item.latest_posted_at
-    ? foundIsNewer
-      ? `Employer posted ${relative(item.latest_posted_at, item.posted_precision)}`
-      : `Found ${relative(item.first_detected_at)}`
     : `Checked ${relative(item.last_verified_at)}`;
   const cycle = item.year ? (item.season ? `${item.season} ${item.year}` : String(item.year)) : "Cycle not stated";
   return `<article class="job-row" role="listitem" data-key="${esc(item.family_key)}">
