@@ -151,8 +151,9 @@
 
   function itemActivity(item) {
     const posted = Date.parse(item.latest_posted_at || "");
+    if (Number.isFinite(posted)) return posted;
     const found = Date.parse(item.first_detected_at || "");
-    return Math.max(Number.isFinite(posted) ? posted : 0, Number.isFinite(found) ? found : 0);
+    return Number.isFinite(found) ? found : 0;
   }
 
   function verifiedActivity(item) {
@@ -208,9 +209,13 @@
           String(left.family_key || "").localeCompare(String(right.family_key || ""));
       }
       if (sort === "verified") {
-        return verifiedActivity(right) - verifiedActivity(left) || itemActivity(right) - itemActivity(left);
+        return verifiedActivity(right) - verifiedActivity(left) ||
+          itemActivity(right) - itemActivity(left) ||
+          String(left.family_key || "").localeCompare(String(right.family_key || ""));
       }
-      return itemActivity(right) - itemActivity(left) || verifiedActivity(right) - verifiedActivity(left);
+      return itemActivity(right) - itemActivity(left) ||
+        verifiedActivity(right) - verifiedActivity(left) ||
+        String(left.family_key || "").localeCompare(String(right.family_key || ""));
     });
     const start = (page - 1) * pageSize;
     return { items: items.slice(start, start + pageSize), total: items.length, page, page_size: pageSize, offline: true };
@@ -263,14 +268,18 @@
       if (!Number.isFinite(generatedAt) || Date.now() - generatedAt > maxAge) return null;
       const key = normalizedKey(request);
       const exact = key ? snapshot.responses?.[key] : null;
-      const payload = exact || derivedSnapshotPayload(snapshot, request);
+      // Family search/sort/facets must always be derived from the complete materialized
+      // index. Precomputed response pages can carry obsolete ordering semantics across
+      // a deploy and must never override the current client contract.
+      const derived = derivedSnapshotPayload(snapshot, request);
+      const payload = derived || exact;
       if (!payload) return null;
       const body = await truthfulBody(request, JSON.stringify(payload));
       const headers = new Headers({
         "Content-Type": "application/json", "Cache-Control": "no-store", "X-GAIA-Stale": "1",
         "X-GAIA-Snapshot": "1", "X-GAIA-Cached-At": generatedAtRaw,
       });
-      if (!exact) headers.set("X-GAIA-Offline-Search", "1");
+      if (derived) headers.set("X-GAIA-Offline-Search", "1");
       showStaleBanner(generatedAt, "snapshot");
       window.dispatchEvent(new CustomEvent("gaia:stale-data", { detail: { cachedAt: generatedAtRaw, source: "deployed-snapshot" } }));
       return new Response(body, { status: 200, statusText: "Snapshot", headers });
