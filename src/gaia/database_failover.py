@@ -7,14 +7,48 @@ import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import psycopg
+
+# Vercel/Supabase/Prisma connection strings sometimes include client-specific query
+# flags that libpq/psycopg does not understand. They are routing hints, not database
+# session parameters. Strip them before probing and before exporting the selected URL.
+NON_LIBPQ_QUERY_KEYS = frozenset(
+    {
+        "connection_limit",
+        "pgbouncer",
+        "pool_timeout",
+        "supa",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
     label: str
     url: str
+
+
+def sanitize_database_url(value: str) -> str:
+    raw = value.strip()
+    if raw.startswith("postgres://"):
+        raw = "postgresql://" + raw[len("postgres://") :]
+    parts = urlsplit(raw)
+    if parts.scheme not in {"postgresql", "postgres"}:
+        return raw
+    query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if key.casefold() not in NON_LIBPQ_QUERY_KEYS
+    ]
+    if "supabase.com" in parts.netloc.casefold() and not any(
+        key.casefold() == "sslmode" for key, _item in query
+    ):
+        query.append(("sslmode", "require"))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment)
+    )
 
 
 def database_candidates() -> list[Candidate]:
@@ -29,10 +63,13 @@ def database_candidates() -> list[Candidate]:
     output: list[Candidate] = []
     for label, key in keys:
         value = str(os.getenv(key) or "").strip()
-        if not value or value in seen:
+        if not value:
             continue
-        seen.add(value)
-        output.append(Candidate(label, value))
+        sanitized = sanitize_database_url(value)
+        if not sanitized or sanitized in seen:
+            continue
+        seen.add(sanitized)
+        output.append(Candidate(label, sanitized))
     return output
 
 
