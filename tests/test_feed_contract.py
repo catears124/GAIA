@@ -117,7 +117,7 @@ def test_frontend_defaults_to_verified_and_recomputes_stale_feed() -> None:
     assert '<option value="verified" selected>Employer verified</option>' in html
     assert 'feed-contract.js?v=1.0.0' in html
     assert 'Number(isVerified(right)) - Number(isVerified(left))' in contract
-    assert 'url.pathname === "/api/families"' not in contract  # exact list guards both families + stats
     assert '["/api/families", "/api/stats"].includes(url.pathname)' in contract
+    assert 'url.pathname === "/api/families"' in contract
     assert "newFamilies" in contract
     assert 'window.addEventListener("gaia:stale-data"' in contract
