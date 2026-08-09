@@ -1,4 +1,7 @@
 target_registries:
+  - kind: markdown
+    name: simplify-2027
+    url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/README.md
   - kind: json
     name: vansh-2027
     url: https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json
@@ -84,7 +87,7 @@ employer_ecosystems:
     sectors: [climate, energy, industrial, scientific-computing]
     internship_signal: 0.25
     technical_signal: 0.85
-  - kind: yc-directory
+  - kind: yc-open-source
     name: yc-open-source
     url: https://www.ycombinator.com/companies/industry/open-source
     sectors: [open-source, developer-tools, infrastructure, databases]
