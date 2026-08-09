@@ -87,7 +87,7 @@ employer_ecosystems:
     sectors: [climate, energy, industrial, scientific-computing]
     internship_signal: 0.25
     technical_signal: 0.85
-  - kind: yc-open-source
+  - kind: yc-directory
     name: yc-open-source
     url: https://www.ycombinator.com/companies/industry/open-source
     sectors: [open-source, developer-tools, infrastructure, databases]
