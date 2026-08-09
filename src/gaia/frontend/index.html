@@ -50,7 +50,7 @@
         <div class="metrics" aria-label="Live inventory summary">
           <div><strong id="metric-active">—</strong><span>open applications</span></div>
           <div><strong id="metric-companies">—</strong><span>hiring companies</span></div>
-          <div><strong id="metric-new">—</strong><span>found in 24h</span></div>
+          <div><strong id="metric-new">—</strong><span>new verified · 24h</span></div>
         </div>
       </header>
 
@@ -61,7 +61,7 @@
           <kbd>/</kbd>
         </label>
         <div class="filter-grid">
-          <label><span>Confidence</span><select id="trust"><option value="all" selected>All</option><option value="verified">Employer verified</option><option value="leads">Leads only</option></select></label>
+          <label><span>Confidence</span><select id="trust"><option value="verified" selected>Employer verified</option><option value="all">Verified + leads</option><option value="leads">Leads only</option></select></label>
           <label><span>Discipline</span><select id="category"><option value="">All technical</option><option value="software">Software</option><option value="ml-ai">ML / AI</option><option value="data">Data</option><option value="security">Security</option><option value="hardware">Hardware</option><option value="quant">Quant</option><option value="product">Product</option><option value="other-technical">Other technical</option></select></label>
           <label><span>Company</span><select id="company"><option value="">All companies</option></select></label>
           <label><span>Location</span><input id="location" type="search" placeholder="Anywhere"></label>
@@ -84,7 +84,7 @@
       <div class="results-head" id="results">
         <div>
           <strong id="result-count" aria-live="polite">Loading…</strong>
-          <span id="result-note">Employer posting date first; discovery time only when no posted date is available.</span>
+          <span id="result-note">Verified employer applications first. Employer posting date controls recency; leads are secondary.</span>
         </div>
         <button id="clear-filters" class="text-button" hidden>Reset filters</button>
       </div>
@@ -143,6 +143,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/assets/remote-snapshot.js?v=1.0.2"></script>
   <script src="/assets/api-resilience.js?v=2.2.0"></script>
+  <script src="/assets/feed-contract.js?v=1.0.0"></script>
   <script src="/assets/emergency-outage.js?v=2.0.0"></script>
   <script src="/assets/offline-family-detail.js?v=1.0.0"></script>
   <script src="/assets/app-v2.js?v=8.1.2" defer></script>
