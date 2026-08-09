@@ -30,8 +30,28 @@ from .source_catalog import _collector, _spec, save_candidates
 CENSUS_VERSION = 1
 COLLINFO_URL = "https://index.commoncrawl.org/collinfo.json"
 RETRYABLE = {429, 500, 502, 503, 504}
-PATH_DENY = frozenset({"admin", "api", "app", "assets", "auth", "blog", "cdn", "docs", "embed", "help", "login", "static", "status", "support", "www"})
-SUBDOMAIN_DENY = frozenset({"admin", "api", "app", "assets", "auth", "cdn", "login", "static", "www"})
+PATH_DENY = frozenset(
+    {
+        "admin",
+        "api",
+        "app",
+        "assets",
+        "auth",
+        "blog",
+        "cdn",
+        "docs",
+        "embed",
+        "help",
+        "login",
+        "static",
+        "status",
+        "support",
+        "www",
+    }
+)
+SUBDOMAIN_DENY = frozenset(
+    {"admin", "api", "app", "assets", "auth", "cdn", "login", "static", "www"}
+)
 SLUG = r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
 
 
@@ -44,20 +64,228 @@ class Pattern:
     seed: str | None = None
 
 
+# Native collectors are used where GAIA already has a structured adapter. For ATSes
+# we do not yet parse natively, Common Crawl is still valuable as a tenant census:
+# a bounded CareerSurfaceCollector probe can validate the public employer board and
+# recursively discover its real structured provider links. This deliberately turns
+# the internet-scale census into source candidates rather than trusted job rows.
 PATTERNS = (
-    Pattern("greenhouse", ("boards.greenhouse.io/*", "job-boards.greenhouse.io/*"), re.compile(rf"(?:boards|job-boards)\.greenhouse\.io/({SLUG})(?:[/?#]|$)", re.I), "greenhouse"),
-    Pattern("lever", ("jobs.lever.co/*",), re.compile(rf"jobs\.lever\.co/({SLUG})(?:[/?#]|$)", re.I), "lever"),
-    Pattern("ashby", ("jobs.ashbyhq.com/*",), re.compile(rf"jobs\.ashbyhq\.com/({SLUG})(?:[/?#]|$)", re.I), "ashby"),
-    Pattern("smartrecruiters", ("jobs.smartrecruiters.com/*", "careers.smartrecruiters.com/*"), re.compile(rf"(?:jobs|careers)\.smartrecruiters\.com/({SLUG})(?:[/?#]|$)", re.I), "smartrecruiters"),
-    Pattern("recruitee", ("*.recruitee.com/*",), re.compile(rf"https?://({SLUG})\.recruitee\.com(?:[/:?#]|$)", re.I), "recruitee"),
-    Pattern("workable", ("*.workable.com/*",), re.compile(rf"https?://(?:apply\.workable\.com/({SLUG})|({SLUG})\.workable\.com)(?:[/?#]|$)", re.I), "workable"),
-    Pattern("jobvite", ("jobs.jobvite.com/*",), re.compile(rf"jobs\.jobvite\.com/({SLUG})(?:[/?#]|$)", re.I), "jobvite"),
-    Pattern("icims", ("*.icims.com/*",), re.compile(rf"https?://({SLUG})\.icims\.com(?:[/:?#]|$)", re.I), "icims"),
-    Pattern("workday", ("*.myworkdayjobs.com/*",), re.compile(rf"https?://(({SLUG})\.wd\d+(?:-[a-z0-9-]+)?\.myworkdayjobs\.com)/wday/cxs/([^/]+)/([^/?#]+)", re.I), "workday"),
-    Pattern("teamtailor", ("*.teamtailor.com/*",), re.compile(rf"https?://({SLUG})\.teamtailor\.com(?:[/:?#]|$)", re.I), "domain", "https://{slug}.teamtailor.com/jobs"),
-    Pattern("bamboohr", ("*.bamboohr.com/*",), re.compile(rf"https?://({SLUG})\.bamboohr\.com(?:[/:?#]|$)", re.I), "domain", "https://{slug}.bamboohr.com/careers"),
-    Pattern("breezy", ("*.breezy.hr/*",), re.compile(rf"https?://({SLUG})\.breezy\.hr(?:[/:?#]|$)", re.I), "domain", "https://{slug}.breezy.hr"),
-    Pattern("personio", ("*.jobs.personio.com/*",), re.compile(rf"https?://({SLUG})\.jobs\.personio\.com(?:[/:?#]|$)", re.I), "domain", "https://{slug}.jobs.personio.com"),
+    Pattern(
+        "greenhouse",
+        ("boards.greenhouse.io/*", "job-boards.greenhouse.io/*"),
+        re.compile(rf"(?:boards|job-boards)\.greenhouse\.io/({SLUG})(?:[/?#]|$)", re.I),
+        "greenhouse",
+    ),
+    Pattern(
+        "lever",
+        ("jobs.lever.co/*",),
+        re.compile(rf"jobs\.lever\.co/({SLUG})(?:[/?#]|$)", re.I),
+        "lever",
+    ),
+    Pattern(
+        "ashby",
+        ("jobs.ashbyhq.com/*",),
+        re.compile(rf"jobs\.ashbyhq\.com/({SLUG})(?:[/?#]|$)", re.I),
+        "ashby",
+    ),
+    Pattern(
+        "smartrecruiters",
+        ("jobs.smartrecruiters.com/*", "careers.smartrecruiters.com/*"),
+        re.compile(
+            rf"(?:jobs|careers)\.smartrecruiters\.com/({SLUG})(?:[/?#]|$)", re.I
+        ),
+        "smartrecruiters",
+    ),
+    Pattern(
+        "recruitee",
+        ("*.recruitee.com/*",),
+        re.compile(rf"https?://({SLUG})\.recruitee\.com(?:[/:?#]|$)", re.I),
+        "recruitee",
+    ),
+    Pattern(
+        "workable",
+        ("*.workable.com/*",),
+        re.compile(
+            rf"https?://(?:apply\.workable\.com/({SLUG})|({SLUG})\.workable\.com)(?:[/?#]|$)",
+            re.I,
+        ),
+        "workable",
+    ),
+    Pattern(
+        "jobvite",
+        ("jobs.jobvite.com/*",),
+        re.compile(rf"jobs\.jobvite\.com/({SLUG})(?:[/?#]|$)", re.I),
+        "jobvite",
+    ),
+    Pattern(
+        "icims",
+        ("*.icims.com/*",),
+        re.compile(rf"https?://({SLUG})\.icims\.com(?:[/:?#]|$)", re.I),
+        "icims",
+    ),
+    Pattern(
+        "workday",
+        ("*.myworkdayjobs.com/*",),
+        re.compile(
+            rf"https?://(({SLUG})\.wd\d+(?:-[a-z0-9-]+)?\.myworkdayjobs\.com)/wday/cxs/([^/]+)/([^/?#]+)",
+            re.I,
+        ),
+        "workday",
+    ),
+    Pattern(
+        "teamtailor",
+        ("*.teamtailor.com/*",),
+        re.compile(rf"https?://({SLUG})\.teamtailor\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.teamtailor.com/jobs",
+    ),
+    Pattern(
+        "bamboohr",
+        ("*.bamboohr.com/*",),
+        re.compile(rf"https?://({SLUG})\.bamboohr\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.bamboohr.com/careers",
+    ),
+    Pattern(
+        "breezy",
+        ("*.breezy.hr/*",),
+        re.compile(rf"https?://({SLUG})\.breezy\.hr(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.breezy.hr",
+    ),
+    Pattern(
+        "personio",
+        ("*.jobs.personio.com/*",),
+        re.compile(rf"https?://({SLUG})\.jobs\.personio\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.jobs.personio.com",
+    ),
+    Pattern(
+        "csod",
+        ("*.csod.com/*",),
+        re.compile(rf"https?://({SLUG})\.csod\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.csod.com",
+    ),
+    Pattern(
+        "taleo",
+        ("*.taleo.net/*",),
+        re.compile(rf"https?://({SLUG})(?:\.tbe)?\.taleo\.net(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.taleo.net",
+    ),
+    Pattern(
+        "zohorecruit",
+        ("*.zohorecruit.com/*",),
+        re.compile(rf"https?://({SLUG})\.zohorecruit\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.zohorecruit.com",
+    ),
+    Pattern(
+        "talentlyft",
+        ("*.talentlyft.com/*",),
+        re.compile(rf"https?://({SLUG})\.talentlyft\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.talentlyft.com",
+    ),
+    Pattern(
+        "pinpointhq",
+        ("*.pinpointhq.com/*",),
+        re.compile(rf"https?://({SLUG})\.pinpointhq\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.pinpointhq.com",
+    ),
+    Pattern(
+        "applicantpro",
+        ("*.applicantpro.com/*",),
+        re.compile(rf"https?://({SLUG})\.applicantpro\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.applicantpro.com",
+    ),
+    Pattern(
+        "applicantstack",
+        ("*.applicantstack.com/*",),
+        re.compile(rf"https?://({SLUG})\.applicantstack\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.applicantstack.com",
+    ),
+    Pattern(
+        "homerun",
+        ("*.homerun.co/*",),
+        re.compile(rf"https?://({SLUG})\.homerun\.co(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.homerun.co",
+    ),
+    Pattern(
+        "factorial",
+        ("*.factorialhr.com/*",),
+        re.compile(rf"https?://({SLUG})\.factorialhr\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.factorialhr.com",
+    ),
+    Pattern(
+        "eightfold",
+        ("*.eightfold.ai/*",),
+        re.compile(rf"https?://({SLUG})\.eightfold\.ai(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.eightfold.ai",
+    ),
+    Pattern(
+        "hrmdirect",
+        ("*.hrmdirect.com/*",),
+        re.compile(rf"https?://({SLUG})\.hrmdirect\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.hrmdirect.com",
+    ),
+    Pattern(
+        "hiringthing",
+        ("*.hiringthing.com/*",),
+        re.compile(rf"https?://({SLUG})\.hiringthing\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.hiringthing.com",
+    ),
+    Pattern(
+        "careerplug",
+        ("*.careerplug.com/*",),
+        re.compile(rf"https?://({SLUG})\.careerplug\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.careerplug.com",
+    ),
+    Pattern(
+        "jibeapply",
+        ("*.jibeapply.com/*",),
+        re.compile(rf"https?://({SLUG})\.jibeapply\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.jibeapply.com",
+    ),
+    Pattern(
+        "applicantpool",
+        ("*.applicantpool.com/*",),
+        re.compile(rf"https?://({SLUG})\.applicantpool\.com(?:[/:?#]|$)", re.I),
+        "domain",
+        "https://{slug}.applicantpool.com",
+    ),
+    Pattern(
+        "applitrack",
+        ("www.applitrack.com/*",),
+        re.compile(rf"www\.applitrack\.com/({SLUG})(?:[/?#]|$)", re.I),
+        "path-domain",
+        "https://www.applitrack.com/{slug}/onlineapp/default.aspx",
+    ),
+    Pattern(
+        "hireology",
+        ("careers.hireology.com/*",),
+        re.compile(rf"careers\.hireology\.com/({SLUG})(?:[/?#]|$)", re.I),
+        "path-domain",
+        "https://careers.hireology.com/{slug}",
+    ),
+    Pattern(
+        "manatal",
+        ("www.careers-page.com/*",),
+        re.compile(rf"www\.careers-page\.com/({SLUG})(?=[/?#\s\"'<>]|$)", re.I),
+        "path-domain",
+        "https://www.careers-page.com/{slug}",
+    ),
 )
 
 
@@ -71,8 +299,17 @@ def _slug(match: re.Match[str], pattern: Pattern) -> str | None:
         deny = PATH_DENY | SUBDOMAIN_DENY
     else:
         value = (match.group(1) or "").casefold()
-        deny = SUBDOMAIN_DENY if pattern.mode in {"recruitee", "icims", "domain"} else PATH_DENY
-    return value if value and value not in deny else None
+        deny = (
+            SUBDOMAIN_DENY
+            if pattern.mode in {"recruitee", "icims", "domain"}
+            else PATH_DENY
+        )
+    provider_deny = {
+        "applicantpool": {"feeds"},
+        "applitrack": {"olacommon", "onlineapp"},
+        "manatal": {"job"},
+    }.get(pattern.provider, set())
+    return value if value and value not in deny and value not in provider_deny else None
 
 
 def _collector_from_match(pattern: Pattern, match: re.Match[str]) -> Collector | None:
@@ -101,7 +338,7 @@ def _collector_from_match(pattern: Pattern, match: re.Match[str]) -> Collector |
         return JobviteCollector(company, slug)
     if pattern.mode == "icims":
         return ICIMSCollector(company, f"{slug}.icims.com")
-    if pattern.mode == "domain" and pattern.seed:
+    if pattern.mode in {"domain", "path-domain"} and pattern.seed:
         seed = pattern.seed.format(slug=slug)
         collector = CareerSurfaceCollector(company, urlsplit(seed).netloc, [seed])
         collector.name = f"domain:{pattern.provider}:{slug}"
@@ -223,20 +460,33 @@ class CommonCrawl:
         for page in range(pages):
             response = await self.get(
                 endpoint,
-                {"url": query, "output": "json", "fl": "url,status,timestamp", "filter": "status:200", "page": str(page)},
+                {
+                    "url": query,
+                    "output": "json",
+                    "fl": "url,status,timestamp",
+                    "filter": "status:200",
+                    "page": str(page),
+                },
             )
             urls.extend(parse_cdx(response.text))
         return urls
 
 
 async def build_snapshot(snapshot_count: int, max_pages: int, delay: float) -> dict[str, Any]:
-    headers = {"User-Agent": os.getenv("GAIA_USER_AGENT", "GAIA/5.0 ATS-census (+https://github.com/catears124/GAIA)")}
+    headers = {
+        "User-Agent": os.getenv(
+            "GAIA_USER_AGENT",
+            "GAIA/5.0 ATS-census (+https://github.com/catears124/GAIA)",
+        )
+    }
     timeout = httpx.Timeout(float(os.getenv("GAIA_CENSUS_HTTP_TIMEOUT", "45")))
     found: dict[str, Collector] = {}
     provider_counts: Counter[str] = Counter()
     errors: list[dict[str, str]] = []
     completed = 0
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=timeout, follow_redirects=True
+    ) as client:
         cc = CommonCrawl(client, delay)
         collections = await cc.collections(snapshot_count)
         for pattern in PATTERNS:
@@ -246,7 +496,14 @@ async def build_snapshot(snapshot_count: int, max_pages: int, delay: float) -> d
                     try:
                         urls = await cc.urls(collection, query, max_pages)
                     except (httpx.HTTPError, ValueError) as exc:
-                        errors.append({"provider": pattern.provider, "collection": collection, "query": query, "error": repr(exc)})
+                        errors.append(
+                            {
+                                "provider": pattern.provider,
+                                "collection": collection,
+                                "query": query,
+                                "error": repr(exc),
+                            }
+                        )
                         continue
                     completed += 1
                     for collector in extract_collectors(urls, pattern):
@@ -279,26 +536,64 @@ def capture_snapshot(snapshot: dict[str, Any], batch_size: int) -> dict[str, Any
     raw_rows = snapshot.get("candidates")
     if not isinstance(raw_rows, list):
         raise ValueError("ATS census snapshot is missing candidates")
-    candidates = deserialize_collectors([row for row in raw_rows if isinstance(row, dict)])
+    candidates = deserialize_collectors(
+        [row for row in raw_rows if isinstance(row, dict)]
+    )
     database = LiveDatabase(migrate=False)
     with database.connect() as connection:
-        known = {str(row["source"]) for row in connection.execute("SELECT source FROM source_catalog WHERE validated").fetchall()}
-        connection.execute("DELETE FROM source_candidates AS c USING source_catalog AS s WHERE c.source=s.source AND s.validated")
-    unknown = [item for item in candidates if canonical_source_name(item.name) not in known]
+        known = {
+            str(row["source"])
+            for row in connection.execute(
+                "SELECT source FROM source_catalog WHERE validated"
+            ).fetchall()
+        }
+        connection.execute(
+            """
+            DELETE FROM source_candidates AS c
+            USING source_catalog AS s
+            WHERE c.source=s.source AND s.validated
+            """
+        )
+    unknown = [
+        item for item in candidates if canonical_source_name(item.name) not in known
+    ]
     chunk = max(25, min(batch_size, 1000))
     written = 0
     for start in range(0, len(unknown), chunk):
-        written += save_candidates(database, unknown[start : start + chunk], origin="common-crawl-ats-census")
+        written += save_candidates(
+            database,
+            unknown[start : start + chunk],
+            origin="common-crawl-ats-census",
+        )
     summary = dict(snapshot.get("summary") or {})
-    summary.update({"candidate_rows_in_snapshot": len(candidates), "candidate_rows_already_validated": len(candidates) - len(unknown), "candidate_rows_written": written, "candidate_validation_deferred": True})
+    summary.update(
+        {
+            "candidate_rows_in_snapshot": len(candidates),
+            "candidate_rows_already_validated": len(candidates) - len(unknown),
+            "candidate_rows_written": written,
+            "candidate_validation_deferred": True,
+        }
+    )
     return summary
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Discover ATS tenants from Common Crawl")
-    parser.add_argument("--snapshot-count", type=int, default=int(os.getenv("GAIA_CENSUS_SNAPSHOTS", "2")))
-    parser.add_argument("--max-pages", type=int, default=int(os.getenv("GAIA_CENSUS_MAX_PAGES", "12")))
-    parser.add_argument("--delay-seconds", type=float, default=float(os.getenv("GAIA_CENSUS_DELAY_SECONDS", "1.0")))
+    parser.add_argument(
+        "--snapshot-count",
+        type=int,
+        default=int(os.getenv("GAIA_CENSUS_SNAPSHOTS", "2")),
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=int(os.getenv("GAIA_CENSUS_MAX_PAGES", "12")),
+    )
+    parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=float(os.getenv("GAIA_CENSUS_DELAY_SECONDS", "1.0")),
+    )
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--snapshot-output", type=Path)
     parser.add_argument("--snapshot-input", type=Path)
@@ -309,10 +604,22 @@ def main() -> None:
     else:
         if args.capture_only:
             raise ValueError("--capture-only requires --snapshot-input")
-        snapshot = asyncio.run(build_snapshot(max(1, args.snapshot_count), max(1, args.max_pages), max(0.25, args.delay_seconds)))
+        snapshot = asyncio.run(
+            build_snapshot(
+                max(1, args.snapshot_count),
+                max(1, args.max_pages),
+                max(0.25, args.delay_seconds),
+            )
+        )
     if args.snapshot_output:
-        args.snapshot_output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    result = capture_snapshot(snapshot, args.batch_size) if args.capture_only else snapshot.get("summary") or {}
+        args.snapshot_output.write_text(
+            json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    result = (
+        capture_snapshot(snapshot, args.batch_size)
+        if args.capture_only
+        else snapshot.get("summary") or {}
+    )
     print(json.dumps(result, sort_keys=True))
 
 
