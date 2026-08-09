@@ -15,9 +15,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from .career_surface_collector import CareerSurfaceCollector
+from .census_queue import enqueue_net_new_candidates
 from .live_inventory import LiveDatabase
 from .quality import canonical_source_name
-from .source_catalog import _collector, _spec, save_candidates
+from .source_catalog import _collector, _spec
 
 SITEMAP_CENSUS_VERSION = 1
 RETRYABLE = {429, 500, 502, 503, 504}
@@ -199,39 +200,14 @@ def capture_snapshot(snapshot: dict[str, Any], batch_size: int) -> dict[str, Any
         raise ValueError("platform sitemap census snapshot is missing candidates")
     candidates = deserialize_collectors([row for row in raw_rows if isinstance(row, dict)])
     database = LiveDatabase(migrate=False)
-    with database.connect() as connection:
-        known = {
-            str(row["source"])
-            for row in connection.execute(
-                "SELECT source FROM source_catalog WHERE validated"
-            ).fetchall()
-        }
-        connection.execute(
-            """
-            DELETE FROM source_candidates AS c
-            USING source_catalog AS s
-            WHERE c.source=s.source AND s.validated
-            """
-        )
-    unknown = [
-        item for item in candidates if canonical_source_name(item.name) not in known
-    ]
-    chunk = max(25, min(batch_size, 1000))
-    written = 0
-    for start in range(0, len(unknown), chunk):
-        written += save_candidates(
-            database,
-            unknown[start : start + chunk],
-            origin="platform-sitemap-census",
-        )
     summary = dict(snapshot.get("summary") or {})
     summary.update(
-        {
-            "candidate_rows_in_snapshot": len(candidates),
-            "candidate_rows_already_validated": len(candidates) - len(unknown),
-            "candidate_rows_written": written,
-            "candidate_validation_deferred": True,
-        }
+        enqueue_net_new_candidates(
+            database,
+            candidates,
+            origin="platform-sitemap-census",
+            batch_size=batch_size,
+        )
     )
     return summary
 
