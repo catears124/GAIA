@@ -37,7 +37,7 @@ jobs:
   census:
     name: Enumerate ATS tenants and feed candidate queue
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
@@ -87,11 +87,14 @@ jobs:
           )
           echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
 
-      - name: Require production database
+      - name: Wait for production database recovery
         run: |
           set -euo pipefail
           test -n "$GAIA_DATABASE_URL"
-          python -m gaia.wait_for_database --timeout-seconds 30
+          # Common Crawl enumeration is the expensive part. Preserve the completed
+          # census in this run and wait through a normal Supabase failover instead of
+          # throwing the work away after a 30-second pooler outage.
+          python -m gaia.wait_for_database --timeout-seconds 600
 
       - name: Feed source candidate queue
         id: capture
