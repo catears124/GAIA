@@ -8,7 +8,9 @@ on:
       - "src/gaia/platform_sitemap_census.py"
       - "tests/test_platform_sitemap_census.py"
   schedule:
-    - cron: "37 7 * * *"
+    # Six cheap public-feed requests. Re-running frequently also makes the
+    # census self-replaying after a temporary production database outage.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -67,11 +69,15 @@ jobs:
           )
           echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
 
-      - name: Require production database
+      - name: Wait for production database recovery
         run: |
           set -euo pipefail
           test -n "$GAIA_DATABASE_URL"
-          python -m gaia.wait_for_database --timeout-seconds 30
+          # A successful census is valuable even during a Supabase failover. Keep
+          # this runner attached long enough to capture the snapshot as soon as the
+          # pooler starts accepting connections again; the 15-minute schedule is the
+          # outer retry if recovery takes longer.
+          python -m gaia.wait_for_database --timeout-seconds 480
 
       - name: Feed source candidate queue
         id: capture
