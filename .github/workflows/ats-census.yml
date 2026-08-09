@@ -1,0 +1,134 @@
+name: ATS tenant census
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ats-census.yml"
+      - "src/gaia/ats_census.py"
+      - "src/gaia/source_catalog.py"
+      - "src/gaia/career_surface_collector.py"
+      - "src/gaia/collectors.py"
+      - "src/gaia/provider_collectors.py"
+      - "src/gaia/market_collectors.py"
+      - "tests/test_ats_census.py"
+  schedule:
+    - cron: "17 6 * * 0"
+  workflow_dispatch:
+    inputs:
+      snapshots:
+        description: "Recent Common Crawl snapshots to scan"
+        required: false
+        default: "2"
+      max_pages:
+        description: "Maximum CDX pages per provider query"
+        required: false
+        default: "12"
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: gaia-ats-tenant-census
+  cancel-in-progress: false
+
+jobs:
+  census:
+    name: Enumerate ATS tenants and feed candidate queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: production
+    env:
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_DB_TIMEOUT: "45"
+      GAIA_CENSUS_HTTP_TIMEOUT: "45"
+      GAIA_CENSUS_DELAY_SECONDS: "1.0"
+      GAIA_CENSUS_SNAPSHOTS: ${{ inputs.snapshots || '2' }}
+      GAIA_CENSUS_MAX_PAGES: ${{ inputs.max_pages || '12' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install GAIA and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Verify census lane
+        run: |
+          set -euo pipefail
+          ruff check src/gaia/ats_census.py tests/test_ats_census.py
+          pytest -q tests/test_ats_census.py
+
+      - name: Enumerate tenants from Common Crawl
+        id: discover
+        run: |
+          set -euo pipefail
+          python -m gaia.ats_census \
+            --snapshot-count "$GAIA_CENSUS_SNAPSHOTS" \
+            --max-pages "$GAIA_CENSUS_MAX_PAGES" \
+            --snapshot-output ats-census.json \
+            | tee ats-census-summary.json
+          description=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("ats-census-summary.json").read_text())
+          print(
+              f"ATS census: {data.get('candidate_sources', 0)} candidates across "
+              f"{data.get('providers', 0)} provider families; "
+              f"errors={data.get('query_errors', 0)}"
+          )
+          PY
+          )
+          echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
+
+      - name: Require production database
+        run: |
+          set -euo pipefail
+          test -n "$GAIA_DATABASE_URL"
+          python -m gaia.wait_for_database --timeout-seconds 30
+
+      - name: Feed source candidate queue
+        id: capture
+        run: |
+          set -euo pipefail
+          python -m gaia.ats_census \
+            --snapshot-input ats-census.json \
+            --capture-only \
+            --batch-size 500 \
+            | tee ats-census-capture.json
+
+      - name: Upload census evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ats-census-${{ github.run_id }}
+          path: |
+            ats-census.json
+            ats-census-summary.json
+            ats-census-capture.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish census status
+        if: always()
+        env:
+          DESCRIPTION: ${{ steps.discover.outputs.description || 'ATS tenant census failed' }}
+        run: |
+          if [ "${{ steps.capture.outcome }}" = success ]; then state=success; else state=failure; fi
+          payload=$(jq -n \
+            --arg state "$state" \
+            --arg context gaia/ats-census \
+            --arg description "${DESCRIPTION:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
