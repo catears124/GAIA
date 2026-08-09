@@ -5,10 +5,13 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/stateless-inventory-fallback.yml"
+      - "src/gaia/default_sources.yaml"
+      - "src/gaia/stateless_hot_inventory.py"
       - "src/gaia/stateless_inventory.py"
       - "src/gaia/smb_ats_collectors.py"
       - "src/gaia/platform_sitemap_census.py"
       - "src/gaia/database_failover.py"
+      - "tests/test_stateless_hot_inventory.py"
       - "tests/test_smb_ats_collectors.py"
       - "tests/test_stateless_inventory.py"
   schedule:
@@ -40,6 +43,10 @@ jobs:
       POSTGRES_PRISMA_URL: ${{ secrets.POSTGRES_PRISMA_URL }}
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
+      GAIA_STATELESS_HOT_CONCURRENCY: "32"
+      GAIA_STATELESS_HOT_MAX_COLLECTORS: "500"
+      GAIA_STATELESS_HOT_SCHEMA_LIMIT: "120"
+      GAIA_STATELESS_HOT_WORKDAY_LIMIT: "24"
       GAIA_STATELESS_SHARDS: "16"
       GAIA_STATELESS_BATCH_SHARDS: "4"
       GAIA_STATELESS_CONCURRENCY: "48"
@@ -58,15 +65,20 @@ jobs:
       - name: Install GAIA and test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Verify stateless fallback lane
+      - name: Verify stateless fallback lanes
         run: |
           set -euo pipefail
           ruff check \
             src/gaia/smb_ats_collectors.py \
+            src/gaia/stateless_hot_inventory.py \
             src/gaia/stateless_inventory.py \
             tests/test_smb_ats_collectors.py \
+            tests/test_stateless_hot_inventory.py \
             tests/test_stateless_inventory.py
-          pytest -q tests/test_smb_ats_collectors.py tests/test_stateless_inventory.py
+          pytest -q \
+            tests/test_smb_ats_collectors.py \
+            tests/test_stateless_hot_inventory.py \
+            tests/test_stateless_inventory.py
 
       - name: Check whether primary Postgres path is healthy
         id: db
@@ -100,6 +112,38 @@ jobs:
           git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json \
             > src/gaia/frontend/last-known-inventory.json
           test -s src/gaia/frontend/last-known-inventory.json
+
+      - name: Refresh high-yield 2027 registries and employer sources
+        if: steps.gate.outputs.run == 'true'
+        id: hot
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f stateless-hot-summary.json
+          if timeout --signal=TERM --kill-after=15s 480s \
+            python -m gaia.stateless_hot_inventory \
+              --previous src/gaia/frontend/last-known-inventory.json \
+              --output src/gaia/frontend/last-known-inventory.json \
+              --concurrency "$GAIA_STATELESS_HOT_CONCURRENCY" \
+            | tee stateless-hot-summary.json; then
+            description=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("stateless-hot-summary.json").read_text())
+          print(
+              f"Hot: registries={data.get('registry_sources', 0)} "
+              f"leads={data.get('registry_target_postings', 0)} "
+              f"direct_sources={data.get('direct_sources', 0)} "
+              f"verified={data.get('direct_target_postings', 0)}"
+          )
+          PY
+            )
+            echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
+          else
+            echo "High-yield stateless refresh failed; keeping durable snapshot and continuing long-tail sweep." >&2
+            rm -f stateless-hot-summary.json
+            echo "description=Hot refresh failed; long-tail fallback continued" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Refresh complete-feed tenant census
         if: steps.gate.outputs.run == 'true'
@@ -161,6 +205,7 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+
           rows = []
           for path in sorted(Path("stateless-summaries").glob("shard-*.json")):
               try:
@@ -178,6 +223,15 @@ jobs:
               "target_postings": sum(int(row.get("target_postings", 0)) for row in rows),
               "families": rows[-1].get("families"),
           }
+          hot = Path("stateless-hot-summary.json")
+          if hot.exists():
+              try:
+                  hot_data = json.loads(hot.read_text())
+              except (OSError, json.JSONDecodeError):
+                  hot_data = {}
+              aggregate["hot_registry_targets"] = int(hot_data.get("registry_target_postings", 0))
+              aggregate["hot_direct_targets"] = int(hot_data.get("direct_target_postings", 0))
+              aggregate["hot_direct_sources"] = int(hot_data.get("direct_sources", 0))
           Path("stateless-inventory-summary.json").write_text(
               json.dumps(aggregate, sort_keys=True) + "\n"
           )
@@ -189,10 +243,10 @@ jobs:
           from pathlib import Path
           data = json.loads(Path("stateless-inventory-summary.json").read_text())
           print(
-              f"Stateless: shards={data.get('shards_succeeded', 0)} "
-              f"sources={data.get('selected_sources', 0)} "
-              f"refreshed={data.get('refreshed_sources', 0)} "
-              f"targets={data.get('target_postings', 0)}"
+              f"Hot verified={data.get('hot_direct_targets', 0)} "
+              f"leads={data.get('hot_registry_targets', 0)}; "
+              f"longtail targets={data.get('target_postings', 0)} "
+              f"sources={data.get('refreshed_sources', 0)}/{data.get('selected_sources', 0)}"
           )
           PY
           )
@@ -234,7 +288,7 @@ jobs:
           git config user.name "gaia-stateless-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add src/gaia/frontend/last-known-inventory.json
-          git commit -m "data: stateless direct-source inventory refresh"
+          git commit -m "data: stateless high-yield and direct-source inventory refresh"
           for attempt in 1 2 3; do
             if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then
               exit 0
@@ -250,6 +304,7 @@ jobs:
           name: stateless-inventory-${{ github.run_id }}
           path: |
             stateless-db-probe.json
+            stateless-hot-summary.json
             platform-sitemap-census.json
             platform-sitemap-summary.json
             stateless-inventory-summary.json
@@ -260,7 +315,7 @@ jobs:
       - name: Publish fallback status
         if: always()
         env:
-          DESCRIPTION: ${{ steps.stateless.outputs.description || 'Stateless fallback not required or did not complete' }}
+          DESCRIPTION: ${{ steps.stateless.outputs.description || steps.hot.outputs.description || 'Stateless fallback not required or did not complete' }}
         run: |
           if [ "${{ steps.gate.outputs.run }}" != true ]; then
             state=success
