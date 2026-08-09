@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from gaia.ats_census import PATTERNS, deserialize_collectors, extract_collectors, parse_cdx, serialize_collectors
+from gaia.ats_census import (
+    PATTERNS,
+    deserialize_collectors,
+    extract_collectors,
+    parse_cdx,
+    serialize_collectors,
+)
 
 
 def _pattern(provider: str):
