@@ -1,0 +1,229 @@
+name: Stateless inventory fallback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/stateless-inventory-fallback.yml"
+      - "src/gaia/stateless_inventory.py"
+      - "src/gaia/smb_ats_collectors.py"
+      - "src/gaia/platform_sitemap_census.py"
+      - "src/gaia/database_failover.py"
+      - "tests/test_smb_ats_collectors.py"
+      - "tests/test_stateless_inventory.py"
+  schedule:
+    - cron: "12,27,42,57 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Run stateless refresh even if Postgres is reachable"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: gaia-stateless-inventory-fallback
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    name: Refresh public snapshot without Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    environment: production
+    env:
+      POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+      POSTGRES_PRISMA_URL: ${{ secrets.POSTGRES_PRISMA_URL }}
+      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_STATELESS_SHARDS: "16"
+      GAIA_STATELESS_CONCURRENCY: "48"
+      GAIA_STATELESS_HTTP_TIMEOUT: "15"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install GAIA and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Verify stateless fallback lane
+        run: |
+          set -euo pipefail
+          ruff check \
+            src/gaia/smb_ats_collectors.py \
+            src/gaia/stateless_inventory.py \
+            tests/test_smb_ats_collectors.py \
+            tests/test_stateless_inventory.py
+          pytest -q tests/test_smb_ats_collectors.py tests/test_stateless_inventory.py
+
+      - name: Check whether primary Postgres path is healthy
+        id: db
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m gaia.database_failover \
+            --timeout-seconds 12 \
+            --connect-timeout 4 \
+            --max-delay-seconds 2 \
+            --json-output stateless-db-probe.json
+
+      - name: Decide fallback activation
+        id: gate
+        shell: bash
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          if [ "$FORCE" = true ] || [ "${{ steps.db.outcome }}" != success ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore durable public inventory
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p src/gaia/frontend
+          git fetch origin snapshot-data
+          git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json \
+            > src/gaia/frontend/last-known-inventory.json
+          test -s src/gaia/frontend/last-known-inventory.json
+
+      - name: Refresh complete-feed tenant census
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          python -m gaia.platform_sitemap_census \
+            --snapshot-output platform-sitemap-census.json \
+            | tee platform-sitemap-summary.json
+
+      - name: Refresh one deterministic tenant shard directly
+        if: steps.gate.outputs.run == 'true'
+        id: stateless
+        shell: bash
+        run: |
+          set -euo pipefail
+          shard=$(python - <<'PY'
+          from datetime import UTC, datetime
+          shards = 16
+          print(int(datetime.now(UTC).timestamp() // 900) % shards)
+          PY
+          )
+          timeout --signal=TERM --kill-after=15s 610s \
+            python -m gaia.stateless_inventory \
+              --census platform-sitemap-census.json \
+              --previous src/gaia/frontend/last-known-inventory.json \
+              --output src/gaia/frontend/last-known-inventory.json \
+              --shards "$GAIA_STATELESS_SHARDS" \
+              --shard-index "$shard" \
+              --concurrency "$GAIA_STATELESS_CONCURRENCY" \
+            | tee stateless-inventory-summary.json
+          description=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("stateless-inventory-summary.json").read_text())
+          print(
+              f"Stateless shard {data.get('shard')}/{data.get('shards')}: "
+              f"sources={data.get('selected_sources', 0)} "
+              f"refreshed={data.get('refreshed_sources', 0)} "
+              f"targets={data.get('target_postings', 0)}"
+          )
+          PY
+          )
+          echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate public snapshot contract
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from gaia.snapshot_validation import validate_snapshot_file
+          report = validate_snapshot_file(
+              Path("src/gaia/frontend/last-known-inventory.json"),
+              max_age_hours=1,
+          )
+          print(
+              f"roles={report.roles} expected={report.expected_roles} "
+              f"age_hours={report.age_hours:.3f} size_mb={report.size_mb:.2f}"
+          )
+          PY
+
+      - name: Publish refreshed snapshot to data-only branch
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cp src/gaia/frontend/last-known-inventory.json /tmp/last-known-inventory.json
+          git fetch origin snapshot-data
+          rm -rf /tmp/gaia-stateless-data
+          git worktree add /tmp/gaia-stateless-data origin/snapshot-data
+          destination=/tmp/gaia-stateless-data/src/gaia/frontend/last-known-inventory.json
+          mkdir -p "$(dirname "$destination")"
+          cp /tmp/last-known-inventory.json "$destination"
+          cd /tmp/gaia-stateless-data
+          if git diff --quiet -- src/gaia/frontend/last-known-inventory.json; then
+            echo "Stateless snapshot unchanged."
+            exit 0
+          fi
+          git config user.name "gaia-stateless-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/gaia/frontend/last-known-inventory.json
+          git commit -m "data: stateless direct-source inventory refresh"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Upload stateless evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stateless-inventory-${{ github.run_id }}
+          path: |
+            stateless-db-probe.json
+            platform-sitemap-census.json
+            platform-sitemap-summary.json
+            stateless-inventory-summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish fallback status
+        if: always()
+        env:
+          DESCRIPTION: ${{ steps.stateless.outputs.description || 'Stateless fallback not required or did not complete' }}
+        run: |
+          if [ "${{ steps.gate.outputs.run }}" != true ]; then
+            state=success
+            description="Primary Postgres reachable; stateless fallback idle"
+          elif [ "${{ steps.stateless.outcome }}" = success ]; then
+            state=success
+            description="$DESCRIPTION"
+          else
+            state=failure
+            description="Stateless direct-source inventory refresh failed"
+          fi
+          payload=$(jq -n \
+            --arg state "$state" \
+            --arg context gaia/stateless-inventory \
+            --arg description "${description:0:140}" \
+            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{state:$state,context:$context,description:$description,target_url:$target_url}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+            -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
