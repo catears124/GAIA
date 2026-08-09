@@ -38,7 +38,10 @@ def test_greenhouse_census_extracts_and_deduplicates_tenants() -> None:
         ],
         _pattern("greenhouse"),
     )
-    assert sorted(item.name for item in collectors) == ["greenhouse:acme", "greenhouse:beta"]
+    assert sorted(item.name for item in collectors) == [
+        "greenhouse:acme",
+        "greenhouse:beta",
+    ]
 
 
 def test_workday_census_requires_concrete_tenant_and_site() -> None:
@@ -52,7 +55,10 @@ def test_workday_census_requires_concrete_tenant_and_site() -> None:
     assert len(collectors) == 1
     collector = collectors[0]
     assert collector.name == "workday:acme:external"
-    assert collector.endpoint == "https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/External/jobs"
+    assert (
+        collector.endpoint
+        == "https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/External/jobs"
+    )
 
 
 def test_generic_subdomain_census_uses_existing_domain_kind() -> None:
@@ -67,6 +73,45 @@ def test_generic_subdomain_census_uses_existing_domain_kind() -> None:
     assert len(restored) == 1
     assert restored[0].name == "domain:bamboohr:acme"
     assert restored[0].host == "acme.bamboohr.com"
+
+
+def test_shared_host_path_tenant_becomes_distinct_domain_candidate() -> None:
+    collectors = extract_collectors(
+        [
+            "https://www.careers-page.com/acme",
+            "https://www.careers-page.com/acme/job/ABC123",
+            "https://www.careers-page.com/job/phantom",
+        ],
+        _pattern("manatal"),
+    )
+    assert [item.name for item in collectors] == ["domain:manatal:acme"]
+    assert collectors[0].seed_urls == ["https://www.careers-page.com/acme"]
+
+
+def test_provider_specific_non_tenant_subdomains_are_denied() -> None:
+    collectors = extract_collectors(
+        [
+            "https://feeds.applicantpool.com/site_map_index.xml",
+            "https://acme.applicantpool.com/jobs/123",
+        ],
+        _pattern("applicantpool"),
+    )
+    assert [item.name for item in collectors] == ["domain:applicantpool:acme"]
+
+
+def test_expanded_census_has_broad_provider_surface() -> None:
+    providers = {item.provider for item in PATTERNS}
+    assert len(providers) >= 30
+    assert {
+        "bamboohr",
+        "csod",
+        "eightfold",
+        "hiringthing",
+        "manatal",
+        "personio",
+        "teamtailor",
+        "workday",
+    } <= providers
 
 
 def test_native_census_rows_round_trip_to_candidate_collectors() -> None:
