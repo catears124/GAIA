@@ -100,11 +100,13 @@ from gaia.conversion_diagnostics_api import (  # noqa: E402
     install_conversion_diagnostics_api,
 )
 from gaia.coverage_api import install_coverage_api  # noqa: E402
+from gaia.feed_contract import install_feed_contract  # noqa: E402
 from gaia.maintenance_api import install_maintenance_api  # noqa: E402
 from gaia.product_api import app  # noqa: E402,F401
 from gaia.request_bootstrap import install_request_bootstrap  # noqa: E402
 from gaia.runtime_discovery_api import install_runtime_discovery_api  # noqa: E402
 
+install_feed_contract()
 install_request_bootstrap(app)
 install_activity_api(app)
 install_coverage_api(app)
