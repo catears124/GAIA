@@ -11,8 +11,9 @@ def test_resilience_layer_loads_before_application_fetches() -> None:
     application = html.index("app-v2.js")
     assert remote < resilience < detail < application
     assert 'remote-snapshot.js?v=1.0.2' in html
-    assert 'api-resilience.js?v=2.1.0' in html
+    assert 'api-resilience.js?v=2.2.0' in html
     assert 'offline-family-detail.js?v=1.0.0' in html
+    assert 'app-v2.js?v=8.1.2' in html
     assert 'outage-controller.js?v=1.2.2' in html
 
 
@@ -93,6 +94,24 @@ def test_snapshot_supports_arbitrary_offline_family_searches() -> None:
     assert 'url.searchParams.get("posted_within")' in script
     assert 'url.searchParams.get("sort")' in script
     assert 'headers.set("X-GAIA-Offline-Search", "1")' in script
+
+
+def test_snapshot_newest_sort_prefers_employer_posted_date() -> None:
+    script = (FRONTEND / "api-resilience.js").read_text(encoding="utf-8")
+    assert "if (Number.isFinite(posted)) return posted" in script
+    assert "return Number.isFinite(found) ? found : 0" in script
+    assert "Math.max(Number.isFinite(posted)" not in script
+    assert "const derived = derivedSnapshotPayload(snapshot, request)" in script
+    assert "const payload = derived || exact" in script
+
+
+def test_job_rows_display_the_same_timestamp_the_newest_sort_uses() -> None:
+    script = (FRONTEND / "app-v2.js").read_text(encoding="utf-8")
+    assert "const hasEmployerDate = Number.isFinite(postedAt)" in script
+    assert "const primaryTimestamp = hasEmployerDate ? item.latest_posted_at : item.first_detected_at" in script
+    assert "? `Posted ${relative(item.latest_posted_at, item.posted_precision)}`" in script
+    assert "? `Found ${relative(item.first_detected_at)}`" in script
+    assert "foundIsNewer" not in script
 
 
 def test_offline_search_mirrors_canonical_trust_cycle_and_token_filters() -> None:
