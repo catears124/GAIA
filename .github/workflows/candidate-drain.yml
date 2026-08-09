@@ -12,7 +12,10 @@ on:
       - "src/gaia/source_catalog.py"
       - "src/gaia/discord_notify_fast.py"
   workflow_run:
-    workflows: ["Dynamic market discovery"]
+    workflows:
+      - "Dynamic market discovery"
+      - "ATS tenant census"
+      - "Platform sitemap ATS census"
     types: [completed]
   schedule:
     - cron: "4,9,14,19,24,29,34,39,44,49,54,59 * * * *"
@@ -30,7 +33,7 @@ jobs:
   drain:
     name: Probe and promote source candidates
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     environment: production
     env:
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
@@ -67,8 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          timeout --signal=TERM --kill-after=10s 130s \
-            python -m gaia.candidate_drain --limit 32 --concurrency 8 \
+          # Census discovery can add thousands of tenants in one pass. Drain a
+          # provider-balanced batch large enough that source validation keeps pace
+          # with discovery instead of taking days behind a 32-source bottleneck.
+          timeout --signal=TERM --kill-after=10s 250s \
+            python -m gaia.candidate_drain --limit 96 --concurrency 18 \
             | tee evidence/candidate-drain.json
           description=$(python - <<'PY'
           import json
