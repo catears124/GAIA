@@ -133,9 +133,18 @@ def _parse_timestamp(value: object) -> datetime | None:
 
 
 def _family_activity(item: dict[str, object]) -> float:
+    """Return the same visible recency used by the live product API.
+
+    An employer-supplied posting date is authoritative when present. Discovery time
+    is only a fallback for jobs whose employer did not publish a date; discovering an
+    old posting today must never make it rank as a newly posted role.
+    """
+
     posted = _parse_timestamp(item.get("latest_posted_at"))
+    if posted is not None:
+        return posted.timestamp()
     found = _parse_timestamp(item.get("first_detected_at"))
-    return max(posted.timestamp() if posted else 0.0, found.timestamp() if found else 0.0)
+    return found.timestamp() if found else 0.0
 
 
 def _verified_activity(item: dict[str, object]) -> float:
@@ -191,11 +200,10 @@ def _filter_family_index(
         if remote and not (bool(item.get("remote")) or "remote" in location_text):
             continue
         if cutoff:
-            activity = max(
-                _parse_timestamp(item.get("latest_posted_at")) or datetime.min.replace(tzinfo=UTC),
-                _parse_timestamp(item.get("first_detected_at")) or datetime.min.replace(tzinfo=UTC),
+            activity = _parse_timestamp(item.get("latest_posted_at")) or _parse_timestamp(
+                item.get("first_detected_at")
             )
-            if activity < cutoff:
+            if activity is None or activity < cutoff:
                 continue
         result.append(item)
     return result
