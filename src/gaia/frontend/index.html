@@ -67,7 +67,7 @@
           <label><span>Location</span><input id="location" type="search" placeholder="Anywhere"></label>
           <label><span>Cycle</span><select id="target"><option value="" selected>All active cycles</option><option value="default">Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027</option></select></label>
           <label><span>Recency</span><select id="posted-within"><option value="0" selected>Any time</option><option value="1">Past 24 hours</option><option value="7">Past week</option><option value="30">Past month</option></select></label>
-          <label><span>Sort</span><select id="sort"><option value="newest" selected>Most recent</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
+          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newest posting</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
           <label class="check-filter"><input id="remote" type="checkbox"><span>Remote only</span></label>
         </div>
         <div class="quick-actions" aria-label="Quick searches">
@@ -84,7 +84,7 @@
       <div class="results-head" id="results">
         <div>
           <strong id="result-count" aria-live="polite">Loading…</strong>
-          <span id="result-note">Newest employer-posted or GAIA-found activity first.</span>
+          <span id="result-note">Employer posting date first; discovery time only when no posted date is available.</span>
         </div>
         <button id="clear-filters" class="text-button" hidden>Reset filters</button>
       </div>
@@ -142,10 +142,10 @@
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/assets/remote-snapshot.js?v=1.0.2"></script>
-  <script src="/assets/api-resilience.js?v=2.1.0"></script>
+  <script src="/assets/api-resilience.js?v=2.2.0"></script>
   <script src="/assets/emergency-outage.js?v=2.0.0"></script>
   <script src="/assets/offline-family-detail.js?v=1.0.0"></script>
-  <script src="/assets/app-v2.js?v=8.1.1" defer></script>
+  <script src="/assets/app-v2.js?v=8.1.2" defer></script>
   <script src="/assets/app-improvements.js?v=1.1.0" defer></script>
   <script src="/assets/outage-controller.js?v=1.2.2" defer></script>
 </body>
