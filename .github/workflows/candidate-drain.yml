@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/candidate-drain.yml"
       - "src/gaia/candidate_drain.py"
+      - "src/gaia/database_failover.py"
       - "src/gaia/fast_dynamic_ingest.py"
       - "src/gaia/live_inventory.py"
       - "src/gaia/removal_guard.py"
@@ -36,6 +37,9 @@ jobs:
     timeout-minutes: 5
     environment: production
     env:
+      POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
+      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+      POSTGRES_PRISMA_URL: ${{ secrets.POSTGRES_PRISMA_URL }}
       GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
       GAIA_DB_TIMEOUT: "45"
@@ -56,11 +60,16 @@ jobs:
       - name: Install GAIA
         run: python -m pip install --disable-pip-version-check -e .
 
-      - name: Require direct DB and Discord
+      - name: Select reachable database endpoint
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$GAIA_DATABASE_URL"
+          python -m gaia.database_failover \
+            --timeout-seconds 25 \
+            --connect-timeout 5 \
+            --max-delay-seconds 5 \
+            --github-env "$GITHUB_ENV" \
+            --json-output database-failover.json
           test -n "$VERIFIED_DHOOK"
           test -n "$LEADS_DHOOK"
 
@@ -70,6 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
+          cp database-failover.json evidence/database-failover.json
           # Census discovery can add thousands of tenants in one pass. Drain a
           # provider-balanced batch large enough that source validation keeps pace
           # with discovery instead of taking days behind a 32-source bottleneck.
@@ -97,7 +107,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: candidate-drain-${{ github.run_id }}
-          path: evidence/
+          path: |
+            evidence/
+            database-failover.json
           if-no-files-found: warn
           retention-days: 14
 
