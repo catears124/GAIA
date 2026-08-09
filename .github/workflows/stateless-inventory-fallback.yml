@@ -32,7 +32,7 @@ jobs:
   refresh:
     name: Refresh public snapshot without Postgres
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 20
     environment: production
     env:
       POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
@@ -108,33 +108,81 @@ jobs:
             --snapshot-output platform-sitemap-census.json \
             | tee platform-sitemap-summary.json
 
-      - name: Refresh one deterministic tenant shard directly
+      - name: Refresh tenant shard directly
         if: steps.gate.outputs.run == 'true'
         id: stateless
         shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
         run: |
           set -euo pipefail
-          shard=$(python - <<'PY'
+          current_shard=$(python - <<'PY'
           from datetime import UTC, datetime
           shards = 16
           print(int(datetime.now(UTC).timestamp() // 900) % shards)
           PY
           )
-          timeout --signal=TERM --kill-after=15s 610s \
-            python -m gaia.stateless_inventory \
-              --census platform-sitemap-census.json \
-              --previous src/gaia/frontend/last-known-inventory.json \
-              --output src/gaia/frontend/last-known-inventory.json \
-              --shards "$GAIA_STATELESS_SHARDS" \
-              --shard-index "$shard" \
-              --concurrency "$GAIA_STATELESS_CONCURRENCY" \
-            | tee stateless-inventory-summary.json
+          if [[ "$COMMIT_MESSAGE" == *"[full-sweep]"* ]]; then
+            shard_list=$(seq 0 15)
+            echo "Bootstrap full stateless sweep enabled."
+          else
+            shard_list="$current_shard"
+          fi
+
+          rm -rf stateless-summaries
+          mkdir -p stateless-summaries
+          successes=0
+          for shard in $shard_list; do
+            echo "Refreshing stateless shard $shard/$GAIA_STATELESS_SHARDS"
+            if timeout --signal=TERM --kill-after=15s 610s \
+              python -m gaia.stateless_inventory \
+                --census platform-sitemap-census.json \
+                --previous src/gaia/frontend/last-known-inventory.json \
+                --output src/gaia/frontend/last-known-inventory.json \
+                --shards "$GAIA_STATELESS_SHARDS" \
+                --shard-index "$shard" \
+                --concurrency "$GAIA_STATELESS_CONCURRENCY" \
+              | tee "stateless-summaries/shard-${shard}.json"; then
+              successes=$((successes + 1))
+            else
+              echo "Shard $shard failed; preserving its previous snapshot rows and continuing." >&2
+              rm -f "stateless-summaries/shard-${shard}.json"
+            fi
+          done
+          test "$successes" -gt 0
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows = []
+          for path in sorted(Path("stateless-summaries").glob("shard-*.json")):
+              try:
+                  rows.append(json.loads(path.read_text()))
+              except (OSError, json.JSONDecodeError):
+                  continue
+          if not rows:
+              raise SystemExit("no successful stateless shard summaries")
+          aggregate = {
+              "shards_run": [row.get("shard") for row in rows],
+              "shards_succeeded": len(rows),
+              "shards": rows[-1].get("shards"),
+              "selected_sources": sum(int(row.get("selected_sources", 0)) for row in rows),
+              "refreshed_sources": sum(int(row.get("refreshed_sources", 0)) for row in rows),
+              "target_postings": sum(int(row.get("target_postings", 0)) for row in rows),
+              "families": rows[-1].get("families"),
+          }
+          Path("stateless-inventory-summary.json").write_text(
+              json.dumps(aggregate, sort_keys=True) + "\n"
+          )
+          print(json.dumps(aggregate, sort_keys=True))
+          PY
+
           description=$(python - <<'PY'
           import json
           from pathlib import Path
           data = json.loads(Path("stateless-inventory-summary.json").read_text())
           print(
-              f"Stateless shard {data.get('shard')}/{data.get('shards')}: "
+              f"Stateless: shards={data.get('shards_succeeded', 0)} "
               f"sources={data.get('selected_sources', 0)} "
               f"refreshed={data.get('refreshed_sources', 0)} "
               f"targets={data.get('target_postings', 0)}"
@@ -198,6 +246,7 @@ jobs:
             platform-sitemap-census.json
             platform-sitemap-summary.json
             stateless-inventory-summary.json
+            stateless-summaries/
           if-no-files-found: warn
           retention-days: 14
 
