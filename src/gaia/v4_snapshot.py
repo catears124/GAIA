@@ -23,12 +23,16 @@ def timestamp(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def source_activity(item: dict[str, object]) -> datetime | None:
+    """Best externally supplied market date, excluding GAIA's own first-seen time."""
+    return timestamp(item.get("latest_posted_at")) or timestamp(item.get("latest_sensor_reported_at"))
+
+
 def activity(item: dict[str, object]) -> datetime:
-    """The market timestamp drives recency. Verification never drives recency."""
+    """The best market signal drives feed recency; verification never drives recency."""
     return (
         timestamp(item.get("market_event_at"))
-        or timestamp(item.get("latest_posted_at"))
-        or timestamp(item.get("latest_sensor_reported_at"))
+        or source_activity(item)
         or timestamp(item.get("market_first_seen_at"))
         or timestamp(item.get("first_detected_at"))
         or datetime.min.replace(tzinfo=UTC)
@@ -109,8 +113,10 @@ def filter_families(
             continue
         if remote and not (bool(item.get("remote")) or "remote" in location_text):
             continue
-        if cutoff and activity(item) < cutoff:
-            continue
+        if cutoff:
+            dated = source_activity(item)
+            if dated is None or dated < cutoff:
+                continue
         result.append(item)
     return result
 
@@ -132,8 +138,9 @@ def sort_families(items: list[dict[str, object]], sort: str = "newest") -> None:
         )
         return
 
-    # First principle: "newest" means newest market event. Trust is a secondary
-    # tiebreaker, not a reason to bury a ten-minute-old lead below a week-old role.
+    # "newest" is the newest known market signal. A fresh lead can beat an older
+    # verified role, but the UI must label the signal honestly as Posted/Reported/
+    # Found. Filters named "posted within" use source_activity(), never first_seen.
     items.sort(
         key=lambda item: (activity(item), verified(item), verified_activity(item), str(item.get("family_key") or "")),
         reverse=True,
@@ -188,7 +195,13 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
     active = sum(int(item.get("direct_openings") or 0) for item in direct)
     lead_apps = sum(int(item.get("backstop_openings") or 0) for item in leads)
     companies = {str(item.get("company") or "").casefold() for item in direct if item.get("company")}
-    new_verified = sum(1 for item in direct if activity(item) >= cutoff)
+
+    # "new verified" means a verified job with an external posting/report signal
+    # in the window. Discovering an old undated role today does not make it newly
+    # posted, and re-verifying an old role certainly does not either.
+    new_verified = sum(
+        1 for item in direct if (dated := source_activity(item)) is not None and dated >= cutoff
+    )
     market_events = sum(1 for item in all_visible if activity(item) >= cutoff)
     discoveries = sum(
         1
@@ -209,17 +222,13 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
     dated_market_events = sum(
         1
         for item in all_visible
-        if max(
-            timestamp(item.get("latest_posted_at")) or datetime.min.replace(tzinfo=UTC),
-            timestamp(item.get("latest_sensor_reported_at")) or datetime.min.replace(tzinfo=UTC),
-        ) >= cutoff
+        if (dated := source_activity(item)) is not None and dated >= cutoff
     )
     first_seen_only = sum(
         1
         for item in all_visible
         if activity(item) >= cutoff
-        and timestamp(item.get("latest_posted_at")) is None
-        and timestamp(item.get("latest_sensor_reported_at")) is None
+        and source_activity(item) is None
     )
     backlog = sum(1 for item in leads if activity(item) >= now - timedelta(days=14))
     return {
@@ -241,7 +250,7 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
         "lead_apps": lead_apps,
         "verification_backlog": backlog,
         "activity_units": {
-            "new_today": "verified_role_family_with_market_event_in_24h",
+            "new_today": "verified_role_family_with_external_posted_or_reported_timestamp_in_24h",
             "market_events_24h": "role_family_any_market_event",
             "dated_market_events_24h": "role_family_with_employer_or_sensor_date",
             "employer_posted_24h": "role_family_with_employer_posted_timestamp",
