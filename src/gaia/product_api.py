@@ -38,9 +38,6 @@ def _live_order_clause(sort: str) -> str:
     if sort == "verified":
         return "last_verified_at DESC, first_detected_at DESC, family_key"
 
-    # "Newest" means the employer date whenever the employer supplied one. Recovery
-    # time is only a fallback for undated jobs; it must not push old recovered rows
-    # above genuinely recent postings.
     return (
         f"{_VISIBLE_ACTIVITY_SQL} DESC, "
         "CASE posted_precision WHEN 'timestamp' THEN 0 WHEN 'day' THEN 1 ELSE 2 END, "
@@ -135,26 +132,25 @@ def _activity_stats(
     family_row: Mapping[str, object],
     movement_row: Mapping[str, object],
 ) -> dict[str, object]:
-    """Keep user-facing discovery counts and low-level URL churn in coherent units."""
-    new_families = int(family_row["new_families_today"] or 0)
+    """Expose source-dated freshness separately from GAIA discovery/churn."""
+    new_verified = int(family_row["new_families_today"] or 0)
+    discovered_families = int(family_row["discovered_families_today"] or 0)
     new_urls = int(movement_row["new_urls_today"] or 0)
     removed_urls = int(movement_row["removed_urls_today"] or 0)
     return {
-        # These power the visible "found today" metric. A card represents a role
-        # family, so its movement must be counted in role families too.
-        "new_24h": new_families,
-        "new_today": new_families,
-        "new_families_24h": new_families,
-        # Canonical URL churn remains available for operators, but it is explicitly
-        # named and never compared with deduplicated role-family inventory.
+        "new_24h": new_verified,
+        "new_today": new_verified,
+        "new_verified_24h": new_verified,
+        "new_families_24h": new_verified,
+        "discovered_24h": discovered_families,
         "new_urls_24h": new_urls,
         "removed_urls_24h": removed_urls,
         "net_urls_24h": new_urls - removed_urls,
-        # Backward-compatible aliases for clients that already consume movement data.
         "removed_today": removed_urls,
         "net_today": new_urls - removed_urls,
         "activity_units": {
-            "new_today": "role_family",
+            "new_today": "verified_role_family_with_employer_posted_timestamp_in_24h",
+            "discovered_24h": "verified_role_family_first_seen_by_gaia_in_24h",
             "url_movement": "canonical_apply_url",
         },
     }
@@ -254,7 +250,6 @@ def live_facets(trust: str = "all", target: str = "default") -> dict[str, object
 
 @app.get("/api/stats")
 def live_stats() -> dict[str, object]:
-    target_matches = list(legacy.TARGET_MATCHES)
     tech_categories = list(legacy.TECH_CATEGORIES)
     with legacy.db.connect() as connection:
         row = connection.execute(
@@ -264,27 +259,30 @@ def live_stats() -> dict[str, object]:
                 COALESCE(SUM(direct_openings), 0) AS active_listings,
                 COUNT(DISTINCT company) AS companies,
                 COUNT(*) FILTER (
-                    WHERE first_detected_at >= now() - interval '24 hours'
+                    WHERE latest_posted_at >= now() - interval '24 hours'
                 ) AS new_families_today,
+                COUNT(*) FILTER (
+                    WHERE first_detected_at >= now() - interval '24 hours'
+                ) AS discovered_families_today,
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
             FROM families
-            WHERE target_match = ANY(%s)
+            WHERE year=2027
               AND category = ANY(%s)
               AND direct_openings>0
             """,
-            (target_matches, tech_categories),
+            (tech_categories,),
         ).fetchone()
         lead_row = connection.execute(
             """
             SELECT COUNT(*) AS leads, COALESCE(SUM(backstop_openings),0) AS lead_apps
             FROM families
-            WHERE target_match = ANY(%s)
+            WHERE year=2027
               AND category = ANY(%s)
               AND direct_openings=0
               AND backstop_openings>0
             """,
-            (target_matches, tech_categories),
+            (tech_categories,),
         ).fetchone()
         movement = connection.execute(
             """
@@ -298,10 +296,10 @@ def live_stats() -> dict[str, object]:
                 ) AS removed_urls_today
             FROM postings
             WHERE source_mode='direct'
-              AND target_match = ANY(%s)
+              AND year=2027
               AND category = ANY(%s)
             """,
-            (target_matches, tech_categories),
+            (tech_categories,),
         ).fetchone()
         source_row = connection.execute(
             """
