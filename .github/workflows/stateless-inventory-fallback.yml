@@ -7,6 +7,7 @@ on:
       - ".github/workflows/stateless-inventory-fallback.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
       - "src/gaia/v4_sensor_pipeline.py"
       - "src/gaia/v4_pipeline.py"
@@ -62,16 +63,19 @@ jobs:
           set -euo pipefail
           ruff check \
             src/gaia/v4_sensors.py \
+            src/gaia/v4_market_filter.py \
             src/gaia/v4_migrate.py \
             src/gaia/v4_sensor_pipeline.py \
             src/gaia/v4_pipeline.py \
             src/gaia/v4_snapshot.py \
             tests/test_v4_sensors.py \
+            tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
             tests/test_v4_snapshot.py
           pytest -q \
             tests/test_v4_sensors.py \
+            tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
             tests/test_v4_snapshot.py
@@ -134,7 +138,7 @@ jobs:
               "sensors": f"{market.get('sensor_current')}/{market.get('sensor_total')}",
           }, sort_keys=True))
           for row in sorted(families, key=lambda item: item.get("market_event_at") or "", reverse=True)[:25]:
-              print(row.get("market_event_at"), "verified" if row.get("verified") else "lead", row.get("company"), "—", row.get("title"))
+              print(row.get("market_event_at"), "verified" if row.get("verified") else "lead", row.get("company"), "—", row.get("title"), "·", row.get("target_match"), row.get("season"), row.get("year"))
           PY
 
       - name: Upload branch evidence
