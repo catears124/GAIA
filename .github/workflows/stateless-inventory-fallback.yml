@@ -7,6 +7,7 @@ on:
       - ".github/workflows/stateless-inventory-fallback.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_openroles_sensor.py"
       - "src/gaia/v4_invariants.py"
       - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
@@ -68,6 +69,7 @@ jobs:
           set -euo pipefail
           ruff check \
             src/gaia/v4_sensors.py \
+            src/gaia/v4_openroles_sensor.py \
             src/gaia/v4_invariants.py \
             src/gaia/v4_market_filter.py \
             src/gaia/v4_migrate.py \
@@ -78,6 +80,7 @@ jobs:
             src/gaia/snapshot_fallback.py \
             tests/test_feed_contract.py \
             tests/test_v4_sensors.py \
+            tests/test_v4_openroles_sensor.py \
             tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
@@ -86,6 +89,7 @@ jobs:
           pytest -q \
             tests/test_feed_contract.py \
             tests/test_v4_sensors.py \
+            tests/test_v4_openroles_sensor.py \
             tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
