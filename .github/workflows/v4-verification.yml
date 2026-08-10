@@ -7,6 +7,7 @@ on:
       - ".github/workflows/v4-verification.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
       - "src/gaia/v4_pipeline.py"
       - "src/gaia/v4_verification_pipeline.py"
@@ -61,8 +62,24 @@ jobs:
       - name: Verify enrichment contract
         run: |
           set -euo pipefail
-          ruff check src/gaia/v4_sensors.py src/gaia/v4_migrate.py src/gaia/v4_pipeline.py src/gaia/v4_verification_pipeline.py src/gaia/v4_snapshot.py tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
-          pytest -q tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
+          ruff check \
+            src/gaia/v4_sensors.py \
+            src/gaia/v4_market_filter.py \
+            src/gaia/v4_migrate.py \
+            src/gaia/v4_pipeline.py \
+            src/gaia/v4_verification_pipeline.py \
+            src/gaia/v4_snapshot.py \
+            tests/test_v4_sensors.py \
+            tests/test_v4_market_filter.py \
+            tests/test_v4_migrate.py \
+            tests/test_v4_pipeline.py \
+            tests/test_v4_snapshot.py
+          pytest -q \
+            tests/test_v4_sensors.py \
+            tests/test_v4_market_filter.py \
+            tests/test_v4_migrate.py \
+            tests/test_v4_pipeline.py \
+            tests/test_v4_snapshot.py
 
       - name: Restore latest market snapshot
         shell: bash
