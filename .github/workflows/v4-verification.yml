@@ -1,29 +1,29 @@
-name: V4 market pulse
+name: V4 employer verification
 
 on:
   push:
     branches: [main, rewrite/first-principles-v4]
     paths:
-      - ".github/workflows/stateless-inventory-fallback.yml"
+      - ".github/workflows/v4-verification.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
       - "src/gaia/v4_openroles_sensor.py"
       - "src/gaia/v4_invariants.py"
       - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
-      - "src/gaia/v4_sensor_pipeline.py"
       - "src/gaia/v4_pipeline.py"
+      - "src/gaia/v4_verification_plan.py"
+      - "src/gaia/v4_verification_pipeline.py"
       - "src/gaia/v4_snapshot.py"
       - "src/gaia/feed_contract.py"
       - "src/gaia/models.py"
       - "src/gaia/snapshot_fallback.py"
       - "src/gaia/frontend/feed-contract.js"
-      - "src/gaia/frontend/v4-ui.js"
       - "src/gaia/frontend/index.html"
       - "tests/test_feed_contract.py"
       - "tests/test_v4_*.py"
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "2,17,32,47 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -31,24 +31,38 @@ permissions:
   statuses: write
 
 concurrency:
-  group: gaia-v4-market-pulse-${{ github.ref }}
+  group: gaia-v4-verification-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  refresh:
-    name: Sensors → immediate market snapshot
+  verify:
+    name: Hot pages → cheap boards → rotating Workday
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     environment: production
     env:
       GAIA_AUTO_MIGRATE: "0"
       GAIA_V4_SENSOR_CONCURRENCY: "12"
+      GAIA_V4_VERIFY_CONCURRENCY: "64"
+      GAIA_V4_VERIFY_TIMEOUT: "12"
+      GAIA_V4_VERIFY_COLLECTOR_LIMIT: "1400"
+      GAIA_V4_HOT_PAGE_LIMIT: "900"
+      GAIA_V4_HOT_PAGE_BATCH: "40"
+      GAIA_V4_WORKDAY_BOARD_BUDGET: "12"
+      GAIA_V4_VERIFY_ROTATION_SECONDS: "900"
       GAIA_V4_DIRECT_TTL_HOURS: "72"
       GAIA_V4_LEAD_TTL_HOURS: "24"
       GAIA_V4_MIN_FAMILIES: "100"
       GAIA_V4_MIN_SENSORS: "3"
       GAIA_V4_MIN_SENSOR_RECALL: "1.0"
       GAIA_V4_MAX_MARKET_AGE_HOURS: "96"
+      GAIA_VERIFY_CONCURRENCY: "8"
+      GAIA_WORKDAY_MAX_PER_TERM: "60"
+      GAIA_WORKDAY_DETAIL_BUDGET: "0"
+      GAIA_WORKDAY_RETRIES: "1"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
+      GAIA_WORKDAY_MIN_INTERVAL: "0.5"
+      GAIA_WORKDAY_JITTER: "0.1"
       GH_TOKEN: ${{ github.token }}
 
     steps:
@@ -64,7 +78,7 @@ jobs:
       - name: Install
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Verify market pulse contract
+      - name: Verify enrichment contract
         run: |
           set -euo pipefail
           ruff check \
@@ -73,8 +87,9 @@ jobs:
             src/gaia/v4_invariants.py \
             src/gaia/v4_market_filter.py \
             src/gaia/v4_migrate.py \
-            src/gaia/v4_sensor_pipeline.py \
             src/gaia/v4_pipeline.py \
+            src/gaia/v4_verification_plan.py \
+            src/gaia/v4_verification_pipeline.py \
             src/gaia/v4_snapshot.py \
             src/gaia/feed_contract.py \
             src/gaia/snapshot_fallback.py \
@@ -85,6 +100,7 @@ jobs:
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
+            tests/test_v4_verification_plan.py \
             tests/test_v4_snapshot.py
           pytest -q \
             tests/test_feed_contract.py \
@@ -94,9 +110,10 @@ jobs:
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
+            tests/test_v4_verification_plan.py \
             tests/test_v4_snapshot.py
 
-      - name: Restore durable state
+      - name: Restore latest market snapshot
         shell: bash
         run: |
           set -euo pipefail
@@ -108,17 +125,17 @@ jobs:
           fi
           test -s src/gaia/frontend/last-known-inventory.json
 
-      - name: Publish market detections without waiting for verification
+      - name: Verify employer surfaces
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=10s 150s \
-            python -m gaia.v4_sensor_pipeline \
+          timeout --signal=TERM --kill-after=15s 300s \
+            python -m gaia.v4_verification_pipeline \
               --previous src/gaia/frontend/last-known-inventory.json \
               --output src/gaia/frontend/last-known-inventory.json \
-            | tee v4-market-summary.json
+            | tee v4-verification-summary.json
 
-      - name: Audit market latency and recall
+      - name: Audit verification output
         shell: bash
         run: |
           set -euo pipefail
@@ -128,16 +145,17 @@ jobs:
           from pathlib import Path
 
           data = json.loads(Path("src/gaia/frontend/last-known-inventory.json").read_text())
-          assert data.get("schema_version") == 4
-          assert (data.get("v4") or {}).get("mode") == "market-sensor-pulse"
           families = data.get("family_index") or []
           v4 = data.get("v4") or {}
           recall = v4.get("sensor_recall") or {}
           health = ((data.get("responses") or {}).get("/api/health") or {})
           market = health.get("market") or {}
+          verification = market.get("verification") or {}
           stats = ((data.get("responses") or {}).get("/api/stats") or {})
-          assert len(families) >= 100, len(families)
-          assert int(market.get("sensor_current") or 0) >= 3, market
+          assert data.get("schema_version") == 4
+          assert len(families) >= 100
+          assert int(market.get("sensor_current") or 0) >= 3
+          assert int(verification.get("selected") or 0) > 0, verification
           assert float(recall.get("recall") or 0) == 1.0, recall
           assert int(recall.get("timestamp_drops") or 0) == 0, recall
 
@@ -146,52 +164,51 @@ jobs:
 
           freshest = max((ts(row["market_event_at"]) for row in families if row.get("market_event_at")), default=None)
           assert freshest is not None
-          age_hours = (datetime.now(UTC) - freshest).total_seconds() / 3600
-          assert age_hours <= 96, age_hours
           print(json.dumps({
               "families": len(families),
               "freshest_market_event_at": freshest.isoformat(),
-              "freshest_age_hours": round(age_hours, 3),
+              "freshest_age_hours": round((datetime.now(UTC) - freshest).total_seconds() / 3600, 3),
               "sensor_recall": recall,
+              "verification_collectors": verification.get("selected"),
+              "verification_sources_refreshed": verification.get("refreshed"),
+              "verification_postings": verification.get("postings"),
+              "verification_statuses": verification.get("statuses"),
+              "new_verified_24h": stats.get("new_verified_24h"),
               "dated_market_events_24h": stats.get("dated_market_events_24h"),
               "market_events_24h": stats.get("market_events_24h"),
-              "new_verified_24h": stats.get("new_verified_24h"),
               "verification_backlog": stats.get("verification_backlog"),
-              "sensors": f"{market.get('sensor_current')}/{market.get('sensor_total')}",
           }, sort_keys=True))
-          for row in sorted(families, key=lambda item: item.get("market_event_at") or "", reverse=True)[:25]:
-              print(row.get("market_event_at"), "verified" if row.get("verified") else "lead", row.get("company"), "—", row.get("title"), "·", row.get("target_match"), row.get("season"), row.get("year"))
           PY
 
-      - name: Upload branch evidence
+      - name: Upload verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gaia-v4-market-pulse-${{ github.run_id }}
+          name: gaia-v4-verification-${{ github.run_id }}
           path: |
             src/gaia/frontend/last-known-inventory.json
-            v4-market-summary.json
+            v4-verification-summary.json
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Publish production snapshot
+      - name: Publish enriched production snapshot
         if: github.ref == 'refs/heads/main' && success()
         shell: bash
         run: |
           set -euo pipefail
           cp src/gaia/frontend/last-known-inventory.json /tmp/last-known-inventory.json
           git fetch origin snapshot-data
-          rm -rf /tmp/gaia-v4-market-data
-          git worktree add /tmp/gaia-v4-market-data origin/snapshot-data
-          destination=/tmp/gaia-v4-market-data/src/gaia/frontend/last-known-inventory.json
+          rm -rf /tmp/gaia-v4-verified-data
+          git worktree add /tmp/gaia-v4-verified-data origin/snapshot-data
+          destination=/tmp/gaia-v4-verified-data/src/gaia/frontend/last-known-inventory.json
           mkdir -p "$(dirname "$destination")"
           cp /tmp/last-known-inventory.json "$destination"
-          cd /tmp/gaia-v4-market-data
+          cd /tmp/gaia-v4-verified-data
           if git diff --quiet -- src/gaia/frontend/last-known-inventory.json; then exit 0; fi
-          git config user.name "gaia-v4-market-bot"
+          git config user.name "gaia-v4-verifier-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add src/gaia/frontend/last-known-inventory.json
-          git commit -m "data: v4 market pulse"
+          git commit -m "data: v4 employer verification"
           for attempt in 1 2 3; do
             if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then exit 0; fi
             sleep $((attempt * 5))

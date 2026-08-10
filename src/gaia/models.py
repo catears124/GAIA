@@ -47,11 +47,24 @@ class Posting:
     source_mode: str = "direct"
     description: str = ""
     employment_type: str = ""
+
+    # Employer-owned timing. This is only populated when an employer/ATS or an
+    # explicitly date-bearing source says when the role was posted.
     posted_at: datetime | None = None
     updated_at: datetime | None = None
     posted_raw: str | None = None
     posted_precision: str = "unknown"
     posted_confidence: str = "unknown"
+
+    # Sensor timing is deliberately separate from employer timing. Community job
+    # trackers are excellent low-latency detectors, but their "added"/"age" value
+    # must not be silently relabeled as an employer publication timestamp.
+    sensor_reported_at: datetime | None = None
+    sensor_reported_raw: str | None = None
+    sensor_precision: str = "unknown"
+    sensor_confidence: str = "unknown"
+
+    # observed_at is GAIA's own fetch time for this exact observation.
     observed_at: datetime = field(default_factory=utcnow)
     category: str = "other"
     season: str | None = None
@@ -65,6 +78,15 @@ class Posting:
     @property
     def canonical_apply_url(self) -> str:
         return canonical_url(self.apply_url)
+
+    @property
+    def market_event_at(self) -> datetime:
+        """Best timestamp for ranking discovery urgency, never verification status.
+
+        Employer time wins when available. Otherwise use the source's own listing
+        time/age, then GAIA observation time. Verification is an independent axis.
+        """
+        return self.posted_at or self.sensor_reported_at or self.observed_at
 
 
 @dataclass(slots=True)

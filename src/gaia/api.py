@@ -126,9 +126,13 @@ def _catalog_count() -> int:
 
 
 def _target_clause(target: str, params: list[object]) -> str:
-    if target == "default":
-        params.append(list(TARGET_MATCHES))
-        return "target_match = ANY(%s)"
+    """Apply public cycle semantics to explicit year/season metadata."""
+    if target == "exact":
+        params.extend([2027, "summer"])
+        return "year=%s AND lower(COALESCE(season,''))=%s"
+    if target in {"default", "year_confirmed"}:
+        params.append(2027)
+        return "year=%s"
     if target:
         params.append(target)
         return "target_match=%s"
@@ -265,7 +269,7 @@ def stats() -> dict[str, int]:
                 COALESCE(SUM(direct_openings), 0) AS active_listings,
                 COUNT(DISTINCT company) AS companies,
                 COUNT(*) FILTER (
-                    WHERE first_detected_at >= date_trunc('day', now())
+                    WHERE latest_posted_at >= now() - interval '24 hours'
                 ) AS new_families_today,
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
@@ -291,29 +295,30 @@ def stats() -> dict[str, int]:
             """
             SELECT
                 COUNT(DISTINCT canonical_apply_url) FILTER (
-                    WHERE first_seen_at >= date_trunc('day', now())
+                    WHERE first_seen_at >= now() - interval '24 hours'
                 ) AS new_today,
                 COUNT(DISTINCT canonical_apply_url) FILTER (
-                    WHERE removed_at >= date_trunc('day', now())
+                    WHERE removed_at >= now() - interval '24 hours'
                 ) AS removed_today
             FROM postings
             WHERE source_mode='direct'
-              AND target_match = ANY(%s)
+              AND year=2027
               AND category = ANY(%s)
             """,
-            (list(TARGET_MATCHES), list(TECH_CATEGORIES)),
+            (list(TECH_CATEGORIES),),
         ).fetchone()
-    new_today = int(movement["new_today"] or 0)
+    new_verified = int(row["new_families_today"] or 0)
+    discovered_urls = int(movement["new_today"] or 0)
     removed_today = int(movement["removed_today"] or 0)
     return {
         "role_families": int(row["role_families"]),
         "active_listings": int(row["active_listings"]),
         "companies": int(row["companies"]),
-        "new_24h": new_today,
-        "new_today": new_today,
+        "new_24h": new_verified,
+        "new_today": new_verified,
         "removed_today": removed_today,
-        "net_today": new_today - removed_today,
-        "new_families_24h": int(row["new_families_today"]),
+        "net_today": discovered_urls - removed_today,
+        "new_families_24h": new_verified,
         "verified_listings": int(row["verified_listings"]),
         "verified_families": int(row["verified_families"]),
         "sources": _catalog_count(),
@@ -354,10 +359,8 @@ def _list_families(
             "EXISTS (SELECT 1 FROM unnest(locations) AS value WHERE value ILIKE '%remote%')"
         )
     if posted_within:
-        conditions.append(
-            "COALESCE(latest_posted_at, first_detected_at) "
-            ">= now() - (%s * interval '1 day')"
-        )
+        # Never substitute GAIA's own first-detected time for a posting date.
+        conditions.append("latest_posted_at >= now() - (%s * interval '1 day')")
         params.append(posted_within)
     order_params = list(params)
     order = _search_order(query, sort, order_params)
