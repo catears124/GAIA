@@ -44,12 +44,28 @@ def verified(item: dict[str, object]) -> bool:
 
 
 def _matches_target(item: dict[str, object], target: str) -> bool:
+    """Apply product cycle semantics, not internal classifier labels.
+
+    `exact` is the public Summer 2027 view, so a role confirmed by a genuinely
+    Summer-2027-scoped source belongs there even when its title omits the words
+    "Summer 2027" and the classifier label is `source_confirmed`.
+
+    `default` and the legacy `year_confirmed` query are both the public Any 2027
+    view. Spring/Fall 2027 roles therefore remain visible even if the classifier
+    quite correctly says they are the wrong season for a Summer-specific target.
+    """
     if not target:
         return True
-    match = str(item.get("target_match") or "")
-    if target == "default":
-        return match in TARGET_MATCHES
-    return match == target
+    try:
+        year = int(item.get("year")) if item.get("year") is not None else None
+    except (TypeError, ValueError):
+        year = None
+    season = str(item.get("season") or "").casefold()
+    if target == "exact":
+        return year == 2027 and season == "summer"
+    if target in {"default", "year_confirmed"}:
+        return year == 2027
+    return str(item.get("target_match") or "") == target
 
 
 def filter_families(
