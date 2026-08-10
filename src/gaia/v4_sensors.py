@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
+from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from .classify import classify
@@ -139,7 +140,13 @@ def _header(value: str) -> str:
 
 def _cells(line: str) -> list[str]:
     stripped = line.strip()
-    return [cell.strip() for cell in stripped.strip("|").split("|")] if stripped.startswith("|") else []
+    if "|" not in stripped:
+        return []
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
 
 
 def _separator(cells: list[str]) -> bool:
@@ -195,7 +202,11 @@ def _url_score(url: str) -> int:
 
 
 def _choose_url(urls: list[str]) -> str | None:
-    ranked = [(score, index, value) for index, value in enumerate(urls) if (score := _url_score(value)) > -1_000]
+    ranked = [
+        (score, index, value)
+        for index, value in enumerate(urls)
+        if (score := _url_score(value)) > -1_000
+    ]
     return max(ranked, default=None, key=lambda item: (item[0], item[1]))[2] if ranked else None
 
 
@@ -231,7 +242,11 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
         company_i = _index(headers, COMPANY_HEADERS)
         location_i = _index(headers, LOCATION_HEADERS)
         time_i = _index(headers, TIME_HEADERS)
-        company = _clean_text(cells[company_i]) if company_i is not None and company_i < len(cells) else current_company
+        company = (
+            _clean_text(cells[company_i])
+            if company_i is not None and company_i < len(cells)
+            else current_company
+        )
         if company in {"", "↳", "—", "-", "⬆"}:
             company = previous_company or current_company
         elif company_i is not None:
@@ -241,12 +256,79 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
             title = NUFT_ROLE_NAMES.get(title.casefold(), title)
         if not company or not title:
             continue
-        location = _clean_text(cells[location_i]) if location_i is not None and location_i < len(cells) else ""
-        timing = _clean_text(cells[time_i]) if time_i is not None and time_i < len(cells) else ""
+        location = (
+            _clean_text(cells[location_i])
+            if location_i is not None and location_i < len(cells)
+            else ""
+        )
+        timing = (
+            _clean_text(cells[time_i])
+            if time_i is not None and time_i < len(cells)
+            else ""
+        )
         url = _choose_url(_links(line))
         if not url or "🔒" in line:
             continue
-        rows.append({"company": company, "title": title, "location": location, "timing": timing, "url": url})
+        rows.append(
+            {"company": company, "title": title, "location": location, "timing": timing, "url": url}
+        )
+    return rows
+
+
+def _html_rows(body: str) -> list[dict[str, str]]:
+    """Parse generated HTML tables used by several high-volume trackers.
+
+    GitHub READMEs frequently use rowspan for company names, so a continuation row
+    can have one fewer cell than its header. Preserve the previous company in that
+    common case instead of dropping the role.
+    """
+    soup = BeautifulSoup(body, "html.parser")
+    rows: list[dict[str, str]] = []
+    for table in soup.find_all("table"):
+        table_rows = table.find_all("tr")
+        if not table_rows:
+            continue
+        header_cells = table_rows[0].find_all(["th", "td"])
+        headers = [_header(cell.get_text(" ", strip=True)) for cell in header_cells]
+        company_i = _index(headers, COMPANY_HEADERS)
+        title_i = _index(headers, TITLE_HEADERS)
+        location_i = _index(headers, LOCATION_HEADERS)
+        time_i = _index(headers, TIME_HEADERS)
+        if title_i is None or company_i is None:
+            continue
+
+        previous_company = ""
+        for row in table_rows[1:]:
+            cells = row.find_all(["td", "th"])
+            if not cells:
+                continue
+            values = [_clean_text(cell.get_text(" ", strip=True)) for cell in cells]
+            nodes = list(cells)
+            if len(values) == len(headers) - 1 and company_i == 0:
+                values.insert(0, "")
+                nodes.insert(0, None)
+            if title_i >= len(values):
+                continue
+
+            company = values[company_i] if company_i < len(values) else ""
+            if company in {"", "↳", "—", "-", "⬆"}:
+                company = previous_company
+            else:
+                previous_company = company
+            title = values[title_i]
+            if not company or not title:
+                continue
+            location = values[location_i] if location_i is not None and location_i < len(values) else ""
+            timing = values[time_i] if time_i is not None and time_i < len(values) else ""
+            urls: list[str] = []
+            for cell in cells:
+                urls.extend(str(anchor.get("href")) for anchor in cell.find_all("a", href=True))
+            url = _choose_url(urls)
+            if not url or "🔒" in row.get_text(" ", strip=True):
+                continue
+            rows.append(
+                {"company": company, "title": title, "location": location, "timing": timing, "url": url}
+            )
     return rows
 
 
@@ -284,13 +366,15 @@ def _mixed_cycle_is_target(item: dict[str, Any]) -> bool:
     if "summer 2027" in season:
         return True
     title = str(_value(item, "title", "role", "position") or "").casefold()
-    return "2027" in title and "intern" in title and not any(term in title for term in ("fall", "winter", "spring"))
+    return "2027" in title and "intern" in title and not any(
+        term in title for term in ("fall", "winter", "spring")
+    )
 
 
 def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[list[Posting], int]:
     rows: list[dict[str, Any]]
     if spec.kind == "markdown":
-        rows = _markdown_rows(body)
+        rows = [*_markdown_rows(body), *_html_rows(body)]
     else:
         rows = _json_rows(json.loads(body), spec)
 
@@ -305,7 +389,16 @@ def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[lis
         url = str(_value(item, "url", "apply_url", "job_url", "application_url") or "").strip()
         if not company or not title or not url:
             continue
-        raw_time = _value(item, "timing", "date_posted", "posted_at", "first_seen_at", "date_added", "added", "age")
+        raw_time = _value(
+            item,
+            "timing",
+            "date_posted",
+            "posted_at",
+            "first_seen_at",
+            "date_added",
+            "added",
+            "age",
+        )
         sensor_at, precision = parse_sensor_time(raw_time, fetched_at)
         posting = Posting(
             company=company,
@@ -323,15 +416,32 @@ def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[lis
         )
         classified = classify(posting, source_confirms_2027=spec.cycle == "summer-2027")
         if spec.cycle == "summer-2027" and classified.target_match == "unknown":
-            classified = replace(classified, year=2027, season="summer", target_match="source_confirmed")
-        elif spec.cycle == "mixed" and "summer 2027" in str(_value(item, "season", "cycle") or "").casefold():
-            if classified.target_match == "unknown":
-                classified = replace(classified, year=2027, season="summer", target_match="source_confirmed")
+            classified = replace(
+                classified,
+                year=2027,
+                season="summer",
+                target_match="source_confirmed",
+            )
+        elif (
+            spec.cycle == "mixed"
+            and "summer 2027" in str(_value(item, "season", "cycle") or "").casefold()
+            and classified.target_match == "unknown"
+        ):
+            classified = replace(
+                classified,
+                year=2027,
+                season="summer",
+                target_match="source_confirmed",
+            )
         postings.append(classified)
 
     by_identity: dict[tuple[str, str, str], Posting] = {}
     for posting in postings:
-        identity = (posting.company.casefold(), posting.title.casefold(), posting.canonical_apply_url)
+        identity = (
+            posting.company.casefold(),
+            posting.title.casefold(),
+            posting.canonical_apply_url,
+        )
         existing = by_identity.get(identity)
         if existing is None or posting.market_event_at > existing.market_event_at:
             by_identity[identity] = posting
@@ -350,9 +460,24 @@ async def fetch_sensor(
             response = await client.get(spec.url)
             response.raise_for_status()
             postings, rows = parse_sensor(spec, response.text, fetched_at)
-            return postings, SensorRun(spec.name, spec.url, "ok", rows, len(postings), fetched_at.isoformat())
+            return postings, SensorRun(
+                spec.name,
+                spec.url,
+                "ok",
+                rows,
+                len(postings),
+                fetched_at.isoformat(),
+            )
         except Exception as exc:  # noqa: BLE001 - isolate one public sensor
-            return [], SensorRun(spec.name, spec.url, "failed", 0, 0, fetched_at.isoformat(), repr(exc)[:500])
+            return [], SensorRun(
+                spec.name,
+                spec.url,
+                "failed",
+                0,
+                0,
+                fetched_at.isoformat(),
+                repr(exc)[:500],
+            )
 
 
 async def fetch_all_sensors(
@@ -363,7 +488,10 @@ async def fetch_all_sensors(
 ) -> tuple[list[Posting], list[SensorRun]]:
     specs = specs or load_sensor_specs()
     semaphore = asyncio.Semaphore(max(1, concurrency))
-    limits = httpx.Limits(max_connections=max(16, concurrency * 2), max_keepalive_connections=max(8, concurrency))
+    limits = httpx.Limits(
+        max_connections=max(16, concurrency * 2),
+        max_keepalive_connections=max(8, concurrency),
+    )
     headers = {"User-Agent": "GAIA/7.0 market-sensor-wave (+https://github.com/catears124/GAIA)"}
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(timeout_seconds),
@@ -371,7 +499,9 @@ async def fetch_all_sensors(
         follow_redirects=True,
         headers=headers,
     ) as client:
-        outcomes = await asyncio.gather(*(fetch_sensor(client, spec, semaphore=semaphore) for spec in specs))
+        outcomes = await asyncio.gather(
+            *(fetch_sensor(client, spec, semaphore=semaphore) for spec in specs)
+        )
     postings: list[Posting] = []
     runs: list[SensorRun] = []
     for batch, run in outcomes:
