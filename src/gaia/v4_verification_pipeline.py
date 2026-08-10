@@ -10,6 +10,7 @@ from pathlib import Path
 from . import v4_pipeline
 from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
+from .v4_verification_plan import plan_verification_collectors
 
 DEFAULT_INVENTORY = v4_pipeline.DEFAULT_INVENTORY
 
@@ -26,19 +27,26 @@ async def run(
         previous = {}
     sanitized, migrated = sanitize_previous_snapshot(previous)
 
-    # The heavy verifier reuses v4_pipeline, but the public product now ingests the
-    # whole active technical-internship market and applies Summer 2027 only as a
-    # query filter. Patch the verifier's sensor boundary to the exact same contract
-    # so it cannot silently shrink back to Summer-2027-only while enriching leads.
+    # The heavy verifier reuses v4_pipeline, but v4 changes three boundaries:
+    # 1. ingest the whole active technical-internship market;
+    # 2. normalize heterogeneous sensor URLs/evidence before verification;
+    # 3. use a bounded hot-first plan so a globally paced Workday sweep can never
+    #    hold fresh employer verification hostage for ten minutes.
     original_fetch = v4_pipeline.fetch_all_sensors
     original_target = v4_pipeline.is_default_target
+    original_planner = v4_pipeline._verification_collectors
 
     async def filtered_fetch(*args, **kwargs):
         postings, runs = await original_fetch(*args, **kwargs)
         return normalize_sensor_postings(postings), runs
 
+    def hot_first_plan(postings, snapshot):
+        durable = v4_pipeline._seed_previous_boards(snapshot)
+        return plan_verification_collectors(postings, durable_postings=durable)
+
     v4_pipeline.fetch_all_sensors = filtered_fetch
     v4_pipeline.is_default_target = is_current_market_target
+    v4_pipeline._verification_collectors = hot_first_plan
     try:
         with tempfile.TemporaryDirectory(prefix="gaia-v4-verify-") as directory:
             safe_previous = Path(directory) / "previous.json"
@@ -52,6 +60,7 @@ async def run(
     finally:
         v4_pipeline.fetch_all_sensors = original_fetch
         v4_pipeline.is_default_target = original_target
+        v4_pipeline._verification_collectors = original_planner
 
     summary["legacy_snapshot_sanitized"] = migrated
     return summary
