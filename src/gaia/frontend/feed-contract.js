@@ -24,10 +24,13 @@
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
+  function sourceActivity(item) {
+    return parseTime(item.latest_posted_at) || parseTime(item.latest_sensor_reported_at);
+  }
+
   function itemActivity(item) {
     return parseTime(item.market_event_at) ||
-      parseTime(item.latest_posted_at) ||
-      parseTime(item.latest_sensor_reported_at) ||
+      sourceActivity(item) ||
       parseTime(item.market_first_seen_at) ||
       parseTime(item.first_detected_at);
   }
@@ -42,9 +45,11 @@
 
   function matchesTarget(item, target) {
     if (!target) return true;
-    const match = String(item.target_match || "");
-    if (target === "default") return TARGET_MATCHES.has(match);
-    return match === target;
+    const year = Number(item.year || 0);
+    const season = String(item.season || "").toLowerCase();
+    if (target === "exact") return year === 2027 && season === "summer";
+    if (target === "default" || target === "year_confirmed") return year === 2027;
+    return String(item.target_match || "") === target;
   }
 
   function compareText(left, right) {
@@ -100,7 +105,7 @@
       if (company && String(item.company || "").toLowerCase() !== company) return false;
       if (locationQuery && !locationText.includes(locationQuery)) return false;
       if (remote && !(item.remote || locationText.includes("remote"))) return false;
-      if (cutoff && itemActivity(item) < cutoff) return false;
+      if (cutoff && sourceActivity(item) < cutoff) return false;
       return true;
     });
   }
@@ -135,11 +140,9 @@
     const leads = all.filter(item => !isVerified(item));
     const companies = new Set(direct.map(item => String(item.company || "").trim().toLowerCase()).filter(Boolean));
     const active = direct.reduce((sum, item) => sum + Number(item.direct_openings || 0), 0);
-    const newVerified = direct.filter(item => itemActivity(item) >= cutoff).length;
+    const newVerified = direct.filter(item => sourceActivity(item) >= cutoff).length;
     const marketEvents = all.filter(item => itemActivity(item) >= cutoff).length;
-    const datedSignals = all.filter(item =>
-      Math.max(parseTime(item.latest_posted_at), parseTime(item.latest_sensor_reported_at)) >= cutoff
-    ).length;
+    const datedSignals = all.filter(item => sourceActivity(item) >= cutoff).length;
     const discoveries = all.filter(item =>
       Math.max(parseTime(item.market_first_seen_at), parseTime(item.first_detected_at)) >= cutoff
     ).length;
@@ -159,7 +162,7 @@
       lead_apps: leads.reduce((sum, item) => sum + Number(item.backstop_openings || 0), 0),
       verification_backlog: leads.filter(item => itemActivity(item) >= Date.now() - 14 * 86400000).length,
       activity_units: {
-        new_today: "verified_role_family_with_market_event_in_24h",
+        new_today: "verified_role_family_with_external_posted_or_reported_timestamp_in_24h",
         market_events_24h: "role_family_any_market_event",
         dated_market_events_24h: "role_family_with_employer_or_sensor_date",
       },
