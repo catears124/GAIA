@@ -7,6 +7,7 @@ on:
       - ".github/workflows/stateless-inventory-fallback.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_invariants.py"
       - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
       - "src/gaia/v4_sensor_pipeline.py"
@@ -42,6 +43,7 @@ jobs:
       GAIA_V4_LEAD_TTL_HOURS: "24"
       GAIA_V4_MIN_FAMILIES: "100"
       GAIA_V4_MIN_SENSORS: "3"
+      GAIA_V4_MIN_SENSOR_RECALL: "1.0"
       GAIA_V4_MAX_MARKET_AGE_HOURS: "96"
       GH_TOKEN: ${{ github.token }}
 
@@ -63,18 +65,22 @@ jobs:
           set -euo pipefail
           ruff check \
             src/gaia/v4_sensors.py \
+            src/gaia/v4_invariants.py \
             src/gaia/v4_market_filter.py \
             src/gaia/v4_migrate.py \
             src/gaia/v4_sensor_pipeline.py \
             src/gaia/v4_pipeline.py \
             src/gaia/v4_snapshot.py \
+            src/gaia/snapshot_fallback.py \
             tests/test_v4_sensors.py \
+            tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
             tests/test_v4_snapshot.py
           pytest -q \
             tests/test_v4_sensors.py \
+            tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
@@ -102,7 +108,7 @@ jobs:
               --output src/gaia/frontend/last-known-inventory.json \
             | tee v4-market-summary.json
 
-      - name: Audit market latency
+      - name: Audit market latency and recall
         shell: bash
         run: |
           set -euo pipefail
@@ -115,11 +121,15 @@ jobs:
           assert data.get("schema_version") == 4
           assert (data.get("v4") or {}).get("mode") == "market-sensor-pulse"
           families = data.get("family_index") or []
+          v4 = data.get("v4") or {}
+          recall = v4.get("sensor_recall") or {}
           health = ((data.get("responses") or {}).get("/api/health") or {})
           market = health.get("market") or {}
           stats = ((data.get("responses") or {}).get("/api/stats") or {})
           assert len(families) >= 100, len(families)
           assert int(market.get("sensor_current") or 0) >= 3, market
+          assert float(recall.get("recall") or 0) == 1.0, recall
+          assert int(recall.get("timestamp_drops") or 0) == 0, recall
 
           def ts(value):
               return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
@@ -132,6 +142,8 @@ jobs:
               "families": len(families),
               "freshest_market_event_at": freshest.isoformat(),
               "freshest_age_hours": round(age_hours, 3),
+              "sensor_recall": recall,
+              "dated_market_events_24h": stats.get("dated_market_events_24h"),
               "market_events_24h": stats.get("market_events_24h"),
               "new_verified_24h": stats.get("new_verified_24h"),
               "verification_backlog": stats.get("verification_backlog"),
