@@ -11,6 +11,7 @@ from . import v4_pipeline
 from .v4_invariants import validate_sensor_recall
 from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
+from .v4_openroles_sensor import fetch_all_market_sensors
 from .v4_verification_plan import plan_verification_collectors
 
 DEFAULT_INVENTORY = v4_pipeline.DEFAULT_INVENTORY
@@ -29,7 +30,8 @@ async def run(
     sanitized, migrated = sanitize_previous_snapshot(previous)
 
     # The heavy verifier reuses v4_pipeline, but v4 changes three boundaries:
-    # 1. ingest the whole active technical-internship market;
+    # 1. ingest the whole active technical-internship market, including a bounded
+    #    recent slice of OpenRoles' direct-ATS corpus;
     # 2. normalize heterogeneous sensor URLs/evidence before verification;
     # 3. use a bounded hot-first plan so a globally paced Workday sweep can never
     #    hold fresh employer verification hostage for ten minutes.
@@ -39,7 +41,12 @@ async def run(
     current_sensor_postings = []
 
     async def filtered_fetch(*args, **kwargs):
-        postings, runs = await original_fetch(*args, **kwargs)
+        concurrency = int(kwargs.get("concurrency") or sensor_concurrency)
+        timeout_seconds = float(kwargs.get("timeout_seconds") or 30.0)
+        postings, runs = await fetch_all_market_sensors(
+            concurrency=concurrency,
+            timeout_seconds=timeout_seconds,
+        )
         normalized = normalize_sensor_postings(postings)
         current_sensor_postings[:] = [
             posting for posting in normalized if is_current_market_target(posting)
