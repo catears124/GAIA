@@ -8,9 +8,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .classify import is_default_target
 from .models import Posting
-from .v4_market_filter import normalize_sensor_postings
+from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
 from .v4_pipeline import (
     _build_families,
@@ -48,7 +47,7 @@ async def run(
 
     sensor_raw, sensor_runs = await fetch_all_sensors(concurrency=sensor_concurrency)
     normalized = normalize_sensor_postings(sensor_raw)
-    sensor_postings = [posting for posting in normalized if is_default_target(posting)]
+    sensor_postings = [posting for posting in normalized if is_current_market_target(posting)]
     sensor_by_url: dict[str, list[Posting]] = defaultdict(list)
     for posting in sensor_postings:
         sensor_by_url[posting.canonical_apply_url].append(posting)
