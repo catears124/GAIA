@@ -180,6 +180,31 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
         if (seen := timestamp(item.get("market_first_seen_at") or item.get("first_detected_at"))) is not None
         and seen >= cutoff
     )
+    employer_posted = sum(
+        1
+        for item in all_visible
+        if (posted := timestamp(item.get("latest_posted_at"))) is not None and posted >= cutoff
+    )
+    sensor_reported = sum(
+        1
+        for item in all_visible
+        if (reported := timestamp(item.get("latest_sensor_reported_at"))) is not None and reported >= cutoff
+    )
+    dated_market_events = sum(
+        1
+        for item in all_visible
+        if max(
+            timestamp(item.get("latest_posted_at")) or datetime.min.replace(tzinfo=UTC),
+            timestamp(item.get("latest_sensor_reported_at")) or datetime.min.replace(tzinfo=UTC),
+        ) >= cutoff
+    )
+    first_seen_only = sum(
+        1
+        for item in all_visible
+        if activity(item) >= cutoff
+        and timestamp(item.get("latest_posted_at")) is None
+        and timestamp(item.get("latest_sensor_reported_at")) is None
+    )
     backlog = sum(1 for item in leads if activity(item) >= now - timedelta(days=14))
     return {
         "role_families": len(direct),
@@ -189,6 +214,10 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
         "new_24h": new_verified,
         "new_verified_24h": new_verified,
         "market_events_24h": market_events,
+        "dated_market_events_24h": dated_market_events,
+        "employer_posted_24h": employer_posted,
+        "sensor_reported_24h": sensor_reported,
+        "first_seen_only_24h": first_seen_only,
         "discovered_24h": discoveries,
         "verified_listings": active,
         "verified_families": len(direct),
@@ -197,7 +226,11 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
         "verification_backlog": backlog,
         "activity_units": {
             "new_today": "verified_role_family_with_market_event_in_24h",
-            "market_events_24h": "role_family",
+            "market_events_24h": "role_family_any_market_event",
+            "dated_market_events_24h": "role_family_with_employer_or_sensor_date",
+            "employer_posted_24h": "role_family_with_employer_posted_timestamp",
+            "sensor_reported_24h": "role_family_with_source_reported_timestamp",
+            "first_seen_only_24h": "role_family_with_only_gaia_first_seen_timestamp",
             "discovered_24h": "role_family",
         },
         "snapshot_stats_mode": "v4-market-first",
