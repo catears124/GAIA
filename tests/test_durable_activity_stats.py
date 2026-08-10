@@ -9,7 +9,7 @@ from gaia.db import Database
 from gaia.models import CollectorResult, Posting
 
 
-def test_found_today_is_a_discovery_event_not_an_active_only_count(
+def test_found_today_is_a_discovery_event_not_a_posting_date(
     tmp_path, monkeypatch
 ) -> None:
     database = Database(tmp_path / "durable-activity.db")
@@ -58,7 +58,11 @@ def test_found_today_is_a_discovery_event_not_an_active_only_count(
     body = response.json()
     assert body["role_families"] == 0
     assert body["active_listings"] == 0
-    assert body["new_today"] == 1
+    assert body["new_today"] == 0
+    assert body["new_verified_24h"] == 0
+    assert body["discovered_24h"] == 1
     assert body["new_urls_24h"] == 1
     assert body["removed_urls_24h"] == 1
-    assert body["activity_units"]["new_today"] == "role_family"
+    assert body["activity_units"]["new_today"] == (
+        "verified_role_family_with_employer_posted_timestamp_in_24h"
+    )
