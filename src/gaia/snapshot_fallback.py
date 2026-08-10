@@ -10,7 +10,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 _SNAPSHOT_PATH = Path(__file__).with_name("frontend") / "last-known-inventory.json"
-_TECH_CATEGORIES = {"software", "ml-ai", "quant", "security", "data", "product", "other-technical"}
+_TECH_CATEGORIES = {"software", "ml-ai", "quant", "security", "data", "product", "hardware", "other-technical"}
 _TARGET_MATCHES = {"exact", "year_confirmed", "source_confirmed"}
 
 
@@ -32,10 +32,12 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _activity(item: dict[str, Any]) -> datetime:
-    # Employer posting time is authoritative. Discovery is only a fallback for an
-    # undated role; recovering an old posting today must not make it a new posting.
+    """Best known market event, independent of whether GAIA has verified it yet."""
     return (
-        _timestamp(item.get("latest_posted_at"))
+        _timestamp(item.get("market_event_at"))
+        or _timestamp(item.get("latest_posted_at"))
+        or _timestamp(item.get("latest_sensor_reported_at"))
+        or _timestamp(item.get("market_first_seen_at"))
         or _timestamp(item.get("first_detected_at"))
         or datetime.min.replace(tzinfo=UTC)
     )
@@ -69,14 +71,10 @@ def _sort_items(items: list[dict[str, Any]], sort: str) -> None:
         )
         return
 
-    # Python sorts tuples lexicographically. Negative booleans put verified and dated
-    # rows first while the timestamp fields remain descending via reverse=True.
     if sort == "verified":
         items.sort(
             key=lambda item: (
-                _verified(item),
                 _verified_activity(item),
-                item.get("latest_posted_at") is not None,
                 _activity(item),
                 str(item.get("family_key") or ""),
             ),
@@ -84,11 +82,13 @@ def _sort_items(items: list[dict[str, Any]], sort: str) -> None:
         )
         return
 
+    # "Newest" must mean newest market event. The old implementation sorted
+    # verified rows ahead of all leads, which made a fresh role disappear below
+    # week-old inventory solely because its employer check had not finished yet.
     items.sort(
         key=lambda item: (
-            _verified(item),
-            item.get("latest_posted_at") is not None,
             _activity(item),
+            _verified(item),
             _verified_activity(item),
             str(item.get("family_key") or ""),
         ),
@@ -175,29 +175,41 @@ def _families(snapshot: dict[str, Any], request: Request) -> JSONResponse:
 
 
 def _stats(snapshot: dict[str, Any]) -> JSONResponse:
-    items = [
+    all_items = [
         item
         for item in snapshot.get("family_index") or []
-        if isinstance(item, dict) and _verified(item) and item.get("category") in _TECH_CATEGORIES
+        if isinstance(item, dict) and item.get("category") in _TECH_CATEGORIES
     ]
+    items = [item for item in all_items if _verified(item)]
+    leads = [item for item in all_items if not _verified(item)]
     companies = {str(item.get("company", "")).casefold() for item in items if item.get("company")}
     active = sum(int(item.get("direct_openings") or 0) for item in items)
     cutoff = datetime.now(UTC) - timedelta(hours=24)
-    new_families = sum(
+    new_verified = sum(1 for item in items if _activity(item) >= cutoff)
+    market_events = sum(1 for item in all_items if _activity(item) >= cutoff)
+    discoveries = sum(
         1
-        for item in items
-        if (detected := _timestamp(item.get("first_detected_at"))) is not None and detected >= cutoff
+        for item in all_items
+        if (detected := _timestamp(item.get("market_first_seen_at") or item.get("first_detected_at"))) is not None
+        and detected >= cutoff
     )
     payload = {
         "role_families": len(items),
         "active_listings": active,
         "companies": len(companies),
-        "new_today": new_families,
-        "new_24h": new_families,
-        "new_families_24h": new_families,
+        "new_today": new_verified,
+        "new_24h": new_verified,
+        "new_verified_24h": new_verified,
+        "market_events_24h": market_events,
+        "discovered_24h": discoveries,
         "verified_listings": active,
         "verified_families": len(items),
-        "activity_units": {"new_today": "role_family", "url_movement": "canonical_apply_url"},
+        "leads": len(leads),
+        "lead_apps": sum(int(item.get("backstop_openings") or 0) for item in leads),
+        "activity_units": {
+            "new_today": "verified_role_family_with_market_event_in_24h",
+            "market_events_24h": "role_family",
+        },
         "stale": True,
         "snapshot_generated_at": snapshot.get("generated_at"),
         "source_activity_at": snapshot.get("source_activity_at"),
