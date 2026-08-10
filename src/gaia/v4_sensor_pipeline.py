@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .classify import is_default_target
 from .models import Posting
+from .v4_migrate import sanitize_previous_snapshot
 from .v4_pipeline import (
     _build_families,
     _health,
@@ -33,14 +34,15 @@ async def run(
 ) -> dict[str, object]:
     """Refresh the public market view without waiting for employer verification.
 
-    The previous verified observations are retained under their direct-evidence TTL.
-    Successful sensors atomically replace only their own previous observations. That
-    means a slow or blocked employer page cannot stop a newly detected role from
-    appearing as a clearly labeled lead on the next five-minute market pulse.
+    Previous verified observations are retained under their direct-evidence TTL.
+    Successful sensors atomically replace only their own previous observations. A
+    pre-v4 snapshot is first stripped of legacy leads whose old shape cannot prove
+    direct employer verification.
     """
     previous = json.loads(previous_path.read_text(encoding="utf-8")) if previous_path.exists() else {}
     if not isinstance(previous, dict):
         previous = {}
+    previous, migrated_legacy = sanitize_previous_snapshot(previous)
     started_at = datetime.now(UTC)
 
     sensor_raw, sensor_runs = await fetch_all_sensors(concurrency=sensor_concurrency)
@@ -97,6 +99,7 @@ async def run(
             "sensor_postings": len(sensor_postings),
             "sensor_unique_urls": len(sensor_by_url),
             "verification_deferred": True,
+            "legacy_snapshot_sanitized": migrated_legacy,
             "stats": snapshot_stats(families),
         },
     }
@@ -113,6 +116,7 @@ async def run(
         "sensors_total": len(sensor_runs),
         "sensor_postings": len(sensor_postings),
         "sensor_unique_urls": len(sensor_by_url),
+        "legacy_snapshot_sanitized": migrated_legacy,
         "stats": snapshot_stats(families),
         "output": str(output_path),
     }
