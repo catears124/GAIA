@@ -10,6 +10,7 @@ on:
       - "src/gaia/v4_market_filter.py"
       - "src/gaia/v4_migrate.py"
       - "src/gaia/v4_pipeline.py"
+      - "src/gaia/v4_verification_plan.py"
       - "src/gaia/v4_verification_pipeline.py"
       - "src/gaia/v4_snapshot.py"
       - "src/gaia/models.py"
@@ -28,22 +29,32 @@ concurrency:
 
 jobs:
   verify:
-    name: Market sensors → employer/ATS verification
+    name: Hot pages → cheap boards → rotating Workday
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 8
     environment: production
     env:
       GAIA_AUTO_MIGRATE: "0"
       GAIA_V4_SENSOR_CONCURRENCY: "12"
-      GAIA_V4_VERIFY_CONCURRENCY: "48"
-      GAIA_V4_VERIFY_TIMEOUT: "25"
-      GAIA_V4_VERIFY_COLLECTOR_LIMIT: "2000"
-      GAIA_V4_DURABLE_BOARD_LIMIT: "1200"
+      GAIA_V4_VERIFY_CONCURRENCY: "64"
+      GAIA_V4_VERIFY_TIMEOUT: "12"
+      GAIA_V4_VERIFY_COLLECTOR_LIMIT: "1400"
+      GAIA_V4_HOT_PAGE_LIMIT: "900"
+      GAIA_V4_HOT_PAGE_BATCH: "40"
+      GAIA_V4_WORKDAY_BOARD_BUDGET: "12"
+      GAIA_V4_VERIFY_ROTATION_SECONDS: "900"
       GAIA_V4_DIRECT_TTL_HOURS: "72"
       GAIA_V4_LEAD_TTL_HOURS: "24"
       GAIA_V4_MIN_FAMILIES: "100"
       GAIA_V4_MIN_SENSORS: "3"
       GAIA_V4_MAX_MARKET_AGE_HOURS: "96"
+      GAIA_VERIFY_CONCURRENCY: "8"
+      GAIA_WORKDAY_MAX_PER_TERM: "60"
+      GAIA_WORKDAY_DETAIL_BUDGET: "0"
+      GAIA_WORKDAY_RETRIES: "1"
+      GAIA_WORKDAY_GLOBAL_CONCURRENCY: "2"
+      GAIA_WORKDAY_MIN_INTERVAL: "0.5"
+      GAIA_WORKDAY_JITTER: "0.1"
       GH_TOKEN: ${{ github.token }}
 
     steps:
@@ -67,18 +78,21 @@ jobs:
             src/gaia/v4_market_filter.py \
             src/gaia/v4_migrate.py \
             src/gaia/v4_pipeline.py \
+            src/gaia/v4_verification_plan.py \
             src/gaia/v4_verification_pipeline.py \
             src/gaia/v4_snapshot.py \
             tests/test_v4_sensors.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
+            tests/test_v4_verification_plan.py \
             tests/test_v4_snapshot.py
           pytest -q \
             tests/test_v4_sensors.py \
             tests/test_v4_market_filter.py \
             tests/test_v4_migrate.py \
             tests/test_v4_pipeline.py \
+            tests/test_v4_verification_plan.py \
             tests/test_v4_snapshot.py
 
       - name: Restore latest market snapshot
@@ -97,7 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=20s 660s \
+          timeout --signal=TERM --kill-after=15s 300s \
             python -m gaia.v4_verification_pipeline \
               --previous src/gaia/frontend/last-known-inventory.json \
               --output src/gaia/frontend/last-known-inventory.json \
@@ -135,7 +149,9 @@ jobs:
               "verification_collectors": verification.get("selected"),
               "verification_sources_refreshed": verification.get("refreshed"),
               "verification_postings": verification.get("postings"),
+              "verification_statuses": verification.get("statuses"),
               "new_verified_24h": stats.get("new_verified_24h"),
+              "dated_market_events_24h": stats.get("dated_market_events_24h"),
               "market_events_24h": stats.get("market_events_24h"),
               "verification_backlog": stats.get("verification_backlog"),
           }, sort_keys=True))
