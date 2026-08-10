@@ -29,7 +29,7 @@ def source_activity(item: dict[str, object]) -> datetime | None:
 
 
 def activity(item: dict[str, object]) -> datetime:
-    """The best market signal drives feed recency; verification never drives recency."""
+    """The best market signal, including GAIA discovery when no external date exists."""
     return (
         timestamp(item.get("market_event_at"))
         or source_activity(item)
@@ -133,16 +133,27 @@ def sort_families(items: list[dict[str, object]], sort: str = "newest") -> None:
         return
     if sort == "verified":
         items.sort(
-            key=lambda item: (verified_activity(item), activity(item), str(item.get("family_key") or "")),
+            key=lambda item: (verified_activity(item), source_activity(item) or datetime.min.replace(tzinfo=UTC), str(item.get("family_key") or "")),
+            reverse=True,
+        )
+        return
+    if sort == "signal":
+        items.sort(
+            key=lambda item: (activity(item), verified(item), verified_activity(item), str(item.get("family_key") or "")),
             reverse=True,
         )
         return
 
-    # "newest" is the newest known market signal. A fresh lead can beat an older
-    # verified role, but the UI must label the signal honestly as Posted/Reported/
-    # Found. Filters named "posted within" use source_activity(), never first_seen.
+    # `newest` is source-dated. Known employer/sensor dates beat undated GAIA-only
+    # discoveries; first-seen is only a tiebreaker among otherwise undated rows.
     items.sort(
-        key=lambda item: (activity(item), verified(item), verified_activity(item), str(item.get("family_key") or "")),
+        key=lambda item: (
+            source_activity(item) is not None,
+            source_activity(item) or datetime.min.replace(tzinfo=UTC),
+            timestamp(item.get("market_first_seen_at") or item.get("first_detected_at")) or datetime.min.replace(tzinfo=UTC),
+            verified(item),
+            str(item.get("family_key") or ""),
+        ),
         reverse=True,
     )
 
@@ -196,9 +207,6 @@ def stats(index: list[dict[str, object]]) -> dict[str, object]:
     lead_apps = sum(int(item.get("backstop_openings") or 0) for item in leads)
     companies = {str(item.get("company") or "").casefold() for item in direct if item.get("company")}
 
-    # "new verified" means a verified job with an external posting/report signal
-    # in the window. Discovering an old undated role today does not make it newly
-    # posted, and re-verifying an old role certainly does not either.
     new_verified = sum(
         1 for item in direct if (dated := source_activity(item)) is not None and dated >= cutoff
     )
