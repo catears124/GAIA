@@ -90,7 +90,9 @@ loadStats = async function loadStatsV4() {
     const data = await api("/api/stats");
     $("#metric-active").textContent = formatNumber(data.active_listings || data.verified_listings || 0);
     $("#metric-companies").textContent = formatNumber(data.companies || 0);
-    $("#metric-new").textContent = formatNumber(data.dated_market_events_24h ?? data.market_events_24h ?? 0);
+    $("#metric-new").textContent = formatNumber(
+      data.dated_market_events_24h ?? data.new_verified_24h ?? data.new_today ?? data.market_events_24h ?? 0
+    );
   } catch {
     $("#metric-active").textContent = "—";
     $("#metric-companies").textContent = "—";
@@ -111,8 +113,8 @@ refreshHealth = async function refreshHealthV4() {
     const node = $("#freshness");
     node.className = `freshness ${data.ok ? "fresh" : unhealthy ? "stale" : "fresh"}`;
     if (inventory.kind === "market-sensors") {
-      const recent = Number(market.market_events_24h ?? market.new_verified_24h ?? 0);
-      node.lastElementChild.textContent = `${formatNumber(fresh)} / ${formatNumber(total)} market sensors current · ${formatNumber(recent)} fresh signals / 24h`;
+      const recent = Number(market.dated_market_events_24h ?? market.new_verified_24h ?? 0);
+      node.lastElementChild.textContent = `${formatNumber(fresh)} / ${formatNumber(total)} market sensors current · ${formatNumber(recent)} dated signals / 24h`;
     } else {
       node.lastElementChild.textContent = data.running
         ? `${formatNumber(fresh)} / ${formatNumber(total)} sources current · crawling`
