@@ -5,53 +5,45 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/stateless-inventory-fallback.yml"
-      - "src/gaia/default_sources.yaml"
-      - "src/gaia/stateless_hot_inventory.py"
-      - "src/gaia/stateless_inventory.py"
-      - "src/gaia/smb_ats_collectors.py"
-      - "src/gaia/platform_sitemap_census.py"
-      - "src/gaia/database_failover.py"
-      - "tests/test_stateless_hot_inventory.py"
-      - "tests/test_smb_ats_collectors.py"
-      - "tests/test_stateless_inventory.py"
+      - "src/gaia/v4_sources.yaml"
+      - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_pipeline.py"
+      - "src/gaia/v4_snapshot.py"
+      - "src/gaia/models.py"
+      - "src/gaia/snapshot_fallback.py"
+      - "tests/test_v4_*.py"
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      force:
-        description: "Run stateless refresh even if Postgres is reachable"
-        required: false
-        default: "false"
 
 permissions:
   contents: write
   statuses: write
 
 concurrency:
-  group: gaia-stateless-inventory-fallback
+  group: gaia-v4-market-feed
   cancel-in-progress: true
 
 jobs:
   refresh:
-    name: Refresh public snapshot without Postgres
+    name: Market sensors → employer verification → snapshot
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
     env:
-      POSTGRES_URL_NON_POOLING: ${{ secrets.POSTGRES_URL_NON_POOLING }}
-      POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-      POSTGRES_PRISMA_URL: ${{ secrets.POSTGRES_PRISMA_URL }}
-      GAIA_DATABASE_URL: ${{ secrets.POSTGRES_URL_NON_POOLING || secrets.POSTGRES_URL || secrets.POSTGRES_PRISMA_URL }}
       GAIA_AUTO_MIGRATE: "0"
-      GAIA_STATELESS_HOT_CONCURRENCY: "32"
-      GAIA_STATELESS_HOT_MAX_COLLECTORS: "500"
-      GAIA_STATELESS_HOT_SCHEMA_LIMIT: "120"
-      GAIA_STATELESS_HOT_WORKDAY_LIMIT: "24"
-      GAIA_STATELESS_SHARDS: "16"
-      GAIA_STATELESS_BATCH_SHARDS: "4"
-      GAIA_STATELESS_CONCURRENCY: "48"
-      GAIA_STATELESS_HTTP_TIMEOUT: "15"
+      GAIA_V4_SENSOR_CONCURRENCY: "8"
+      GAIA_V4_VERIFY_CONCURRENCY: "48"
+      GAIA_V4_VERIFY_TIMEOUT: "25"
+      GAIA_V4_VERIFY_COLLECTOR_LIMIT: "2000"
+      GAIA_V4_DURABLE_BOARD_LIMIT: "1200"
+      GAIA_V4_DIRECT_TTL_HOURS: "72"
+      GAIA_V4_LEAD_TTL_HOURS: "24"
+      GAIA_V4_MIN_FAMILIES: "100"
+      GAIA_V4_MIN_SENSORS: "3"
+      GAIA_V4_MAX_MARKET_AGE_HOURS: "96"
       GH_TOKEN: ${{ github.token }}
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,233 +54,129 @@ jobs:
           python-version: "3.13"
           cache: pip
 
-      - name: Install GAIA and test dependencies
+      - name: Install
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Verify stateless fallback lanes
+      - name: Verify v4 contract
         run: |
           set -euo pipefail
           ruff check \
-            src/gaia/smb_ats_collectors.py \
-            src/gaia/stateless_hot_inventory.py \
-            src/gaia/stateless_inventory.py \
-            tests/test_smb_ats_collectors.py \
-            tests/test_stateless_hot_inventory.py \
-            tests/test_stateless_inventory.py
+            src/gaia/v4_sensors.py \
+            src/gaia/v4_pipeline.py \
+            src/gaia/v4_snapshot.py \
+            tests/test_v4_sensors.py \
+            tests/test_v4_pipeline.py \
+            tests/test_v4_snapshot.py
           pytest -q \
-            tests/test_smb_ats_collectors.py \
-            tests/test_stateless_hot_inventory.py \
-            tests/test_stateless_inventory.py
+            tests/test_v4_sensors.py \
+            tests/test_v4_pipeline.py \
+            tests/test_v4_snapshot.py
 
-      - name: Check whether primary Postgres path is healthy
-        id: db
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          python -m gaia.database_failover \
-            --timeout-seconds 12 \
-            --connect-timeout 4 \
-            --max-delay-seconds 2 \
-            --json-output stateless-db-probe.json
-
-      - name: Decide fallback activation
-        id: gate
+      - name: Restore previous durable snapshot
         shell: bash
-        env:
-          FORCE: ${{ inputs.force || 'false' }}
-        run: |
-          if [ "$FORCE" = true ] || [ "${{ steps.db.outcome }}" != success ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Restore durable public inventory
-        if: steps.gate.outputs.run == 'true'
         run: |
           set -euo pipefail
           mkdir -p src/gaia/frontend
-          git fetch origin snapshot-data
-          git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json \
-            > src/gaia/frontend/last-known-inventory.json
+          if git fetch origin snapshot-data && \
+             git cat-file -e origin/snapshot-data:src/gaia/frontend/last-known-inventory.json 2>/dev/null; then
+            git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json \
+              > src/gaia/frontend/last-known-inventory.json
+          fi
           test -s src/gaia/frontend/last-known-inventory.json
 
-      - name: Refresh high-yield 2027 registries and employer sources
-        if: steps.gate.outputs.run == 'true'
-        id: hot
+      - name: Run v4 market-first refresh
+        id: v4
         shell: bash
         run: |
           set -euo pipefail
-          rm -f stateless-hot-summary.json
-          if timeout --signal=TERM --kill-after=15s 480s \
-            python -m gaia.stateless_hot_inventory \
+          timeout --signal=TERM --kill-after=20s 900s \
+            python -m gaia.v4_pipeline \
               --previous src/gaia/frontend/last-known-inventory.json \
               --output src/gaia/frontend/last-known-inventory.json \
-              --concurrency "$GAIA_STATELESS_HOT_CONCURRENCY" \
-            | tee stateless-hot-summary.json; then
-            description=$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("stateless-hot-summary.json").read_text())
-          print(
-              f"Hot: registries={data.get('registry_sources', 0)} "
-              f"leads={data.get('registry_target_postings', 0)} "
-              f"direct_sources={data.get('direct_sources', 0)} "
-              f"verified={data.get('direct_target_postings', 0)}"
-          )
-          PY
-            )
-            echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
-          else
-            echo "High-yield stateless refresh failed; keeping durable snapshot and continuing long-tail sweep." >&2
-            rm -f stateless-hot-summary.json
-            echo "description=Hot refresh failed; long-tail fallback continued" >> "$GITHUB_OUTPUT"
-          fi
+            | tee v4-summary.json
 
-      - name: Refresh complete-feed tenant census
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          python -m gaia.platform_sitemap_census \
-            --snapshot-output platform-sitemap-census.json \
-            | tee platform-sitemap-summary.json
-
-      - name: Refresh tenant shards directly
-        if: steps.gate.outputs.run == 'true'
-        id: stateless
+      - name: Audit market freshness
         shell: bash
-        env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
         run: |
           set -euo pipefail
-          shard_list=$(python - <<'PY'
-          import os
+          python - <<'PY'
+          import json
           from datetime import UTC, datetime
-
-          shards = max(1, int(os.environ.get("GAIA_STATELESS_SHARDS", "16")))
-          batch = max(1, min(shards, int(os.environ.get("GAIA_STATELESS_BATCH_SHARDS", "4"))))
-          slot = int(datetime.now(UTC).timestamp() // 300)
-          batches = max(1, (shards + batch - 1) // batch)
-          start = (slot % batches) * batch
-          print(" ".join(str(index) for index in range(start, min(start + batch, shards))))
-          PY
-          )
-          if [[ "$COMMIT_MESSAGE" == *"[full-sweep]"* ]]; then
-            shard_list=$(seq 0 $((GAIA_STATELESS_SHARDS - 1)))
-            echo "Bootstrap full stateless sweep enabled."
-          else
-            echo "Refreshing bounded stateless batch: $shard_list"
-          fi
-
-          rm -rf stateless-summaries
-          mkdir -p stateless-summaries
-          successes=0
-          for shard in $shard_list; do
-            echo "Refreshing stateless shard $shard/$GAIA_STATELESS_SHARDS"
-            if timeout --signal=TERM --kill-after=15s 610s \
-              python -m gaia.stateless_inventory \
-                --census platform-sitemap-census.json \
-                --previous src/gaia/frontend/last-known-inventory.json \
-                --output src/gaia/frontend/last-known-inventory.json \
-                --shards "$GAIA_STATELESS_SHARDS" \
-                --shard-index "$shard" \
-                --concurrency "$GAIA_STATELESS_CONCURRENCY" \
-              | tee "stateless-summaries/shard-${shard}.json"; then
-              successes=$((successes + 1))
-            else
-              echo "Shard $shard failed; preserving its previous snapshot rows and continuing." >&2
-              rm -f "stateless-summaries/shard-${shard}.json"
-            fi
-          done
-          test "$successes" -gt 0
-
-          python - <<'PY'
-          import json
           from pathlib import Path
 
-          rows = []
-          for path in sorted(Path("stateless-summaries").glob("shard-*.json")):
-              try:
-                  rows.append(json.loads(path.read_text()))
-              except (OSError, json.JSONDecodeError):
-                  continue
-          if not rows:
-              raise SystemExit("no successful stateless shard summaries")
-          aggregate = {
-              "shards_run": [row.get("shard") for row in rows],
-              "shards_succeeded": len(rows),
-              "shards": rows[-1].get("shards"),
-              "selected_sources": sum(int(row.get("selected_sources", 0)) for row in rows),
-              "refreshed_sources": sum(int(row.get("refreshed_sources", 0)) for row in rows),
-              "target_postings": sum(int(row.get("target_postings", 0)) for row in rows),
-              "families": rows[-1].get("families"),
-          }
-          hot = Path("stateless-hot-summary.json")
-          if hot.exists():
-              try:
-                  hot_data = json.loads(hot.read_text())
-              except (OSError, json.JSONDecodeError):
-                  hot_data = {}
-              aggregate["hot_registry_targets"] = int(hot_data.get("registry_target_postings", 0))
-              aggregate["hot_direct_targets"] = int(hot_data.get("direct_target_postings", 0))
-              aggregate["hot_direct_sources"] = int(hot_data.get("direct_sources", 0))
-          Path("stateless-inventory-summary.json").write_text(
-              json.dumps(aggregate, sort_keys=True) + "\n"
-          )
-          print(json.dumps(aggregate, sort_keys=True))
+          path = Path("src/gaia/frontend/last-known-inventory.json")
+          data = json.loads(path.read_text())
+          assert data.get("schema_version") == 4, data.get("schema_version")
+          families = data.get("family_index") or []
+          health = ((data.get("responses") or {}).get("/api/health") or {})
+          market = health.get("market") or {}
+          stats = ((data.get("responses") or {}).get("/api/stats") or {})
+          assert len(families) >= 100, len(families)
+          assert int(market.get("sensor_current") or 0) >= 3, market
+
+          def ts(value):
+              return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+
+          freshest = max((ts(row["market_event_at"]) for row in families if row.get("market_event_at")), default=None)
+          assert freshest is not None
+          age_hours = (datetime.now(UTC) - freshest).total_seconds() / 3600
+          assert age_hours <= 96, age_hours
+          direct = sum(int(row.get("direct_openings") or 0) for row in families)
+          leads = sum(int(row.get("backstop_openings") or 0) for row in families)
+          print(json.dumps({
+              "families": len(families),
+              "direct_openings": direct,
+              "lead_openings": leads,
+              "freshest_market_event_at": freshest.isoformat(),
+              "freshest_age_hours": round(age_hours, 2),
+              "new_verified_24h": stats.get("new_verified_24h"),
+              "market_events_24h": stats.get("market_events_24h"),
+              "verification_backlog": stats.get("verification_backlog"),
+              "sensors": f"{market.get('sensor_current')}/{market.get('sensor_total')}",
+          }, sort_keys=True))
+
+          for row in sorted(families, key=lambda item: item.get("market_event_at") or "", reverse=True)[:20]:
+              print(
+                  row.get("market_event_at"),
+                  "verified" if row.get("verified") else "lead",
+                  row.get("company"),
+                  "—",
+                  row.get("title"),
+              )
           PY
 
-          description=$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("stateless-inventory-summary.json").read_text())
-          print(
-              f"Hot verified={data.get('hot_direct_targets', 0)} "
-              f"leads={data.get('hot_registry_targets', 0)}; "
-              f"longtail targets={data.get('target_postings', 0)} "
-              f"sources={data.get('refreshed_sources', 0)}/{data.get('selected_sources', 0)}"
-          )
-          PY
-          )
-          echo "description=${description:0:140}" >> "$GITHUB_OUTPUT"
+      - name: Upload branch evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaia-v4-market-feed-${{ github.run_id }}
+          path: |
+            src/gaia/frontend/last-known-inventory.json
+            v4-summary.json
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Validate public snapshot contract
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from pathlib import Path
-          from gaia.snapshot_validation import validate_snapshot_file
-          report = validate_snapshot_file(
-              Path("src/gaia/frontend/last-known-inventory.json"),
-              max_age_hours=1,
-          )
-          print(
-              f"roles={report.roles} expected={report.expected_roles} "
-              f"age_hours={report.age_hours:.3f} size_mb={report.size_mb:.2f}"
-          )
-          PY
-
-      - name: Publish refreshed snapshot to data-only branch
-        if: steps.gate.outputs.run == 'true'
+      - name: Publish production snapshot
+        if: github.ref == 'refs/heads/main' && success()
+        shell: bash
         run: |
           set -euo pipefail
           cp src/gaia/frontend/last-known-inventory.json /tmp/last-known-inventory.json
           git fetch origin snapshot-data
-          rm -rf /tmp/gaia-stateless-data
-          git worktree add /tmp/gaia-stateless-data origin/snapshot-data
-          destination=/tmp/gaia-stateless-data/src/gaia/frontend/last-known-inventory.json
+          rm -rf /tmp/gaia-v4-data
+          git worktree add /tmp/gaia-v4-data origin/snapshot-data
+          destination=/tmp/gaia-v4-data/src/gaia/frontend/last-known-inventory.json
           mkdir -p "$(dirname "$destination")"
           cp /tmp/last-known-inventory.json "$destination"
-          cd /tmp/gaia-stateless-data
+          cd /tmp/gaia-v4-data
           if git diff --quiet -- src/gaia/frontend/last-known-inventory.json; then
-            echo "Stateless snapshot unchanged."
+            echo "Snapshot unchanged."
             exit 0
           fi
-          git config user.name "gaia-stateless-bot"
+          git config user.name "gaia-v4-bot"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add src/gaia/frontend/last-known-inventory.json
-          git commit -m "data: stateless high-yield and direct-source inventory refresh"
+          git commit -m "data: v4 market-first inventory refresh"
           for attempt in 1 2 3; do
             if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then
               exit 0
@@ -296,45 +184,3 @@ jobs:
             sleep $((attempt * 5))
           done
           exit 1
-
-      - name: Upload stateless evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: stateless-inventory-${{ github.run_id }}
-          path: |
-            stateless-db-probe.json
-            stateless-hot-summary.json
-            platform-sitemap-census.json
-            platform-sitemap-summary.json
-            stateless-inventory-summary.json
-            stateless-summaries/
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Publish fallback status
-        if: always()
-        env:
-          DESCRIPTION: ${{ steps.stateless.outputs.description || steps.hot.outputs.description || 'Stateless fallback not required or did not complete' }}
-        run: |
-          if [ "${{ steps.gate.outputs.run }}" != true ]; then
-            state=success
-            description="Primary Postgres reachable; stateless fallback idle"
-          elif [ "${{ steps.stateless.outcome }}" = success ]; then
-            state=success
-            description="$DESCRIPTION"
-          else
-            state=failure
-            description="Stateless direct-source inventory refresh failed"
-          fi
-          payload=$(jq -n \
-            --arg state "$state" \
-            --arg context gaia/stateless-inventory \
-            --arg description "${description:0:140}" \
-            --arg target_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            '{state:$state,context:$context,description:$description,target_url:$target_url}')
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
-            -X POST -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -d "$payload"
