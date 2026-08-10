@@ -40,7 +40,9 @@ sensors:
     url: https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/jobs.json
     priority: 100
 
-  # These market trackers intentionally span more than one active college cycle.
+  # SpeedyApply maintains separate SWE and AI/ML/Data boards. Treat both as market
+  # sensors; they are complementary, not substitutes, and each contains internships
+  # that never appear in the other board.
   - name: speedy-swe-2027-us
     kind: markdown
     cycle: active
@@ -53,16 +55,22 @@ sensors:
     url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
     priority: 95
 
+  - name: speedy-ai-2027-us
+    kind: markdown
+    cycle: active
+    url: https://raw.githubusercontent.com/speedyapply/2027-AI-College-Jobs/main/README.md
+    priority: 100
+
+  - name: speedy-ai-2027-intl
+    kind: markdown
+    cycle: active
+    url: https://raw.githubusercontent.com/speedyapply/2027-AI-College-Jobs/main/INTERN_INTL.md
+    priority: 95
+
   - name: faang-direct-crawler
     kind: markdown
     cycle: active
     url: https://raw.githubusercontent.com/Emjumaev/FAANG-2027-Internships-Tracker/main/README.md
-    priority: 90
-
-  - name: dreamwork-direct-crawler
-    kind: markdown
-    cycle: active
-    url: https://raw.githubusercontent.com/dreamworkhq/Tech-Internships-2027/main/README.md
     priority: 90
 
   # Despite the repository name, this is a real-time all-cycle internship board.
@@ -74,9 +82,11 @@ sensors:
     url: https://raw.githubusercontent.com/zapplyjobs/Internships-2027/main/README.md
     priority: 100
 
+  # This repository explicitly includes Summer 2027 plus fall/winter/spring terms,
+  # so it is an active-cycle sensor rather than a Summer-only authority.
   - name: sndsh404-2027
     kind: markdown
-    cycle: summer-2027
+    cycle: active
     url: https://raw.githubusercontent.com/sndsh404/summer-2027-internships/main/README.md
     priority: 85
 
