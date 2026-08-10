@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import Posting
+from .v4_invariants import validate_sensor_recall
 from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
 from .v4_pipeline import (
@@ -68,6 +69,7 @@ async def run(
     )
     families = _build_families([*preserved, *incoming])
     _validate(families, sensor_runs)
+    sensor_recall = validate_sensor_recall(sensor_postings, families, now=now)
 
     generated_at = datetime.now(UTC)
     verify_summary: dict[str, object] = {
@@ -99,6 +101,7 @@ async def run(
             "started_at": started_at.isoformat(),
             "sensor_postings": len(sensor_postings),
             "sensor_unique_urls": len(sensor_by_url),
+            "sensor_recall": sensor_recall,
             "verification_deferred": True,
             "legacy_snapshot_sanitized": migrated_legacy,
             "stats": snapshot_stats(families),
@@ -117,6 +120,7 @@ async def run(
         "sensors_total": len(sensor_runs),
         "sensor_postings": len(sensor_postings),
         "sensor_unique_urls": len(sensor_by_url),
+        "sensor_recall": sensor_recall,
         "legacy_snapshot_sanitized": migrated_legacy,
         "stats": snapshot_stats(families),
         "output": str(output_path),
