@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 
 from gaia import api as legacy
-from gaia.product_api import _activity_stats, _live_order_clause, live_families
+from gaia.product_api import _activity_stats, _live_order_clause, live_families, live_stats
 
 
 def test_visible_new_today_is_source_dated_and_discovery_is_separate() -> None:
@@ -27,13 +27,19 @@ def test_visible_new_today_is_source_dated_and_discovery_is_separate() -> None:
     }
 
 
-def test_live_feed_defaults_to_any_2027_market_view() -> None:
+def test_live_feed_defaults_to_all_active_cycles() -> None:
     target = inspect.signature(live_families).parameters["target"]
-    assert target.default == "default"
+    assert target.default == ""
 
     params: list[object] = []
-    assert legacy._target_clause("default", params) == "year=%s"
-    assert params == [2027]
+    assert legacy._target_clause("", params) == "TRUE"
+    assert params == []
+
+
+def test_live_stats_cover_current_and_unknown_cycles_not_only_2027() -> None:
+    source = inspect.getsource(live_stats)
+    assert "year=2027" not in source
+    assert "year IS NULL OR year >= EXTRACT(YEAR FROM now())::int" in source
 
 
 def test_live_summer_filter_uses_year_and_season_not_classifier_label() -> None:
