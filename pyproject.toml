@@ -35,6 +35,7 @@ packages = ["src/gaia"]
 artifacts = [
   "src/gaia/frontend/*",
   "src/gaia/default_sources.yaml",
+  "src/gaia/v4_sources.yaml",
   "src/gaia/schema.sql",
 ]
 
