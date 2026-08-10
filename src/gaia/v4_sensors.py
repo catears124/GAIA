@@ -98,9 +98,22 @@ def _aware(value: datetime) -> datetime:
 
 
 def parse_sensor_time(raw: object, now: datetime) -> tuple[datetime | None, str]:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        epoch = float(raw)
+        if epoch > 10_000_000_000:
+            epoch /= 1000.0
+        if 946_684_800 <= epoch <= 4_102_444_800:
+            return datetime.fromtimestamp(epoch, tz=UTC), "timestamp"
+
     value = str(raw or "").strip()
     if not value or value.casefold() in {"-", "—", "n/a", "na", "unknown", "none"}:
         return None, "unknown"
+    if re.fullmatch(r"\d{10,13}", value):
+        epoch = float(value)
+        if epoch > 10_000_000_000:
+            epoch /= 1000.0
+        if 946_684_800 <= epoch <= 4_102_444_800:
+            return datetime.fromtimestamp(epoch, tz=UTC), "timestamp"
     lowered = value.casefold()
     if lowered in {"today", "new", "just now"}:
         return now, "day"
@@ -276,12 +289,7 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
 
 
 def _html_rows(body: str) -> list[dict[str, str]]:
-    """Parse generated HTML tables used by several high-volume trackers.
-
-    GitHub READMEs frequently use rowspan for company names, so a continuation row
-    can have one fewer cell than its header. Preserve the previous company in that
-    common case instead of dropping the role.
-    """
+    """Parse generated HTML tables used by several high-volume trackers."""
     soup = BeautifulSoup(body, "html.parser")
     rows: list[dict[str, str]] = []
     for table in soup.find_all("table"):
@@ -303,10 +311,8 @@ def _html_rows(body: str) -> list[dict[str, str]]:
             if not cells:
                 continue
             values = [_clean_text(cell.get_text(" ", strip=True)) for cell in cells]
-            nodes = list(cells)
             if len(values) == len(headers) - 1 and company_i == 0:
                 values.insert(0, "")
-                nodes.insert(0, None)
             if title_i >= len(values):
                 continue
 
@@ -359,11 +365,18 @@ def _locations(raw: Any) -> list[str]:
     return [value] if value else []
 
 
+def _cycle_text(item: dict[str, Any]) -> str:
+    raw = _value(item, "season", "cycle", "terms")
+    if isinstance(raw, (list, tuple, set)):
+        return " ".join(str(value) for value in raw).casefold()
+    return str(raw or "").casefold()
+
+
 def _mixed_cycle_is_target(item: dict[str, Any]) -> bool:
     if _value(item, "is_open", "active") is False:
         return False
-    season = str(_value(item, "season", "cycle") or "").casefold()
-    if "summer 2027" in season:
+    cycle_text = _cycle_text(item)
+    if "summer 2027" in cycle_text:
         return True
     title = str(_value(item, "title", "role", "position") or "").casefold()
     return "2027" in title and "intern" in title and not any(
@@ -424,7 +437,7 @@ def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[lis
             )
         elif (
             spec.cycle == "mixed"
-            and "summer 2027" in str(_value(item, "season", "cycle") or "").casefold()
+            and "summer 2027" in _cycle_text(item)
             and classified.target_match == "unknown"
         ):
             classified = replace(
