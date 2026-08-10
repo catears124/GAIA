@@ -4,7 +4,7 @@
   const previousFetch = window.fetch.bind(window);
   const SNAPSHOT_PATH = "/assets/last-known-inventory.json";
   const TECH_CATEGORIES = new Set([
-    "software", "ml-ai", "quant", "security", "data", "product", "other-technical",
+    "software", "ml-ai", "quant", "security", "data", "product", "hardware", "other-technical",
   ]);
   const TARGET_MATCHES = new Set(["exact", "year_confirmed", "source_confirmed"]);
   const SNAPSHOT_REFRESH_MS = 60 * 1000;
@@ -25,8 +25,11 @@
   }
 
   function itemActivity(item) {
-    const posted = parseTime(item.latest_posted_at);
-    return posted || parseTime(item.first_detected_at);
+    return parseTime(item.market_event_at) ||
+      parseTime(item.latest_posted_at) ||
+      parseTime(item.latest_sensor_reported_at) ||
+      parseTime(item.market_first_seen_at) ||
+      parseTime(item.first_detected_at);
   }
 
   function verifiedActivity(item) {
@@ -35,10 +38,6 @@
 
   function isVerified(item) {
     return Boolean(item.verified) || Number(item.direct_openings || 0) > 0;
-  }
-
-  function isDated(item) {
-    return parseTime(item.latest_posted_at) > 0;
   }
 
   function matchesTarget(item, target) {
@@ -53,9 +52,10 @@
   }
 
   function compareNewest(left, right) {
-    return Number(isVerified(right)) - Number(isVerified(left)) ||
-      Number(isDated(right)) - Number(isDated(left)) ||
-      itemActivity(right) - itemActivity(left) ||
+    // Confidence must never bury a newer market signal. Verification is only a
+    // deterministic tiebreaker when two rows have the same market timestamp.
+    return itemActivity(right) - itemActivity(left) ||
+      Number(isVerified(right)) - Number(isVerified(left)) ||
       verifiedActivity(right) - verifiedActivity(left) ||
       compareText(left.family_key, right.family_key);
   }
@@ -63,7 +63,6 @@
   function compareVerified(left, right) {
     return Number(isVerified(right)) - Number(isVerified(left)) ||
       verifiedActivity(right) - verifiedActivity(left) ||
-      Number(isDated(right)) - Number(isDated(left)) ||
       itemActivity(right) - itemActivity(left) ||
       compareText(left.family_key, right.family_key);
   }
@@ -129,22 +128,42 @@
   function statsPayload(snapshot) {
     if (!Array.isArray(snapshot?.family_index)) return null;
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    const items = snapshot.family_index.filter(item =>
-      item && typeof item === "object" && isVerified(item) && TECH_CATEGORIES.has(String(item.category || ""))
+    const all = snapshot.family_index.filter(item =>
+      item && typeof item === "object" && TECH_CATEGORIES.has(String(item.category || ""))
     );
-    const companies = new Set(items.map(item => String(item.company || "").trim().toLowerCase()).filter(Boolean));
-    const active = items.reduce((sum, item) => sum + Number(item.direct_openings || 0), 0);
-    const newFamilies = items.filter(item => parseTime(item.first_detected_at) >= cutoff).length;
+    const direct = all.filter(isVerified);
+    const leads = all.filter(item => !isVerified(item));
+    const companies = new Set(direct.map(item => String(item.company || "").trim().toLowerCase()).filter(Boolean));
+    const active = direct.reduce((sum, item) => sum + Number(item.direct_openings || 0), 0);
+    const newVerified = direct.filter(item => itemActivity(item) >= cutoff).length;
+    const marketEvents = all.filter(item => itemActivity(item) >= cutoff).length;
+    const datedSignals = all.filter(item =>
+      Math.max(parseTime(item.latest_posted_at), parseTime(item.latest_sensor_reported_at)) >= cutoff
+    ).length;
+    const discoveries = all.filter(item =>
+      Math.max(parseTime(item.market_first_seen_at), parseTime(item.first_detected_at)) >= cutoff
+    ).length;
     return {
-      role_families: items.length,
+      role_families: direct.length,
       active_listings: active,
       companies: companies.size,
-      new_today: newFamilies,
-      new_24h: newFamilies,
-      new_families_24h: newFamilies,
+      new_today: newVerified,
+      new_24h: newVerified,
+      new_verified_24h: newVerified,
+      market_events_24h: marketEvents,
+      dated_market_events_24h: datedSignals,
+      discovered_24h: discoveries,
       verified_listings: active,
-      verified_families: items.length,
-      activity_units: { new_today: "role_family", url_movement: "canonical_apply_url" },
+      verified_families: direct.length,
+      leads: leads.length,
+      lead_apps: leads.reduce((sum, item) => sum + Number(item.backstop_openings || 0), 0),
+      verification_backlog: leads.filter(item => itemActivity(item) >= Date.now() - 14 * 86400000).length,
+      activity_units: {
+        new_today: "verified_role_family_with_market_event_in_24h",
+        market_events_24h: "role_family_any_market_event",
+        dated_market_events_24h: "role_family_with_employer_or_sensor_date",
+      },
+      snapshot_stats_mode: "v4-market-first",
       stale: true,
       snapshot_generated_at: snapshot.generated_at || null,
       source_activity_at: snapshot.source_activity_at || null,
@@ -170,7 +189,7 @@
     const headers = new Headers(original.headers);
     headers.set("Content-Type", "application/json");
     headers.set("Cache-Control", "no-store");
-    headers.set("X-GAIA-Feed-Contract", "verified-first-v1");
+    headers.set("X-GAIA-Feed-Contract", "market-first-v4");
     headers.set("X-GAIA-Stale", "1");
     return new Response(JSON.stringify(payload), { status: 200, statusText: "Snapshot", headers });
   }
@@ -235,19 +254,6 @@
     staleMode = null;
     staleCachedAt = null;
   });
-
-  // app-v2's legacy reset default was "All". The product default is now verified;
-  // preserve that invariant after a reset without changing explicit user selections.
-  document.addEventListener("click", event => {
-    if (!event.target.closest("#clear-filters")) return;
-    setTimeout(() => {
-      const trust = document.querySelector("#trust");
-      if (trust && trust.value === "all") {
-        trust.value = "verified";
-        trust.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    }, 0);
-  }, true);
 
   document.addEventListener("DOMContentLoaded", ensureHealthObserver, { once: true });
 })();
