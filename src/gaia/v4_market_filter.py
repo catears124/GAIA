@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-import re
 from dataclasses import replace
+from datetime import UTC, datetime
 
 from .models import Posting
 
-SUMMER_2027_RE = re.compile(r"(?:summer\s*[-/]?\s*2027|2027\s*[-/]?\s*summer)", re.I)
-OFF_CYCLE_RE = re.compile(r"\b(?:fall|autumn|winter|spring)\b", re.I)
-YEAR_2026_RE = re.compile(r"\b2026\b")
-YEAR_2027_RE = re.compile(r"\b2027\b")
+TECH_CATEGORIES = {
+    "software",
+    "ml-ai",
+    "quant",
+    "security",
+    "data",
+    "product",
+    "hardware",
+    "other-technical",
+}
 
 
 def _clean_url(url: str) -> str:
@@ -17,28 +23,38 @@ def _clean_url(url: str) -> str:
     return url.strip().rstrip("\"'.,;>")
 
 
-def normalize_sensor_postings(postings: list[Posting]) -> list[Posting]:
-    """Apply cycle truth and URL hygiene after heterogeneous sensor parsing.
+def is_current_market_target(posting: Posting, *, now: datetime | None = None) -> bool:
+    """Return whether an active sensor row belongs in GAIA's technical market.
 
-    A repository named "Summer 2027" is useful evidence, not permission to relabel
-    an explicitly Fall/Winter/Spring role as Summer. Explicit row text always wins.
-    A combined role such as "Fall 2026 / Summer 2027" remains valid because Summer
-    2027 is explicitly present.
+    Summer 2027 is a *view/filter*, not the ingestion boundary. A live Fall 2026 or
+    Spring 2027 SWE internship is still a current internship and should appear in
+    the default market feed with its real cycle. This is the distinction the old
+    pipeline lost when it discarded everything outside the target season before
+    ranking freshness.
     """
+    if posting.target_match == "not_internship":
+        return False
+    if posting.category not in TECH_CATEGORIES:
+        return False
+    current_year = (now or datetime.now(UTC)).year
+    if posting.year is not None and posting.year < current_year:
+        return False
+    return True
+
+
+def normalize_sensor_postings(postings: list[Posting]) -> list[Posting]:
+    """Clean URL identity and de-duplicate heterogeneous market observations."""
     output: dict[tuple[str, str, str], Posting] = {}
     for posting in postings:
-        title = posting.title.strip()
-        explicit_summer = bool(SUMMER_2027_RE.search(title))
-        if OFF_CYCLE_RE.search(title) and not explicit_summer:
-            continue
-        if YEAR_2026_RE.search(title) and not YEAR_2027_RE.search(title):
-            continue
-
         cleaned_url = _clean_url(posting.apply_url)
         if not cleaned_url:
             continue
         candidate = posting if cleaned_url == posting.apply_url else replace(posting, apply_url=cleaned_url)
-        identity = (candidate.company.casefold(), candidate.title.casefold(), candidate.canonical_apply_url)
+        identity = (
+            candidate.company.casefold(),
+            candidate.title.casefold(),
+            candidate.canonical_apply_url,
+        )
         existing = output.get(identity)
         if existing is None or candidate.market_event_at > existing.market_event_at:
             output[identity] = candidate
