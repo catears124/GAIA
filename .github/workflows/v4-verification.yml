@@ -7,7 +7,9 @@ on:
       - ".github/workflows/v4-verification.yml"
       - "src/gaia/v4_sources.yaml"
       - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_migrate.py"
       - "src/gaia/v4_pipeline.py"
+      - "src/gaia/v4_verification_pipeline.py"
       - "src/gaia/v4_snapshot.py"
       - "src/gaia/models.py"
       - "tests/test_v4_*.py"
@@ -59,7 +61,7 @@ jobs:
       - name: Verify enrichment contract
         run: |
           set -euo pipefail
-          ruff check src/gaia/v4_sensors.py src/gaia/v4_pipeline.py src/gaia/v4_snapshot.py tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
+          ruff check src/gaia/v4_sensors.py src/gaia/v4_migrate.py src/gaia/v4_pipeline.py src/gaia/v4_verification_pipeline.py src/gaia/v4_snapshot.py tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
           pytest -q tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
 
       - name: Restore latest market snapshot
@@ -79,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=20s 660s \
-            python -m gaia.v4_pipeline \
+            python -m gaia.v4_verification_pipeline \
               --previous src/gaia/frontend/last-known-inventory.json \
               --output src/gaia/frontend/last-known-inventory.json \
             | tee v4-verification-summary.json
