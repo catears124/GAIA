@@ -12,6 +12,7 @@ from .models import Posting
 from .v4_invariants import validate_sensor_recall
 from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
+from .v4_openroles_sensor import fetch_all_market_sensors
 from .v4_pipeline import (
     _build_families,
     _health,
@@ -20,7 +21,6 @@ from .v4_pipeline import (
     _previous_observations,
     _validate,
 )
-from .v4_sensors import fetch_all_sensors
 from .v4_snapshot import responses as snapshot_responses
 from .v4_snapshot import stats as snapshot_stats
 
@@ -46,7 +46,7 @@ async def run(
     previous, migrated_legacy = sanitize_previous_snapshot(previous)
     started_at = datetime.now(UTC)
 
-    sensor_raw, sensor_runs = await fetch_all_sensors(concurrency=sensor_concurrency)
+    sensor_raw, sensor_runs = await fetch_all_market_sensors(concurrency=sensor_concurrency)
     normalized = normalize_sensor_postings(sensor_raw)
     sensor_postings = [posting for posting in normalized if is_current_market_target(posting)]
     sensor_by_url: dict[str, list[Posting]] = defaultdict(list)
