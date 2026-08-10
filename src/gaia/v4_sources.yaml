@@ -1,0 +1,58 @@
+# GAIA v4: low-latency market sensors.
+#
+# These feeds are discovery sensors, not verification authorities. A role may enter
+# the product as a Lead immediately and is upgraded only after GAIA independently
+# reaches the employer/ATS URL. The point is to stop pretending a slow employer
+# universe crawl is a substitute for market awareness.
+
+sensors:
+  - name: simplify-2027
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/README.md
+    priority: 100
+
+  - name: vansh-2027
+    kind: json-list
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json
+    priority: 100
+
+  - name: speedy-swe-2027-us
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md
+    priority: 95
+
+  - name: speedy-swe-2027-intl
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
+    priority: 90
+
+  - name: zapply-2027
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/zapplyjobs/Internships-2027/main/README.md
+    priority: 85
+
+  - name: sndsh404-2027
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/sndsh404/summer-2027-internships/main/README.md
+    priority: 85
+
+  - name: northwestern-quant-2027
+    kind: markdown
+    cycle: summer-2027
+    url: https://raw.githubusercontent.com/northwesternfintech/2027QuantInternships/main/README.md
+    priority: 85
+
+  # This project independently crawls thousands of employer boards and publishes a
+  # machine-readable state file. We consume it as a sensor only; direct status and
+  # dates are re-checked by GAIA before the green Employer badge is granted.
+  - name: zshah-engine-2027
+    kind: json-map
+    cycle: mixed
+    url: https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/jobs.json
+    priority: 100
