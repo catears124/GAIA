@@ -14,7 +14,12 @@ on:
       - "src/gaia/v4_verification_plan.py"
       - "src/gaia/v4_verification_pipeline.py"
       - "src/gaia/v4_snapshot.py"
+      - "src/gaia/feed_contract.py"
       - "src/gaia/models.py"
+      - "src/gaia/snapshot_fallback.py"
+      - "src/gaia/frontend/feed-contract.js"
+      - "src/gaia/frontend/index.html"
+      - "tests/test_feed_contract.py"
       - "tests/test_v4_*.py"
   schedule:
     - cron: "2,17,32,47 * * * *"
@@ -84,6 +89,9 @@ jobs:
             src/gaia/v4_verification_plan.py \
             src/gaia/v4_verification_pipeline.py \
             src/gaia/v4_snapshot.py \
+            src/gaia/feed_contract.py \
+            src/gaia/snapshot_fallback.py \
+            tests/test_feed_contract.py \
             tests/test_v4_sensors.py \
             tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
@@ -92,6 +100,7 @@ jobs:
             tests/test_v4_verification_plan.py \
             tests/test_v4_snapshot.py
           pytest -q \
+            tests/test_feed_contract.py \
             tests/test_v4_sensors.py \
             tests/test_v4_invariants.py \
             tests/test_v4_market_filter.py \
