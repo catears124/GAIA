@@ -9,6 +9,9 @@ def _family(
     hours_ago: int,
     verified: bool,
     event_kind: str = "first-seen",
+    year: int | None = 2027,
+    season: str | None = "summer",
+    target_match: str = "exact",
 ) -> dict[str, object]:
     event = datetime.now(UTC) - timedelta(hours=hours_ago)
     return {
@@ -16,9 +19,9 @@ def _family(
         "title": f"{key} Software Engineering Intern",
         "company": key,
         "category": "software",
-        "target_match": "exact",
-        "year": 2027,
-        "season": "summer",
+        "target_match": target_match,
+        "year": year,
+        "season": season,
         "locations": ["New York"],
         "opening_count": 1,
         "direct_openings": 1 if verified else 0,
@@ -48,6 +51,56 @@ def test_verified_filter_remains_strict():
     old_verified = _family("Old", hours_ago=72, verified=True)
     page = family_page([old_verified, fresh_lead], sort="newest", trust="verified")
     assert [item["family_key"] for item in page["items"]] == ["Old"]
+
+
+def test_summer_2027_filter_uses_cycle_metadata_not_classifier_label():
+    scoped = _family(
+        "Scoped",
+        hours_ago=1,
+        verified=False,
+        year=2027,
+        season="summer",
+        target_match="source_confirmed",
+    )
+    spring = _family(
+        "Spring",
+        hours_ago=1,
+        verified=False,
+        year=2027,
+        season="spring",
+        target_match="wrong_season",
+    )
+    page = family_page([scoped, spring], target="exact")
+    assert [item["family_key"] for item in page["items"]] == ["Scoped"]
+
+
+def test_any_2027_filter_keeps_spring_and_summer_2027():
+    spring = _family(
+        "Spring",
+        hours_ago=1,
+        verified=False,
+        year=2027,
+        season="spring",
+        target_match="wrong_season",
+    )
+    summer = _family(
+        "Summer",
+        hours_ago=2,
+        verified=False,
+        year=2027,
+        season="summer",
+        target_match="source_confirmed",
+    )
+    fall_2026 = _family(
+        "Fall2026",
+        hours_ago=3,
+        verified=False,
+        year=2026,
+        season="fall",
+        target_match="wrong_season",
+    )
+    page = family_page([fall_2026, summer, spring], target="default")
+    assert {item["family_key"] for item in page["items"]} == {"Spring", "Summer"}
 
 
 def test_new_verified_24h_means_recent_market_event_not_recent_crawl():
