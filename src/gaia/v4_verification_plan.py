@@ -18,6 +18,23 @@ DIRECT_BOARD_HOSTS = (
     "ashbyhq.com",
 )
 
+# These domains are useful market sensors, but loading a job detail page on them is
+# NOT independent employer verification. They can introduce or corroborate a Lead;
+# they can never be the observation that turns the badge green.
+AGGREGATOR_HOST_SUFFIXES = (
+    "simplify.jobs",
+    "speedyapply.com",
+    "openroles-ai.vercel.app",
+    "jobright.ai",
+    "linkedin.com",
+    "indeed.com",
+    "glassdoor.com",
+    "ziprecruiter.com",
+    "handshake.com",
+    "wellfound.com",
+    "levels.fyi",
+)
+
 
 def _stable_key(value: str) -> int:
     return int.from_bytes(hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest(), "big")
@@ -53,6 +70,11 @@ def _rotate_collectors(collectors: list[Collector], budget: int, *, slot: int) -
     return (ordered[start:] + ordered[:start])[:budget]
 
 
+def _aggregator_host(host: str) -> bool:
+    host = host.casefold().strip(".")
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in AGGREGATOR_HOST_SUFFIXES)
+
+
 def _hot_page_collectors(
     postings: list[Posting],
     *,
@@ -60,16 +82,23 @@ def _hot_page_collectors(
     batch_size: int,
     slot: int,
 ) -> list[Collector]:
-    """Verify exact application URLs for hosts without a cheap enumerable API.
+    """Verify exact employer/ATS URLs for hosts without a cheap enumerable API.
 
     This includes Workday. Workday board enumeration is intentionally rate-limited,
     but a newly detected Workday job should not wait hours for its tenant's turn in
     the board sweep before GAIA can validate the exact public application page.
+
+    Aggregator detail pages are explicitly excluded. Their content is evidence that
+    a role exists in the market, not independent employer evidence.
     """
     candidates: dict[str, Posting] = {}
     for posting in postings:
         host = urlsplit(posting.apply_url).netloc.casefold()
-        if not host or any(fragment in host for fragment in DIRECT_BOARD_HOSTS):
+        if not host:
+            continue
+        if any(fragment in host for fragment in DIRECT_BOARD_HOSTS):
+            continue
+        if _aggregator_host(host):
             continue
         existing = candidates.get(posting.canonical_apply_url)
         if existing is None or _posted_priority(posting) > _posted_priority(existing):
@@ -116,7 +145,7 @@ def plan_verification_collectors(
     """Build a bounded verification wave optimized for latency, not source count.
 
     Lane 1: enumerate every cheap current Greenhouse/Lever/Ashby board we know.
-    Lane 2: directly validate the hottest exact pages on all other hosts.
+    Lane 2: directly validate the hottest exact employer/ATS pages on other hosts.
     Lane 3: rotate a small Workday board budget for durable enumeration/closure.
 
     The direct-page lane means a fresh role can become verified this wave even when
