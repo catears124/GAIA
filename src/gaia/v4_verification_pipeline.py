@@ -7,8 +7,11 @@ import os
 import tempfile
 from pathlib import Path
 
+from . import v4_pipeline
+from .v4_market_filter import normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
-from .v4_pipeline import DEFAULT_INVENTORY, run as run_verification
+
+DEFAULT_INVENTORY = v4_pipeline.DEFAULT_INVENTORY
 
 
 async def run(
@@ -23,15 +26,30 @@ async def run(
         previous = {}
     sanitized, migrated = sanitize_previous_snapshot(previous)
 
-    with tempfile.TemporaryDirectory(prefix="gaia-v4-verify-") as directory:
-        safe_previous = Path(directory) / "previous.json"
-        safe_previous.write_text(json.dumps(sanitized, separators=(",", ":")), encoding="utf-8")
-        summary = await run_verification(
-            previous_path=safe_previous,
-            output_path=output_path,
-            sensor_concurrency=sensor_concurrency,
-            verify_concurrency=verify_concurrency,
-        )
+    # v4_pipeline intentionally owns the expensive employer-verification logic. Its
+    # sensor fetch is wrapped here so the exact same row-level cycle gate used by the
+    # fast market pulse also constrains the verification seed set. This keeps one
+    # source of truth without duplicating the verifier.
+    original_fetch = v4_pipeline.fetch_all_sensors
+
+    async def filtered_fetch(*args, **kwargs):
+        postings, runs = await original_fetch(*args, **kwargs)
+        return normalize_sensor_postings(postings), runs
+
+    v4_pipeline.fetch_all_sensors = filtered_fetch
+    try:
+        with tempfile.TemporaryDirectory(prefix="gaia-v4-verify-") as directory:
+            safe_previous = Path(directory) / "previous.json"
+            safe_previous.write_text(json.dumps(sanitized, separators=(",", ":")), encoding="utf-8")
+            summary = await v4_pipeline.run(
+                previous_path=safe_previous,
+                output_path=output_path,
+                sensor_concurrency=sensor_concurrency,
+                verify_concurrency=verify_concurrency,
+            )
+    finally:
+        v4_pipeline.fetch_all_sensors = original_fetch
+
     summary["legacy_snapshot_sanitized"] = migrated
     return summary
 
