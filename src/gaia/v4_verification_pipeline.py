@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from . import v4_pipeline
+from .v4_invariants import validate_sensor_recall
 from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
 from .v4_verification_plan import plan_verification_collectors
@@ -35,10 +36,15 @@ async def run(
     original_fetch = v4_pipeline.fetch_all_sensors
     original_target = v4_pipeline.is_default_target
     original_planner = v4_pipeline._verification_collectors
+    current_sensor_postings = []
 
     async def filtered_fetch(*args, **kwargs):
         postings, runs = await original_fetch(*args, **kwargs)
-        return normalize_sensor_postings(postings), runs
+        normalized = normalize_sensor_postings(postings)
+        current_sensor_postings[:] = [
+            posting for posting in normalized if is_current_market_target(posting)
+        ]
+        return normalized, runs
 
     def hot_first_plan(postings, snapshot):
         durable = v4_pipeline._seed_previous_boards(snapshot)
@@ -62,7 +68,14 @@ async def run(
         v4_pipeline.is_default_target = original_target
         v4_pipeline._verification_collectors = original_planner
 
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    families = [row for row in output.get("family_index") or [] if isinstance(row, dict)]
+    sensor_recall = validate_sensor_recall(current_sensor_postings, families)
+    output.setdefault("v4", {})["sensor_recall"] = sensor_recall
+    output_path.write_text(json.dumps(output, separators=(",", ":"), default=str), encoding="utf-8")
+
     summary["legacy_snapshot_sanitized"] = migrated
+    summary["sensor_recall"] = sensor_recall
     return summary
 
 
