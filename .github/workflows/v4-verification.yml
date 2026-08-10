@@ -1,0 +1,158 @@
+name: V4 employer verification
+
+on:
+  push:
+    branches: [main, rewrite/first-principles-v4]
+    paths:
+      - ".github/workflows/v4-verification.yml"
+      - "src/gaia/v4_sources.yaml"
+      - "src/gaia/v4_sensors.py"
+      - "src/gaia/v4_pipeline.py"
+      - "src/gaia/v4_snapshot.py"
+      - "src/gaia/models.py"
+      - "tests/test_v4_*.py"
+  schedule:
+    - cron: "2,17,32,47 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: gaia-v4-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Market sensors → employer/ATS verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    environment: production
+    env:
+      GAIA_AUTO_MIGRATE: "0"
+      GAIA_V4_SENSOR_CONCURRENCY: "12"
+      GAIA_V4_VERIFY_CONCURRENCY: "48"
+      GAIA_V4_VERIFY_TIMEOUT: "25"
+      GAIA_V4_VERIFY_COLLECTOR_LIMIT: "2000"
+      GAIA_V4_DURABLE_BOARD_LIMIT: "1200"
+      GAIA_V4_DIRECT_TTL_HOURS: "72"
+      GAIA_V4_LEAD_TTL_HOURS: "24"
+      GAIA_V4_MIN_FAMILIES: "100"
+      GAIA_V4_MIN_SENSORS: "3"
+      GAIA_V4_MAX_MARKET_AGE_HOURS: "96"
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Verify enrichment contract
+        run: |
+          set -euo pipefail
+          ruff check src/gaia/v4_sensors.py src/gaia/v4_pipeline.py src/gaia/v4_snapshot.py tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
+          pytest -q tests/test_v4_sensors.py tests/test_v4_pipeline.py tests/test_v4_snapshot.py
+
+      - name: Restore latest market snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src/gaia/frontend
+          if git fetch origin snapshot-data && \
+             git cat-file -e origin/snapshot-data:src/gaia/frontend/last-known-inventory.json 2>/dev/null; then
+            git show origin/snapshot-data:src/gaia/frontend/last-known-inventory.json \
+              > src/gaia/frontend/last-known-inventory.json
+          fi
+          test -s src/gaia/frontend/last-known-inventory.json
+
+      - name: Verify employer surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 660s \
+            python -m gaia.v4_pipeline \
+              --previous src/gaia/frontend/last-known-inventory.json \
+              --output src/gaia/frontend/last-known-inventory.json \
+            | tee v4-verification-summary.json
+
+      - name: Audit verification output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import UTC, datetime
+          from pathlib import Path
+
+          data = json.loads(Path("src/gaia/frontend/last-known-inventory.json").read_text())
+          families = data.get("family_index") or []
+          health = ((data.get("responses") or {}).get("/api/health") or {})
+          market = health.get("market") or {}
+          verification = market.get("verification") or {}
+          stats = ((data.get("responses") or {}).get("/api/stats") or {})
+          assert data.get("schema_version") == 4
+          assert len(families) >= 100
+          assert int(market.get("sensor_current") or 0) >= 3
+          assert int(verification.get("selected") or 0) > 0, verification
+
+          def ts(value):
+              return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
+
+          freshest = max((ts(row["market_event_at"]) for row in families if row.get("market_event_at")), default=None)
+          assert freshest is not None
+          print(json.dumps({
+              "families": len(families),
+              "freshest_market_event_at": freshest.isoformat(),
+              "freshest_age_hours": round((datetime.now(UTC) - freshest).total_seconds() / 3600, 3),
+              "verification_collectors": verification.get("selected"),
+              "verification_sources_refreshed": verification.get("refreshed"),
+              "verification_postings": verification.get("postings"),
+              "new_verified_24h": stats.get("new_verified_24h"),
+              "market_events_24h": stats.get("market_events_24h"),
+              "verification_backlog": stats.get("verification_backlog"),
+          }, sort_keys=True))
+          PY
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaia-v4-verification-${{ github.run_id }}
+          path: |
+            src/gaia/frontend/last-known-inventory.json
+            v4-verification-summary.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Publish enriched production snapshot
+        if: github.ref == 'refs/heads/main' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/gaia/frontend/last-known-inventory.json /tmp/last-known-inventory.json
+          git fetch origin snapshot-data
+          rm -rf /tmp/gaia-v4-verified-data
+          git worktree add /tmp/gaia-v4-verified-data origin/snapshot-data
+          destination=/tmp/gaia-v4-verified-data/src/gaia/frontend/last-known-inventory.json
+          mkdir -p "$(dirname "$destination")"
+          cp /tmp/last-known-inventory.json "$destination"
+          cd /tmp/gaia-v4-verified-data
+          if git diff --quiet -- src/gaia/frontend/last-known-inventory.json; then exit 0; fi
+          git config user.name "gaia-v4-verifier-bot"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add src/gaia/frontend/last-known-inventory.json
+          git commit -m "data: v4 employer verification"
+          for attempt in 1 2 3; do
+            if git pull --rebase origin snapshot-data && git push origin HEAD:snapshot-data; then exit 0; fi
+            sleep $((attempt * 5))
+          done
+          exit 1
