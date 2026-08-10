@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,6 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
-from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
 from .classify import classify
@@ -43,6 +42,15 @@ TIME_HEADERS = {
     "published",
     "published at",
 }
+NUFT_ROLE_NAMES = {
+    "swe": "Software Engineering Intern",
+    "qt": "Quantitative Trading Intern",
+    "qd": "Quantitative Developer Intern",
+    "qr": "Quantitative Research Intern",
+    "phd": "PhD Quantitative Research Intern",
+    "hw": "Hardware Engineering Intern",
+    "fpga": "FPGA Engineering Intern",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +66,7 @@ class SensorSpec:
         return f"sensor:{self.name}"
 
 
-@dataclass(slots=True)
+@dataclass
 class SensorRun:
     name: str
     url: str
@@ -85,23 +93,18 @@ def load_sensor_specs(path: Path = DEFAULT_CONFIG) -> list[SensorSpec]:
 
 
 def _aware(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def parse_sensor_time(raw: object, now: datetime) -> tuple[datetime | None, str]:
-    """Parse a sensor's date/age without pretending it came from the employer."""
     value = str(raw or "").strip()
     if not value or value.casefold() in {"-", "—", "n/a", "na", "unknown", "none"}:
         return None, "unknown"
-
     lowered = value.casefold()
     if lowered in {"today", "new", "just now"}:
         return now, "day"
     if lowered == "yesterday":
         return now - timedelta(days=1), "day"
-
     match = RELATIVE_RE.search(value)
     if match:
         count = int(match.group(1))
@@ -114,12 +117,10 @@ def parse_sensor_time(raw: object, now: datetime) -> tuple[datetime | None, str]
             return now - timedelta(days=count), "day"
         if unit.startswith("w"):
             return now - timedelta(weeks=count), "day"
-
     try:
-        parsed = date_parser.parse(value, fuzzy=False)
+        parsed = _aware(date_parser.parse(value, fuzzy=False))
     except (TypeError, ValueError, OverflowError):
         return None, "unknown"
-    parsed = _aware(parsed)
     precision = "timestamp" if re.search(r"\d:\d|T\d", value) else "date"
     return parsed, precision
 
@@ -128,21 +129,17 @@ def _clean_text(value: str) -> str:
     value = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", value)
     value = LINK_RE.sub(lambda match: match.group(1), value)
     value = re.sub(r"<[^>]+>", "", value)
-    value = value.replace("&nbsp;", " ")
-    return re.sub(r"\s+", " ", value).strip(" *\t")
+    return re.sub(r"\s+", " ", value.replace("&nbsp;", " ")).strip(" *\t")
 
 
 def _header(value: str) -> str:
-    value = _clean_text(value).casefold()
-    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(r"[^a-z0-9]+", " ", _clean_text(value).casefold())
     return re.sub(r"\s+", " ", value).strip()
 
 
 def _cells(line: str) -> list[str]:
     stripped = line.strip()
-    if not stripped.startswith("|"):
-        return []
-    return [cell.strip() for cell in stripped.strip("|").split("|")]
+    return [cell.strip() for cell in stripped.strip("|").split("|")] if stripped.startswith("|") else []
 
 
 def _separator(cells: list[str]) -> bool:
@@ -165,14 +162,7 @@ def _url_score(url: str) -> int:
     path = parts.path.casefold()
     if parts.scheme not in {"http", "https"} or not host:
         return -10_000
-    blocked = (
-        "github.com",
-        "discord.gg",
-        "linkedin.com/company",
-        "simplify.jobs/p/",
-        "speedyapply.com",
-    )
-    if any(fragment in url.casefold() for fragment in blocked):
+    if any(fragment in url.casefold() for fragment in ("github.com", "discord.gg", "linkedin.com/company")):
         return -1_000
     score = 0
     if any(
@@ -210,19 +200,14 @@ def _choose_url(urls: list[str]) -> str | None:
 
 
 def _index(headers: list[str], aliases: set[str]) -> int | None:
-    for index, name in enumerate(headers):
-        if name in aliases:
-            return index
-    return None
+    return next((index for index, name in enumerate(headers) if name in aliases), None)
 
 
 def _markdown_rows(body: str) -> list[dict[str, str]]:
-    """Parse ordinary internship tables plus the NUFT company-section format."""
     rows: list[dict[str, str]] = []
     headers: list[str] = []
     current_company = ""
     previous_company = ""
-
     for line in body.splitlines():
         stripped = line.strip()
         if stripped.startswith("## ") and not stripped.startswith("### "):
@@ -230,12 +215,9 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
             headers = []
             continue
         cells = _cells(line)
-        if not cells:
+        if not cells or _separator(cells):
             continue
         normalized = [_header(cell) for cell in cells]
-        if _separator(cells):
-            continue
-
         title_i = _index(normalized, TITLE_HEADERS)
         company_i = _index(normalized, COMPANY_HEADERS)
         if title_i is not None and (company_i is not None or current_company):
@@ -243,20 +225,20 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
             continue
         if not headers:
             continue
-
         title_i = _index(headers, TITLE_HEADERS)
         if title_i is None or title_i >= len(cells):
             continue
         company_i = _index(headers, COMPANY_HEADERS)
         location_i = _index(headers, LOCATION_HEADERS)
         time_i = _index(headers, TIME_HEADERS)
-
         company = _clean_text(cells[company_i]) if company_i is not None and company_i < len(cells) else current_company
         if company in {"", "↳", "—", "-", "⬆"}:
             company = previous_company or current_company
         elif company_i is not None:
             previous_company = company
         title = _clean_text(cells[title_i])
+        if company_i is None and current_company:
+            title = NUFT_ROLE_NAMES.get(title.casefold(), title)
         if not company or not title:
             continue
         location = _clean_text(cells[location_i]) if location_i is not None and location_i < len(cells) else ""
@@ -264,15 +246,7 @@ def _markdown_rows(body: str) -> list[dict[str, str]]:
         url = _choose_url(_links(line))
         if not url or "🔒" in line:
             continue
-        rows.append(
-            {
-                "company": company,
-                "title": title,
-                "location": location,
-                "timing": timing,
-                "url": url,
-            }
-        )
+        rows.append({"company": company, "title": title, "location": location, "timing": timing, "url": url})
     return rows
 
 
@@ -291,13 +265,10 @@ def _json_rows(payload: Any, spec: SensorSpec) -> list[dict[str, Any]]:
 
 
 def _value(item: dict[str, Any], *names: str) -> Any:
-    for name in names:
-        if name in item and item[name] not in (None, ""):
-            return item[name]
-    return None
+    return next((item[name] for name in names if name in item and item[name] not in (None, "")), None)
 
 
-def _location_values(raw: Any) -> list[str]:
+def _locations(raw: Any) -> list[str]:
     if isinstance(raw, list):
         return [str(value).strip() for value in raw if str(value).strip()]
     if isinstance(raw, dict):
@@ -313,53 +284,36 @@ def _mixed_cycle_is_target(item: dict[str, Any]) -> bool:
     if "summer 2027" in season:
         return True
     title = str(_value(item, "title", "role", "position") or "").casefold()
-    return "2027" in title and "intern" in title and "fall" not in title and "winter" not in title
+    return "2027" in title and "intern" in title and not any(term in title for term in ("fall", "winter", "spring"))
 
 
 def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[list[Posting], int]:
-    postings: list[Posting] = []
-
+    rows: list[dict[str, Any]]
     if spec.kind == "markdown":
-        rows: list[dict[str, Any]] = _markdown_rows(body)
+        rows = _markdown_rows(body)
     else:
-        payload = json.loads(body)
-        rows = _json_rows(payload, spec)
+        rows = _json_rows(json.loads(body), spec)
 
+    postings: list[Posting] = []
     for index, item in enumerate(rows):
         if spec.cycle == "mixed" and not _mixed_cycle_is_target(item):
             continue
         if _value(item, "is_visible") is False or _value(item, "is_open", "active") is False:
             continue
-
         company = str(_value(item, "company", "company_name", "employer") or "").strip()
         title = str(_value(item, "title", "role", "position", "job_title") or "").strip()
         url = str(_value(item, "url", "apply_url", "job_url", "application_url") or "").strip()
-        if not url and spec.kind == "markdown":
-            url = str(item.get("url") or "")
         if not company or not title or not url:
             continue
-
-        raw_time = _value(
-            item,
-            "timing",
-            "date_posted",
-            "posted_at",
-            "first_seen_at",
-            "date_added",
-            "added",
-            "age",
-        )
+        raw_time = _value(item, "timing", "date_posted", "posted_at", "first_seen_at", "date_added", "added", "age")
         sensor_at, precision = parse_sensor_time(raw_time, fetched_at)
-        source_id = str(_value(item, "id", "job_id", "source_id") or canonical_url(url))
-        locations = _location_values(_value(item, "location", "locations", "locationsText"))
-
         posting = Posting(
             company=company,
             title=title,
             apply_url=url,
             source=spec.source,
-            source_id=source_id or f"{index}:{canonical_url(url)}",
-            locations=locations,
+            source_id=str(_value(item, "id", "job_id", "source_id") or canonical_url(url) or index),
+            locations=_locations(_value(item, "location", "locations", "locationsText")),
             source_mode="market-sensor",
             sensor_reported_at=sensor_at,
             sensor_reported_raw=str(raw_time) if raw_time not in (None, "") else None,
@@ -367,21 +321,17 @@ def parse_sensor(spec: SensorSpec, body: str, fetched_at: datetime) -> tuple[lis
             sensor_confidence="source-reported" if sensor_at else "unknown",
             observed_at=fetched_at,
         )
-        if spec.cycle == "summer-2027":
-            posting.year = 2027
-            posting.season = "summer"
-        elif "summer 2027" in str(_value(item, "season", "cycle") or "").casefold():
-            posting.year = 2027
-            posting.season = "summer"
-        postings.append(classify(posting, source_confirms_2027=spec.cycle == "summer-2027"))
+        classified = classify(posting, source_confirms_2027=spec.cycle == "summer-2027")
+        if spec.cycle == "summer-2027" and classified.target_match == "unknown":
+            classified = replace(classified, year=2027, season="summer", target_match="source_confirmed")
+        elif spec.cycle == "mixed" and "summer 2027" in str(_value(item, "season", "cycle") or "").casefold():
+            if classified.target_match == "unknown":
+                classified = replace(classified, year=2027, season="summer", target_match="source_confirmed")
+        postings.append(classified)
 
     by_identity: dict[tuple[str, str, str], Posting] = {}
     for posting in postings:
-        identity = (
-            posting.company.casefold(),
-            posting.title.casefold(),
-            posting.canonical_apply_url,
-        )
+        identity = (posting.company.casefold(), posting.title.casefold(), posting.canonical_apply_url)
         existing = by_identity.get(identity)
         if existing is None or posting.market_event_at > existing.market_event_at:
             by_identity[identity] = posting
@@ -400,24 +350,9 @@ async def fetch_sensor(
             response = await client.get(spec.url)
             response.raise_for_status()
             postings, rows = parse_sensor(spec, response.text, fetched_at)
-            return postings, SensorRun(
-                name=spec.name,
-                url=spec.url,
-                status="ok",
-                rows=rows,
-                postings=len(postings),
-                fetched_at=fetched_at.isoformat(),
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad public sensor must not kill the wave
-            return [], SensorRun(
-                name=spec.name,
-                url=spec.url,
-                status="failed",
-                rows=0,
-                postings=0,
-                fetched_at=fetched_at.isoformat(),
-                error=repr(exc)[:500],
-            )
+            return postings, SensorRun(spec.name, spec.url, "ok", rows, len(postings), fetched_at.isoformat())
+        except Exception as exc:  # noqa: BLE001 - isolate one public sensor
+            return [], SensorRun(spec.name, spec.url, "failed", 0, 0, fetched_at.isoformat(), repr(exc)[:500])
 
 
 async def fetch_all_sensors(
@@ -436,10 +371,7 @@ async def fetch_all_sensors(
         follow_redirects=True,
         headers=headers,
     ) as client:
-        outcomes = await asyncio.gather(
-            *(fetch_sensor(client, spec, semaphore=semaphore) for spec in specs)
-        )
-
+        outcomes = await asyncio.gather(*(fetch_sensor(client, spec, semaphore=semaphore) for spec in specs))
     postings: list[Posting] = []
     runs: list[SensorRun] = []
     for batch, run in outcomes:
