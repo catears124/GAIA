@@ -17,7 +17,7 @@ def _remove_stats_route(app: FastAPI) -> None:
 
 
 def install_activity_api(app: FastAPI) -> None:
-    """Count discoveries as durable events, independently from current open state."""
+    """Expose posting freshness and GAIA discovery as separate durable events."""
     if getattr(app.state, "gaia_activity_api_installed", False):
         return
     app.state.gaia_activity_api_installed = True
@@ -29,48 +29,51 @@ def install_activity_api(app: FastAPI) -> None:
         from .product_api import _activity_stats
         from .universe import universe_summary
 
-        target_matches = list(legacy.TARGET_MATCHES)
         tech_categories = list(legacy.TECH_CATEGORIES)
+        current_cycle = "(year IS NULL OR year >= EXTRACT(YEAR FROM now())::int)"
         with legacy.db.connect() as connection:
             active = connection.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS role_families,
                     COALESCE(SUM(direct_openings), 0) AS active_listings,
                     COUNT(DISTINCT company) AS companies,
+                    COUNT(*) FILTER (
+                        WHERE latest_posted_at >= now() - interval '24 hours'
+                    ) AS new_families_today,
                     COALESCE(SUM(direct_openings), 0) AS verified_listings,
                     COUNT(*) AS verified_families
                 FROM families
-                WHERE target_match = ANY(%s)
+                WHERE {current_cycle}
                   AND category = ANY(%s)
                   AND direct_openings>0
                 """,
-                (target_matches, tech_categories),
+                (tech_categories,),
             ).fetchone()
             discovery = connection.execute(
-                """
-                SELECT COUNT(DISTINCT family_key) AS new_families_today
+                f"""
+                SELECT COUNT(DISTINCT family_key) AS discovered_families_today
                 FROM postings
                 WHERE first_seen_at >= now() - interval '24 hours'
                   AND source_mode='direct'
-                  AND target_match = ANY(%s)
+                  AND {current_cycle}
                   AND category = ANY(%s)
                 """,
-                (target_matches, tech_categories),
+                (tech_categories,),
             ).fetchone()
             lead_row = connection.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS leads, COALESCE(SUM(backstop_openings),0) AS lead_apps
                 FROM families
-                WHERE target_match = ANY(%s)
+                WHERE {current_cycle}
                   AND category = ANY(%s)
                   AND direct_openings=0
                   AND backstop_openings>0
                 """,
-                (target_matches, tech_categories),
+                (tech_categories,),
             ).fetchone()
             movement = connection.execute(
-                """
+                f"""
                 SELECT
                     COUNT(DISTINCT canonical_apply_url) FILTER (
                         WHERE first_seen_at >= now() - interval '24 hours'
@@ -81,10 +84,10 @@ def install_activity_api(app: FastAPI) -> None:
                     ) AS removed_urls_today
                 FROM postings
                 WHERE source_mode='direct'
-                  AND target_match = ANY(%s)
+                  AND {current_cycle}
                   AND category = ANY(%s)
                 """,
-                (target_matches, tech_categories),
+                (tech_categories,),
             ).fetchone()
             source_row = connection.execute(
                 """
@@ -101,7 +104,8 @@ def install_activity_api(app: FastAPI) -> None:
         census = universe_summary(legacy.db, limit=1)
         census_summary = dict(census.get("summary") or {})
         activity_row = {
-            "new_families_today": int(discovery["new_families_today"] or 0)
+            "new_families_today": int(active["new_families_today"] or 0),
+            "discovered_families_today": int(discovery["discovered_families_today"] or 0),
         }
         return {
             "role_families": int(active["role_families"]),
