@@ -53,6 +53,13 @@ def test_verified_filter_remains_strict():
     assert [item["family_key"] for item in page["items"]] == ["Old"]
 
 
+def test_posted_within_requires_external_date_not_gaia_discovery_time():
+    discovered_now = _family("FoundNow", hours_ago=1, verified=True, event_kind="first-seen")
+    reported_now = _family("ReportedNow", hours_ago=2, verified=True, event_kind="sensor-reported")
+    page = family_page([discovered_now, reported_now], trust="verified", posted_within=1)
+    assert [item["family_key"] for item in page["items"]] == ["ReportedNow"]
+
+
 def test_summer_2027_filter_uses_cycle_metadata_not_classifier_label():
     scoped = _family(
         "Scoped",
@@ -103,18 +110,19 @@ def test_any_2027_filter_keeps_spring_and_summer_2027():
     assert {item["family_key"] for item in page["items"]} == {"Spring", "Summer"}
 
 
-def test_new_verified_24h_means_recent_market_event_not_recent_crawl():
+def test_new_verified_24h_means_recent_external_market_date_not_recent_crawl():
     recent_verified = _family("Recent", hours_ago=4, verified=True, event_kind="employer-posted")
     old_verified = _family("Old", hours_ago=96, verified=True, event_kind="employer-posted")
     fresh_lead = _family("Lead", hours_ago=2, verified=False, event_kind="sensor-reported")
-    result = stats([recent_verified, old_verified, fresh_lead])
+    found_verified = _family("Found", hours_ago=1, verified=True, event_kind="first-seen")
+    result = stats([recent_verified, old_verified, fresh_lead, found_verified])
     assert result["new_verified_24h"] == 1
     assert result["new_today"] == 1
-    assert result["market_events_24h"] == 2
+    assert result["market_events_24h"] == 3
     assert result["dated_market_events_24h"] == 2
     assert result["employer_posted_24h"] == 1
     assert result["sensor_reported_24h"] == 1
-    assert result["first_seen_only_24h"] == 0
+    assert result["first_seen_only_24h"] == 1
 
 
 def test_first_seen_only_is_not_misreported_as_source_dated_freshness():
