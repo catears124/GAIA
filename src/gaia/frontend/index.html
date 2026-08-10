@@ -6,7 +6,7 @@
   <meta name="description" content="A continuously monitored inventory of technical internships and the employers GAIA has not covered yet.">
   <meta name="theme-color" content="#111111">
   <meta property="og:title" content="GAIA — Technical internships">
-  <meta property="og:description" content="Direct employer applications, clearly labeled leads, and an auditable employer-universe frontier.">
+  <meta property="og:description" content="Fast market detection, direct employer verification, and clearly labeled leads.">
   <meta property="og:type" content="website">
   <meta property="og:image" content="__GAIA_OG_IMAGE__">
   <meta name="twitter:card" content="summary_large_image">
@@ -35,7 +35,7 @@
       </button>
       <div id="freshness" class="freshness" aria-live="polite">
         <span class="status-dot" aria-hidden="true"></span>
-        <span>Checking inventory…</span>
+        <span>Checking market sensors…</span>
       </div>
     </div>
   </header>
@@ -48,8 +48,8 @@
           <p>constantly updating cs internships</p>
         </div>
         <div class="metrics" aria-label="Live inventory summary">
-          <div><strong id="metric-active">—</strong><span>open applications</span></div>
-          <div><strong id="metric-companies">—</strong><span>hiring companies</span></div>
+          <div><strong id="metric-active">—</strong><span>verified applications</span></div>
+          <div><strong id="metric-companies">—</strong><span>verified employers</span></div>
           <div><strong id="metric-new">—</strong><span>new verified · 24h</span></div>
         </div>
       </header>
@@ -61,13 +61,13 @@
           <kbd>/</kbd>
         </label>
         <div class="filter-grid">
-          <label><span>Confidence</span><select id="trust"><option value="verified" selected>Employer verified</option><option value="all">Verified + leads</option><option value="leads">Leads only</option></select></label>
+          <label><span>Confidence</span><select id="trust"><option value="all" selected>Verified + leads</option><option value="verified">Employer verified</option><option value="leads">Leads only</option></select></label>
           <label><span>Discipline</span><select id="category"><option value="">All technical</option><option value="software">Software</option><option value="ml-ai">ML / AI</option><option value="data">Data</option><option value="security">Security</option><option value="hardware">Hardware</option><option value="quant">Quant</option><option value="product">Product</option><option value="other-technical">Other technical</option></select></label>
           <label><span>Company</span><select id="company"><option value="">All companies</option></select></label>
           <label><span>Location</span><input id="location" type="search" placeholder="Anywhere"></label>
           <label><span>Cycle</span><select id="target"><option value="" selected>All active cycles</option><option value="default">Confirmed 2027</option><option value="exact">Summer 2027</option><option value="year_confirmed">Any 2027</option></select></label>
           <label><span>Recency</span><select id="posted-within"><option value="0" selected>Any time</option><option value="1">Past 24 hours</option><option value="7">Past week</option><option value="30">Past month</option></select></label>
-          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newest posting</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
+          <label><span>Sort</span><select id="sort"><option value="newest" selected>Newest signal</option><option value="verified">Recently checked</option><option value="company">Company A–Z</option></select></label>
           <label class="check-filter"><input id="remote" type="checkbox"><span>Remote only</span></label>
         </div>
         <div class="quick-actions" aria-label="Quick searches">
@@ -84,7 +84,7 @@
       <div class="results-head" id="results">
         <div>
           <strong id="result-count" aria-live="polite">Loading…</strong>
-          <span id="result-note">Verified employer applications first. Employer posting date controls recency; leads are secondary.</span>
+          <span id="result-note">Newest market signals first. The Employer badge appears only after GAIA independently verifies the application.</span>
         </div>
         <button id="clear-filters" class="text-button" hidden>Reset filters</button>
       </div>
@@ -147,6 +147,7 @@
   <script src="/assets/emergency-outage.js?v=2.0.0"></script>
   <script src="/assets/offline-family-detail.js?v=1.0.0"></script>
   <script src="/assets/app-v2.js?v=8.1.2" defer></script>
+  <script src="/assets/v4-ui.js?v=1.0.0" defer></script>
   <script src="/assets/app-improvements.js?v=1.1.0" defer></script>
   <script src="/assets/outage-controller.js?v=1.2.2" defer></script>
 </body>
