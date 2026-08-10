@@ -2,7 +2,7 @@ name: Stateless inventory fallback
 
 on:
   push:
-    branches: [main]
+    branches: [main, rewrite/first-principles-v4]
     paths:
       - ".github/workflows/stateless-inventory-fallback.yml"
       - "src/gaia/v4_sources.yaml"
@@ -11,6 +11,8 @@ on:
       - "src/gaia/v4_snapshot.py"
       - "src/gaia/models.py"
       - "src/gaia/snapshot_fallback.py"
+      - "src/gaia/frontend/v4-ui.js"
+      - "src/gaia/frontend/index.html"
       - "tests/test_v4_*.py"
   schedule:
     - cron: "*/5 * * * *"
