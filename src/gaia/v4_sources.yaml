@@ -15,6 +15,12 @@ sensors:
     url: https://raw.githubusercontent.com/SuryaHarikrishnan/internship-tracker/master/data/listings.json
     priority: 110
 
+  - name: simplify-offseason-2027
+    kind: markdown
+    cycle: active
+    url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/README-Off-Season.md
+    priority: 110
+
   - name: simplify-2027
     kind: markdown
     cycle: summer-2027
