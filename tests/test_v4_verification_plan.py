@@ -66,6 +66,57 @@ def test_plan_keeps_cheap_board_enumeration_and_hot_exact_pages(monkeypatch):
     assert not any(name.startswith("schema:") for name in names)
 
 
+def test_aggregator_detail_pages_can_never_grant_employer_verification(monkeypatch):
+    monkeypatch.setenv("GAIA_V4_WORKDAY_BOARD_BUDGET", "0")
+    monkeypatch.setenv("GAIA_V4_HOT_PAGE_LIMIT", "100")
+    postings = [
+        _posting(
+            "TikTok",
+            "Machine Learning Engineer Intern",
+            "https://simplify.jobs/p/abc/Machine-Learning-Engineer-Intern",
+            minutes_ago=1,
+        ),
+        _posting(
+            "Acme",
+            "Software Engineering Intern",
+            "https://www.linkedin.com/jobs/view/123",
+            minutes_ago=2,
+        ),
+        _posting(
+            "Real Employer",
+            "Software Engineering Intern",
+            "https://careers.real-employer.example/jobs/123",
+            minutes_ago=3,
+        ),
+    ]
+    collectors = plan_verification_collectors(
+        postings,
+        settings=_settings(),
+        now=datetime(2026, 8, 10, 1, 0, tzinfo=UTC),
+    )
+    names = [collector.name for collector in collectors]
+    assert not any("simplify.jobs" in name for name in names)
+    assert not any("linkedin.com" in name for name in names)
+    assert any("careers.real-employer.example" in name for name in names)
+
+
+def test_aggregator_subdomains_are_also_blocked(monkeypatch):
+    monkeypatch.setenv("GAIA_V4_WORKDAY_BOARD_BUDGET", "0")
+    collectors = plan_verification_collectors(
+        [
+            _posting(
+                "Acme",
+                "Software Engineering Intern",
+                "https://jobs.simplify.jobs/p/abc/Software-Engineering-Intern",
+                minutes_ago=1,
+            )
+        ],
+        settings=_settings(),
+        now=datetime(2026, 8, 10, 1, 0, tzinfo=UTC),
+    )
+    assert not any(collector.name.startswith("hot-page:") for collector in collectors)
+
+
 def test_workday_board_lane_is_bounded_and_rotates(monkeypatch):
     monkeypatch.setenv("GAIA_V4_WORKDAY_BOARD_BUDGET", "2")
     monkeypatch.setenv("GAIA_V4_HOT_PAGE_LIMIT", "50")
