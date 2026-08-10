@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from . import v4_pipeline
-from .v4_market_filter import normalize_sensor_postings
+from .v4_market_filter import is_current_market_target, normalize_sensor_postings
 from .v4_migrate import sanitize_previous_snapshot
 
 DEFAULT_INVENTORY = v4_pipeline.DEFAULT_INVENTORY
@@ -26,17 +26,19 @@ async def run(
         previous = {}
     sanitized, migrated = sanitize_previous_snapshot(previous)
 
-    # v4_pipeline intentionally owns the expensive employer-verification logic. Its
-    # sensor fetch is wrapped here so the exact same row-level cycle gate used by the
-    # fast market pulse also constrains the verification seed set. This keeps one
-    # source of truth without duplicating the verifier.
+    # The heavy verifier reuses v4_pipeline, but the public product now ingests the
+    # whole active technical-internship market and applies Summer 2027 only as a
+    # query filter. Patch the verifier's sensor boundary to the exact same contract
+    # so it cannot silently shrink back to Summer-2027-only while enriching leads.
     original_fetch = v4_pipeline.fetch_all_sensors
+    original_target = v4_pipeline.is_default_target
 
     async def filtered_fetch(*args, **kwargs):
         postings, runs = await original_fetch(*args, **kwargs)
         return normalize_sensor_postings(postings), runs
 
     v4_pipeline.fetch_all_sensors = filtered_fetch
+    v4_pipeline.is_default_target = is_current_market_target
     try:
         with tempfile.TemporaryDirectory(prefix="gaia-v4-verify-") as directory:
             safe_previous = Path(directory) / "previous.json"
@@ -49,6 +51,7 @@ async def run(
             )
     finally:
         v4_pipeline.fetch_all_sensors = original_fetch
+        v4_pipeline.is_default_target = original_target
 
     summary["legacy_snapshot_sanitized"] = migrated
     return summary
