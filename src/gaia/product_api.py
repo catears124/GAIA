@@ -206,7 +206,7 @@ def live_health():
 def live_families(
     q: str = Query("", max_length=200),
     category: str = "",
-    target: str = "default",
+    target: str = "",
     track: str = "tech",
     trust: str = "all",
     location: str = Query("", max_length=100),
@@ -218,7 +218,7 @@ def live_families(
     posted_within: int = Query(0, ge=0, le=365),
 ) -> dict[str, object]:
     trust = trust.strip() or "all"
-    target = target.strip() or "default"
+    target = target.strip()
     if trust not in {"verified", "leads", "all"}:
         raise HTTPException(status_code=400, detail="trust must be verified, leads, or all")
     if sort not in {"newest", "verified", "company"}:
@@ -244,16 +244,17 @@ def live_families(
 
 
 @app.get("/api/facets")
-def live_facets(trust: str = "all", target: str = "default") -> dict[str, object]:
-    return legacy.facets(trust=trust, target=target.strip() or "default")
+def live_facets(trust: str = "all", target: str = "") -> dict[str, object]:
+    return legacy.facets(trust=trust, target=target.strip())
 
 
 @app.get("/api/stats")
 def live_stats() -> dict[str, object]:
     tech_categories = list(legacy.TECH_CATEGORIES)
+    current_cycle = "(year IS NULL OR year >= EXTRACT(YEAR FROM now())::int)"
     with legacy.db.connect() as connection:
         row = connection.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS role_families,
                 COALESCE(SUM(direct_openings), 0) AS active_listings,
@@ -267,17 +268,17 @@ def live_stats() -> dict[str, object]:
                 COALESCE(SUM(direct_openings), 0) AS verified_listings,
                 COUNT(*) AS verified_families
             FROM families
-            WHERE year=2027
+            WHERE {current_cycle}
               AND category = ANY(%s)
               AND direct_openings>0
             """,
             (tech_categories,),
         ).fetchone()
         lead_row = connection.execute(
-            """
+            f"""
             SELECT COUNT(*) AS leads, COALESCE(SUM(backstop_openings),0) AS lead_apps
             FROM families
-            WHERE year=2027
+            WHERE {current_cycle}
               AND category = ANY(%s)
               AND direct_openings=0
               AND backstop_openings>0
@@ -285,7 +286,7 @@ def live_stats() -> dict[str, object]:
             (tech_categories,),
         ).fetchone()
         movement = connection.execute(
-            """
+            f"""
             SELECT
                 COUNT(DISTINCT canonical_apply_url) FILTER (
                     WHERE first_seen_at >= now() - interval '24 hours'
@@ -296,7 +297,7 @@ def live_stats() -> dict[str, object]:
                 ) AS removed_urls_today
             FROM postings
             WHERE source_mode='direct'
-              AND year=2027
+              AND {current_cycle}
               AND category = ANY(%s)
             """,
             (tech_categories,),
