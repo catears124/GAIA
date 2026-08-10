@@ -6,6 +6,15 @@
 # universe crawl is a substitute for market awareness.
 
 sensors:
+  # Multi-source aggregator refreshed several times per day. The JSON carries
+  # explicit term arrays plus source timestamps, so it is substantially more useful
+  # than scraping a rendered list and guessing when a row appeared.
+  - name: surya-multisource-2027
+    kind: json-list
+    cycle: mixed
+    url: https://raw.githubusercontent.com/SuryaHarikrishnan/internship-tracker/master/data/listings.json
+    priority: 110
+
   - name: simplify-2027
     kind: markdown
     cycle: summer-2027
@@ -18,6 +27,13 @@ sensors:
     url: https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json
     priority: 100
 
+  # Independent crawler with a machine-readable employer-job state file.
+  - name: zshah-engine-2027
+    kind: json-map
+    cycle: mixed
+    url: https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/jobs.json
+    priority: 100
+
   - name: speedy-swe-2027-us
     kind: markdown
     cycle: summer-2027
@@ -28,6 +44,20 @@ sensors:
     kind: markdown
     cycle: summer-2027
     url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
+    priority: 90
+
+  # Direct-company crawler focused on large tech employers. Mixed-cycle is
+  # intentional: GAIA only accepts rows whose title explicitly establishes 2027.
+  - name: faang-direct-crawler
+    kind: markdown
+    cycle: mixed
+    url: https://raw.githubusercontent.com/Emjumaev/FAANG-2027-Internships-Tracker/main/README.md
+    priority: 90
+
+  - name: dreamwork-direct-crawler
+    kind: markdown
+    cycle: mixed
+    url: https://raw.githubusercontent.com/dreamworkhq/Tech-Internships-2027/main/README.md
     priority: 90
 
   - name: zapply-2027
@@ -47,12 +77,3 @@ sensors:
     cycle: summer-2027
     url: https://raw.githubusercontent.com/northwesternfintech/2027QuantInternships/main/README.md
     priority: 85
-
-  # This project independently crawls thousands of employer boards and publishes a
-  # machine-readable state file. We consume it as a sensor only; direct status and
-  # dates are re-checked by GAIA before the green Employer badge is granted.
-  - name: zshah-engine-2027
-    kind: json-map
-    cycle: mixed
-    url: https://raw.githubusercontent.com/zshah101/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/main/data/jobs.json
-    priority: 100
